@@ -155,8 +155,8 @@ class BridgeConnectionManager
      * Send a message payload to a user's bridge connection.
      *
      * Supports two sending mechanisms:
-     * 1. Direct Ratchet ConnectionInterface — if the stored connection object
-     *    implements ConnectionInterface, send JSON directly.
+     * 1. Direct BridgeConnection — if the stored connection object is a
+     *    BridgeConnection instance, send JSON directly.
      * 2. Send callback — for custom transport integrations, falls back to
      *    the registered send callback.
      *
@@ -175,8 +175,8 @@ class BridgeConnectionManager
 
         $connection = $connectionData['connection'] ?? null;
 
-        // Try direct Ratchet ConnectionInterface first
-        if ($connection instanceof \Ratchet\ConnectionInterface) {
+        // Try direct BridgeConnection first
+        if ($connection instanceof \Tetrix\AiBridge\Server\BridgeConnection) {
             try {
                 $connection->send(json_encode($payload));
 

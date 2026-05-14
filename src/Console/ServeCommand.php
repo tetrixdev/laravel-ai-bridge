@@ -13,7 +13,7 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
 /**
  * Artisan command to start the dedicated WebSocket server for CLI bridge connections.
  *
- * This starts a Ratchet/ReactPHP WebSocket server on a configurable port (default 8085).
+ * This starts a ReactPHP WebSocket server on a configurable port (default 8085).
  * Bridge clients (npx @tetrixdev/ai-bridge) connect to this server.
  *
  * Usage:

@@ -6,29 +6,28 @@ namespace Tetrix\AiBridge\Server;
 
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use Ratchet\ConnectionInterface;
-use Ratchet\MessageComponentInterface;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
 
 /**
- * Ratchet WebSocket handler for CLI bridge connections.
+ * WebSocket handler for CLI bridge connections.
  *
- * Implements the Ratchet MessageComponentInterface to handle the lifecycle
- * of bridge WebSocket connections: open, message, close, error.
+ * Handles the lifecycle of bridge WebSocket connections: open, message,
+ * close, error. Works with BridgeConnection value objects provided by
+ * the BridgeWebSocketServer (react/http + ratchet/rfc6455 stack).
  *
  * On connection open, validates the JWT from the `?token=` query parameter.
  * Incoming messages are routed through the MessageHandler. Outgoing responses
  * are sent back on the same connection.
  */
-class BridgeWebSocketHandler implements MessageComponentInterface
+class BridgeWebSocketHandler
 {
     /**
-     * Map of Ratchet resource ID => connection metadata.
+     * Map of resource ID => connection metadata.
      *
-     * @var array<int, array{connection_id: string, user_id: string|null, connection: ConnectionInterface}>
+     * @var array<int, array{connection_id: string, user_id: string|null, connection: BridgeConnection}>
      */
     private array $connections = [];
 
@@ -44,13 +43,12 @@ class BridgeWebSocketHandler implements MessageComponentInterface
      * Validates the JWT from the query string. If valid, stores the connection.
      * If invalid, closes the connection with an error.
      */
-    public function onOpen(ConnectionInterface $conn): void
+    public function onOpen(BridgeConnection $conn, string $queryString): void
     {
         $resourceId = $conn->resourceId;
         $connectionId = 'bridge-' . Str::uuid()->toString();
 
         // Extract token from query string
-        $queryString = $conn->httpRequest->getUri()->getQuery();
         parse_str($queryString, $queryParams);
         $token = $queryParams['token'] ?? '';
 
@@ -103,7 +101,7 @@ class BridgeWebSocketHandler implements MessageComponentInterface
 
         // Set up send callback so BridgeConnectionManager can send messages
         $this->connectionManager->setSendCallback(function (mixed $connection, array $payload): bool {
-            if ($connection instanceof ConnectionInterface) {
+            if ($connection instanceof BridgeConnection) {
                 $connection->send(json_encode($payload));
 
                 return true;
@@ -125,7 +123,7 @@ class BridgeWebSocketHandler implements MessageComponentInterface
      * Delegates to the MessageHandler for protocol processing. If the handler
      * returns a response, it is sent back on the same connection.
      */
-    public function onMessage(ConnectionInterface $from, $msg): void
+    public function onMessage(BridgeConnection $from, string $msg): void
     {
         $resourceId = $from->resourceId;
         $meta = $this->connections[$resourceId] ?? null;
@@ -154,7 +152,7 @@ class BridgeWebSocketHandler implements MessageComponentInterface
      *
      * Cleans up connection tracking and fails any pending requests.
      */
-    public function onClose(ConnectionInterface $conn): void
+    public function onClose(BridgeConnection $conn): void
     {
         $resourceId = $conn->resourceId;
         $meta = $this->connections[$resourceId] ?? null;
@@ -185,7 +183,7 @@ class BridgeWebSocketHandler implements MessageComponentInterface
      *
      * Logs the error and closes the connection.
      */
-    public function onError(ConnectionInterface $conn, \Exception $e): void
+    public function onError(BridgeConnection $conn, \Exception $e): void
     {
         $resourceId = $conn->resourceId;
         $meta = $this->connections[$resourceId] ?? null;
