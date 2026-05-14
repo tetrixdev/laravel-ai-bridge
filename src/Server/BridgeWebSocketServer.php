@@ -100,8 +100,11 @@ class BridgeWebSocketServer
     {
         $httpBuffer = '';
         $upgraded = false;
+        $headersComplete = false;
+        $expectedBodyLength = 0;
+        $headerLength = 0;
 
-        $tcpConnection->on('data', function (string $data) use ($tcpConnection, $handler, &$httpBuffer, &$upgraded) {
+        $tcpConnection->on('data', function (string $data) use ($tcpConnection, $handler, &$httpBuffer, &$upgraded, &$headersComplete, &$expectedBodyLength, &$headerLength) {
             // If already upgraded, data is handled by the MessageBuffer (attached below).
             if ($upgraded) {
                 return;
@@ -109,8 +112,26 @@ class BridgeWebSocketServer
 
             $httpBuffer .= $data;
 
-            // Wait for the complete HTTP request (ends with \r\n\r\n)
-            if (strpos($httpBuffer, "\r\n\r\n") === false) {
+            // Phase 1: wait for headers to complete (\r\n\r\n)
+            if (! $headersComplete) {
+                $headerEnd = strpos($httpBuffer, "\r\n\r\n");
+                if ($headerEnd === false) {
+                    return;
+                }
+
+                $headersComplete = true;
+                $headerLength = $headerEnd + 4;
+
+                // Extract Content-Length from headers to know how much body to expect
+                $headerSection = substr($httpBuffer, 0, $headerEnd);
+                if (preg_match('/^Content-Length:\s*(\d+)/im', $headerSection, $m)) {
+                    $expectedBodyLength = (int) $m[1];
+                }
+            }
+
+            // Phase 2: wait for the full body (if any)
+            $receivedBodyLength = strlen($httpBuffer) - $headerLength;
+            if ($receivedBodyLength < $expectedBodyLength) {
                 return;
             }
 
