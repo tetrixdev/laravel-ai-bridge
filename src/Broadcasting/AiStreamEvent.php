@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Broadcasting;
 
-use Illuminate\Broadcasting\Channel;
-use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
+use Illuminate\Broadcasting\PrivateChannel;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 
 /**
  * Broadcasting event that carries AI stream data to Reverb.
@@ -13,12 +13,18 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcast;
  * Each StreamEvent (block_start, block_delta, block_stop, done, error, tool_call)
  * is wrapped in this class and broadcast to the specified channel.
  *
+ * Uses ShouldBroadcastNow (not ShouldBroadcast) because streaming events
+ * are latency-sensitive and must not be queued — they need to arrive in order
+ * and in real-time during the AI response.
+ *
+ * Uses PrivateChannel to enforce channel authorization via Laravel's broadcasting.
+ *
  * Clients listen for the "ai.stream" event on the channel.
  */
-class AiStreamEvent implements ShouldBroadcast
+class AiStreamEvent implements ShouldBroadcastNow
 {
     /**
-     * @param  string  $channelName  The channel to broadcast on (e.g. "game.123").
+     * @param  string  $channelName  The channel to broadcast on (e.g. "private-user.1.conversation.456").
      * @param  string  $requestId  The unique request ID for this stream.
      * @param  string  $event  The stream event type (block_start, block_delta, etc.).
      * @param  array<string, mixed>  $data  The event payload data.
@@ -33,11 +39,11 @@ class AiStreamEvent implements ShouldBroadcast
     /**
      * Get the channel the event should broadcast on.
      *
-     * @return Channel
+     * @return PrivateChannel
      */
-    public function broadcastOn(): Channel
+    public function broadcastOn(): PrivateChannel
     {
-        return new Channel($this->channelName);
+        return new PrivateChannel($this->channelName);
     }
 
     /**

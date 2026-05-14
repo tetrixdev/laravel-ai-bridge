@@ -50,19 +50,14 @@ class StreamController extends Controller
             $options['system_prompt'] = $systemPrompt;
         }
 
-        // Allow per-request overrides
+        // Allow per-request model override (safe: controls which model, not where requests go)
         if ($request->has('model')) {
             $options['model'] = $request->input('model');
         }
-        if ($request->has('api_key')) {
-            $options['api_key'] = $request->input('api_key');
-        }
-        if ($request->has('endpoint')) {
-            $options['endpoint'] = $request->input('endpoint');
-        }
-        if ($request->has('mode')) {
-            $options['mode'] = $request->input('mode');
-        }
+
+        // SEC: endpoint, api_key, and mode are NOT accepted from the request body.
+        // These are server-side configuration only — accepting them from the client
+        // would allow SSRF (endpoint), credential override (api_key), and mode switching.
 
         return $this->manager->streamToResponse($conversationId, $message, $options);
     }
@@ -82,7 +77,10 @@ class StreamController extends Controller
         $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
         $message = $request->input('message', '');
         $systemPrompt = $request->input('system_prompt', '');
-        $channel = $request->input('channel', 'conversation.' . $conversationId);
+        // SEC: Channel name is derived server-side to prevent cross-user injection.
+        // The client cannot choose which channel to broadcast on.
+        $userId = $request->user()?->getAuthIdentifier() ?? 'anon';
+        $channel = "private-user.{$userId}.conversation.{$conversationId}";
 
         $options = $request->input('options', []);
         if (is_string($options)) {
@@ -95,9 +93,6 @@ class StreamController extends Controller
 
         if ($request->has('model')) {
             $options['model'] = $request->input('model');
-        }
-        if ($request->has('mode')) {
-            $options['mode'] = $request->input('mode');
         }
 
         $requestId = $this->manager->streamAndBroadcast(

@@ -20,6 +20,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Route Middleware
+    |--------------------------------------------------------------------------
+    |
+    | Middleware applied to all AI Bridge HTTP routes. Defaults to ['auth']
+    | to ensure routes are protected out of the box. Customize this to use
+    | your app's auth guard (e.g. ['auth:sanctum'], ['auth:api']).
+    |
+    | Set to an empty array to disable default auth middleware (not recommended).
+    |
+    */
+
+    'route_middleware' => ['auth'],
+
+    /*
+    |--------------------------------------------------------------------------
     | JWT Token Settings
     |--------------------------------------------------------------------------
     |

@@ -10,24 +10,23 @@ use Tetrix\AiBridge\Http\Controllers\StreamController;
 |--------------------------------------------------------------------------
 |
 | These routes are loaded by the AiBridgeServiceProvider within the 'api'
-| middleware group. They provide HTTP endpoints for token generation,
-| bridge status checking, and AI streaming.
+| middleware group. Authentication middleware is applied by default via
+| the 'ai-bridge.route_middleware' config key (defaults to ['auth']).
 |
-| IMPORTANT: The consuming application should add its own auth middleware
-| to protect these routes. This package does not force a specific auth
-| middleware because different apps use different authentication systems
-| (Sanctum, Passport, custom, etc.). You can do this by adding middleware
-| in your app's RouteServiceProvider or by publishing and customizing
-| these routes.
+| To customize the auth middleware (e.g. for Sanctum):
+|   'route_middleware' => ['auth:sanctum'],
 |
-| Example in your app:
-|   Route::middleware(['auth:sanctum'])->group(function () {
-|       // AI Bridge routes will be available at /api/ai-bridge/*
-|   });
+| To disable the default auth middleware entirely:
+|   'route_middleware' => [],
 |
 */
 
-Route::middleware(['api'])->prefix('ai-bridge')->group(function () {
+$middleware = array_filter(array_merge(
+    ['api'],
+    (array) config('ai-bridge.route_middleware', ['auth']),
+));
+
+Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
     Route::post('/token', [BridgeController::class, 'generateToken']);
     Route::get('/status', [BridgeController::class, 'status']);
 

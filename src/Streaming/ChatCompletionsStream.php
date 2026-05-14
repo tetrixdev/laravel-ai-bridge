@@ -334,12 +334,21 @@ class ChatCompletionsStream implements StreamableProvider
             }
         }
 
-        // If we reach here without a done/finish, something went wrong
+        // If we reach here, the stream ended without a proper [DONE] sentinel.
+        // Close any open block and dispatch an appropriate terminal event.
+        if ($currentBlockType !== null) {
+            $this->streamHandler->dispatchBlockStop($currentBlockType, $blockIndex);
+        }
+
         if ($this->cancelled) {
-            if ($currentBlockType !== null) {
-                $this->streamHandler->dispatchBlockStop($currentBlockType, $blockIndex);
-            }
             $this->streamHandler->dispatchError('cancelled', 'Stream was cancelled by the user.');
+        } else {
+            // Stream ended without [DONE] — likely a connection drop or upstream error.
+            // Dispatch error so SSE/Reverb consumers don't hang indefinitely.
+            $this->streamHandler->dispatchError(
+                'stream_incomplete',
+                'Chat Completions stream ended without a [DONE] sentinel. The connection may have dropped.'
+            );
         }
     }
 }

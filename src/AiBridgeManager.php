@@ -53,8 +53,7 @@ class AiBridgeManager
      *   - 'temperature': Sampling temperature.
      *   - 'max_tokens': Maximum tokens in response.
      *   - 'model': Override the configured model.
-     *   - 'mode': Override the configured provider mode.
-     *   - 'api_key': Override the configured API key (for per-user BYOK).
+     *   - 'mode': ProviderMode enum instance for programmatic override (not from request input).
      *   - 'user_id': User ID for bridge mode (defaults to auth user).
      * @return StreamHandler
      */
@@ -290,14 +289,18 @@ class AiBridgeManager
     }
 
     /**
-     * Resolve the provider mode, allowing per-request override.
+     * Resolve the provider mode from configuration.
+     *
+     * Mode is always determined server-side from config — never from request input.
+     * The $options parameter accepts ProviderMode enum instances for programmatic
+     * override only (e.g. when the consuming app explicitly passes a mode).
      */
     private function resolveMode(array $options): ProviderMode
     {
-        if (isset($options['mode'])) {
-            return $options['mode'] instanceof ProviderMode
-                ? $options['mode']
-                : ProviderMode::from($options['mode']);
+        // Only accept ProviderMode enum instances for programmatic override,
+        // not arbitrary string values from request input.
+        if (isset($options['mode']) && $options['mode'] instanceof ProviderMode) {
+            return $options['mode'];
         }
 
         return $this->mode();
@@ -349,8 +352,10 @@ class AiBridgeManager
      */
     private function createChatCompletionsProvider(array $options): ChatCompletionsStream
     {
-        $endpoint = $options['endpoint'] ?? config('ai-bridge.chat_completions.endpoint');
-        $apiKey = $options['api_key'] ?? config('ai-bridge.chat_completions.api_key');
+        // SEC: endpoint and api_key are always read from config — never from request options.
+        // Accepting these from the client would enable SSRF (endpoint) and credential override (api_key).
+        $endpoint = config('ai-bridge.chat_completions.endpoint');
+        $apiKey = config('ai-bridge.chat_completions.api_key');
         $model = $options['model'] ?? config('ai-bridge.chat_completions.model');
         $maxTokens = $options['max_tokens'] ?? (int) config('ai-bridge.chat_completions.max_tokens', 4096);
 

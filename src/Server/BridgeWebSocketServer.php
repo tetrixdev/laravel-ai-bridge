@@ -360,7 +360,7 @@ class BridgeWebSocketServer
 
         // Route to endpoints
         match (true) {
-            $method === 'GET' && $path === '/api/status' => $this->apiStatus($tcpConnection),
+            $method === 'GET' && $path === '/api/status' => $this->apiStatus($tcpConnection, $decoded),
             $method === 'POST' && $path === '/api/request' => $this->apiRequest($tcpConnection, $request, $decoded),
             default => $this->httpResponse($tcpConnection, 404, [
                 'error' => 'not_found',
@@ -370,29 +370,39 @@ class BridgeWebSocketServer
     }
 
     /**
-     * GET /api/status — Return connected users and their connection metadata.
+     * GET /api/status — Return connection status for the authenticated user only.
+     *
+     * SEC: Only shows the requesting user's own connection data, not all users.
      */
-    private function apiStatus(ConnectionInterface $tcpConnection): void
+    private function apiStatus(ConnectionInterface $tcpConnection, object $decoded): void
     {
-        $userIds = $this->connectionManager->connectedUserIds();
-        $connections = [];
+        $userId = (string) ($decoded->sub ?? '');
 
-        foreach ($userIds as $userId) {
+        if (empty($userId)) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'missing_subject',
+                'message' => 'Token is missing the "sub" claim.',
+            ]);
+
+            return;
+        }
+
+        $connected = $this->connectionManager->hasConnection($userId);
+        $response = [
+            'user_id' => $userId,
+            'connected' => $connected,
+        ];
+
+        if ($connected) {
             $data = $this->connectionManager->getConnection($userId);
             $providers = $this->connectionManager->getProviders($userId);
 
-            $connections[] = [
-                'user_id' => $userId,
-                'connection_id' => $data['connection_id'] ?? null,
-                'connected_at' => $data['connected_at'] ?? null,
-                'providers' => $providers,
-            ];
+            $response['connection_id'] = $data['connection_id'] ?? null;
+            $response['connected_at'] = $data['connected_at'] ?? null;
+            $response['providers'] = $providers;
         }
 
-        $this->httpResponse($tcpConnection, 200, [
-            'connections' => $connections,
-            'count' => count($connections),
-        ]);
+        $this->httpResponse($tcpConnection, 200, $response);
     }
 
     /**
@@ -400,13 +410,14 @@ class BridgeWebSocketServer
      *
      * Expected body:
      * {
-     *   "user_id": "1",
      *   "provider": "claude",
      *   "message": "Hello!",
      *   "conversation_id": "conv-001",
      *   "system_prompt": "You are helpful.",
      *   "options": { "max_tokens": 100 }
      * }
+     *
+     * The user_id is derived from the JWT sub claim — never from the request body.
      */
     private function apiRequest(ConnectionInterface $tcpConnection, RequestInterface $request, object $decoded): void
     {
@@ -422,8 +433,9 @@ class BridgeWebSocketServer
             return;
         }
 
-        // The user_id can be specified in the body, or default to the token's sub
-        $userId = (string) ($body['user_id'] ?? $decoded->sub ?? '');
+        // SEC: user_id is always derived from the JWT sub claim, not the request body.
+        // This prevents users from impersonating other users' bridge connections.
+        $userId = (string) ($decoded->sub ?? '');
         $provider = $body['provider'] ?? '';
         $message = $body['message'] ?? '';
         $conversationId = $body['conversation_id'] ?? '';
@@ -438,10 +450,10 @@ class BridgeWebSocketServer
         }
 
         if (! $this->connectionManager->hasConnection($userId)) {
+            // SEC: Don't leak connected user IDs in error responses
             $this->httpResponse($tcpConnection, 404, [
                 'error' => 'bridge_not_connected',
-                'message' => "No active bridge connection for user '{$userId}'.",
-                'connected_users' => $this->connectionManager->connectedUserIds(),
+                'message' => 'No active bridge connection for this user.',
             ]);
 
             return;

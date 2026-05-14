@@ -23,8 +23,10 @@ class GenerateTokenCommand extends Command
 
     public function handle(TokenManager $manager): int
     {
+        $ttl = (int) $this->option('ttl');
+
         try {
-            $token = $manager->generate($this->option('user-id'));
+            $token = $manager->generate($this->option('user-id'), [], $ttl > 0 ? $ttl : null);
         } catch (\InvalidArgumentException $e) {
             $this->error($e->getMessage());
             $this->newLine();
@@ -33,11 +35,13 @@ class GenerateTokenCommand extends Command
             return 1;
         }
 
+        $port = (int) config('ai-bridge.server.port', 8085);
+
         $this->info('Token generated:');
         $this->line($token);
         $this->newLine();
         $this->info('Use with bridge:');
-        $this->line("npx @tetrixdev/ai-bridge --server=ws://localhost:8080/ai-bridge/ws --token={$token}");
+        $this->line("npx @tetrixdev/ai-bridge --server=ws://localhost:{$port}/ai-bridge/ws --token={$token}");
 
         return 0;
     }

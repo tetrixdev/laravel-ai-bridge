@@ -27,11 +27,12 @@ class TokenManager
      *
      * @param  int|string  $userId  The authenticated user's ID.
      * @param  array<string, mixed>  $claims  Additional claims to embed in the token.
+     * @param  int|null  $ttl  TTL in seconds. Defaults to the configured TTL if null.
      * @return string  The encoded JWT.
      *
      * @throws InvalidArgumentException If the token secret is not configured.
      */
-    public function generate(int|string $userId, array $claims = []): string
+    public function generate(int|string $userId, array $claims = [], ?int $ttl = null): string
     {
         $this->ensureSecretConfigured();
 
@@ -40,7 +41,7 @@ class TokenManager
         $payload = array_merge($claims, [
             'sub' => (string) $userId,
             'iat' => $now,
-            'exp' => $now + $this->getTtl(),
+            'exp' => $now + ($ttl ?? $this->getTtl()),
             'jti' => Str::uuid()->toString(),
             'iss' => 'ai-bridge',
         ]);

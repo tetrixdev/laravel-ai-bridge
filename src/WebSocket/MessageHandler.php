@@ -452,6 +452,9 @@ class MessageHandler
 
     /**
      * Handle a 'cancelled' message — bridge acknowledges cancellation.
+     *
+     * Dispatches an error event to the StreamHandler so consumers (SSE, Reverb)
+     * receive a terminal event and don't hang waiting for done.
      */
     private function handleCancelled(string $connectionId, array $message): ?array
     {
@@ -461,6 +464,11 @@ class MessageHandler
             'connection_id' => $connectionId,
             'request_id' => $requestId,
         ]);
+
+        $handler = $this->connectionManager->getPendingRequest($requestId);
+        if ($handler) {
+            $handler->dispatchError('cancelled', 'Request was cancelled.');
+        }
 
         $this->connectionManager->removePendingRequest($requestId);
 

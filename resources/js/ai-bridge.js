@@ -24,6 +24,7 @@ class AiBridgeStream {
         this.listeners = {};
         this._reader = null;
         this._abortController = null;
+        this._finished = false; // Guard against emitting done/error after stream ends
 
         if (this.mode === 'reverb' && this.channel && typeof window.Echo !== 'undefined') {
             this._listenReverb();
@@ -65,11 +66,17 @@ class AiBridgeStream {
 
     /**
      * Abort the current SSE stream.
+     * Emits a 'cancelled' event so the UI receives a terminal event and doesn't hang.
      */
     abort() {
         if (this._abortController) {
             this._abortController.abort();
             this._abortController = null;
+        }
+        if (!this._finished) {
+            this._finished = true;
+            this._emit('cancelled');
+            this._emit('done', null);
         }
     }
 
@@ -82,7 +89,12 @@ class AiBridgeStream {
 
     /** @private */
     async _sendSSE(data) {
-        this.abort();
+        // Reset state for new request (abort previous without emitting done)
+        if (this._abortController) {
+            this._abortController.abort();
+            this._abortController = null;
+        }
+        this._finished = false;
         this._abortController = new AbortController();
 
         try {
@@ -120,7 +132,10 @@ class AiBridgeStream {
 
                     const payload = trimmed.slice(6);
                     if (payload === '[DONE]') {
-                        this._emit('done', null);
+                        if (!this._finished) {
+                            this._finished = true;
+                            this._emit('done', null);
+                        }
                         return;
                     }
 
@@ -166,7 +181,8 @@ class AiBridgeStream {
     _listenReverb() {
         if (typeof window.Echo === 'undefined') return;
 
-        window.Echo.channel(this.channel)
+        // Use private channel for authorization (matches server-side PrivateChannel)
+        window.Echo.private(this.channel)
             .listen('.ai.stream', (e) => {
                 this._handleEvent(e);
             });
@@ -198,7 +214,10 @@ class AiBridgeStream {
                 this._emit('tool_call', data.tool_name, data.parameters || {});
                 break;
             case 'done':
-                this._emit('done', data.usage || null);
+                if (!this._finished) {
+                    this._finished = true;
+                    this._emit('done', data.usage || null);
+                }
                 break;
             case 'error':
                 this._emit('error', data.code || 'unknown', data.message || 'Unknown error');

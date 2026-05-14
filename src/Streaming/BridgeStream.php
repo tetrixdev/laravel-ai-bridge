@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Streaming;
 
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
@@ -23,10 +25,18 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * returns immediately after sending the ai_request. Events arrive asynchronously via
  * the WebSocket server and are dispatched to the StreamHandler by the MessageHandler.
  *
- * The actual WebSocket transport depends on the consuming app's WebSocket server
- * (e.g. Laravel Reverb, Ratchet, Swoole). This class provides the message
- * structure and event routing; the transport integration is handled by the
- * BridgeConnectionManager.
+ * ## PHP-FPM vs Long-Running Process
+ *
+ * When running under a long-running process (e.g. the bridge WebSocket server itself,
+ * Octane, or Swoole), BridgeConnectionManager holds connections in-memory and start()
+ * can send directly via the WebSocket.
+ *
+ * Under PHP-FPM (shared-nothing model), the BridgeConnectionManager is empty because
+ * the WebSocket server runs in a separate process. In this case, BridgeStream falls
+ * back to relaying the request through the bridge server's internal HTTP API
+ * (POST /api/request on the configured server port). The response events still arrive
+ * asynchronously via the WebSocket server and must be delivered to the client via
+ * broadcasting (Reverb), NOT SSE (which requires a blocking connection).
  */
 class BridgeStream implements StreamableProvider
 {
@@ -176,42 +186,104 @@ class BridgeStream implements StreamableProvider
         $this->cancelled = false;
         $this->completed = false;
 
-        // Verify the user has an active bridge connection
-        if (! $this->connectionManager->hasConnection($this->userId)) {
-            $this->streamHandler->dispatchError(
-                'bridge_not_connected',
-                'No active bridge connection for this user.'
-            );
-
-            return;
-        }
-
         $payload = $this->buildRequestPayload();
 
-        // Send the AI request to the bridge via WebSocket
-        $sent = $this->connectionManager->sendToUser($this->userId, $payload);
+        // Try direct WebSocket send first (works in long-running processes like
+        // the bridge server itself, Octane, or Swoole where connections are in-memory).
+        if ($this->connectionManager->hasConnection($this->userId)) {
+            $sent = $this->connectionManager->sendToUser($this->userId, $payload);
 
-        if (! $sent) {
-            $this->streamHandler->dispatchError(
-                'bridge_send_failed',
-                'Failed to send request to bridge.'
+            if (! $sent) {
+                $this->streamHandler->dispatchError(
+                    'bridge_send_failed',
+                    'Failed to send request to bridge.'
+                );
+
+                return;
+            }
+
+            // Register this stream as a pending request so incoming WebSocket
+            // messages can be routed to the correct StreamHandler.
+            $this->connectionManager->registerPendingRequest(
+                $this->streamHandler->requestId,
+                $this->streamHandler,
+                (string) $this->userId,
             );
 
             return;
         }
 
-        // Register this stream as a pending request so incoming WebSocket
-        // messages can be routed to the correct StreamHandler.
-        $this->connectionManager->registerPendingRequest(
-            $this->streamHandler->requestId,
-            $this->streamHandler,
-            (string) $this->userId,
-        );
+        // Fallback: relay through the bridge server's internal HTTP API.
+        // This is the PHP-FPM path — the ConnectionManager is empty because
+        // the WebSocket server runs in a separate process.
+        $this->relayViaHttpApi($payload);
+    }
 
-        // The actual streaming happens asynchronously via the WebSocket server.
-        // The MessageHandler will call dispatchEvent() on this StreamHandler
-        // as messages arrive from the bridge. In a synchronous context (e.g. testing),
-        // the connection manager may process messages inline.
+    /**
+     * Relay an ai_request through the bridge server's internal HTTP API.
+     *
+     * Used under PHP-FPM where the WebSocket server is a separate process.
+     * The internal API at POST /api/request accepts the request and forwards
+     * it to the connected bridge client.
+     *
+     * NOTE: Response events arrive asynchronously via the WebSocket server.
+     * For SSE mode, this means the response will be empty — use broadcasting
+     * (Reverb) mode when running under PHP-FPM with bridge mode.
+     */
+    private function relayViaHttpApi(array $payload): void
+    {
+        $host = config('ai-bridge.server.host', '127.0.0.1');
+        $port = (int) config('ai-bridge.server.port', 8085);
+        $tokenSecret = config('ai-bridge.token.secret', '');
+
+        // Use 127.0.0.1 for localhost connections (0.0.0.0 is a listen address, not connectable)
+        if ($host === '0.0.0.0') {
+            $host = '127.0.0.1';
+        }
+
+        $url = "http://{$host}:{$port}/api/request";
+
+        try {
+            // Generate a short-lived token for internal API auth
+            $tokenManager = app(\Tetrix\AiBridge\Auth\TokenManager::class);
+            $internalToken = $tokenManager->generate($this->userId, [], 60);
+
+            $response = Http::withToken($internalToken)
+                ->timeout(5)
+                ->post($url, [
+                    'provider' => $payload['provider'] ?? '',
+                    'message' => $payload['message'] ?? '',
+                    'conversation_id' => $payload['conversation_id'] ?? '',
+                    'system_prompt' => $payload['system_prompt'] ?? null,
+                    'options' => $payload['options'] ?? [],
+                    'messages' => $payload['messages'] ?? null,
+                ]);
+
+            if ($response->failed()) {
+                $body = $response->json();
+                $error = $body['error'] ?? 'unknown';
+                $message = $body['message'] ?? "HTTP API returned status {$response->status()}";
+
+                $this->streamHandler->dispatchError($error, $message);
+
+                return;
+            }
+
+            // Request was accepted by the bridge server. Events will arrive
+            // asynchronously via WebSocket → MessageHandler → broadcasting.
+            // NOTE: In SSE mode, the caller will NOT receive these events
+            // because the HTTP response has already been sent. Use broadcasting mode.
+            Log::debug('AI Bridge: relayed request via HTTP API', [
+                'request_id' => $payload['request_id'] ?? '',
+                'user_id' => $this->userId,
+            ]);
+
+        } catch (\Exception $e) {
+            $this->streamHandler->dispatchError(
+                'bridge_relay_failed',
+                'Failed to relay request to bridge server: ' . $e->getMessage()
+            );
+        }
     }
 
     public function cancel(): void

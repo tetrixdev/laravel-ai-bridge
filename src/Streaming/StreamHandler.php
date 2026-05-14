@@ -341,19 +341,31 @@ class StreamHandler
     public function dispatchEvent(StreamEvent $event): void
     {
         match ($event->event) {
-            MessageTypes::BLOCK_START => $this->dispatchBlockStart(
-                BlockType::from($event->data['block_type']),
-                $event->data['block_index'],
-            ),
-            MessageTypes::BLOCK_DELTA => $this->dispatchBlockDelta(
-                BlockType::from($event->data['block_type']),
-                $event->data['block_index'],
-                $event->data['content'] ?? '',
-            ),
-            MessageTypes::BLOCK_STOP => $this->dispatchBlockStop(
-                BlockType::from($event->data['block_type']),
-                $event->data['block_index'],
-            ),
+            MessageTypes::BLOCK_START => (function () use ($event) {
+                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+                if ($blockType === null) {
+                    Log::warning('AI Bridge: unknown block_type in block_start, skipping', [
+                        'request_id' => $this->requestId,
+                        'block_type' => $event->data['block_type'] ?? '',
+                    ]);
+                    return;
+                }
+                $this->dispatchBlockStart($blockType, $event->data['block_index']);
+            })(),
+            MessageTypes::BLOCK_DELTA => (function () use ($event) {
+                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+                if ($blockType === null) {
+                    return; // Silently skip — warning already logged on block_start
+                }
+                $this->dispatchBlockDelta($blockType, $event->data['block_index'], $event->data['content'] ?? '');
+            })(),
+            MessageTypes::BLOCK_STOP => (function () use ($event) {
+                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+                if ($blockType === null) {
+                    return; // Silently skip — warning already logged on block_start
+                }
+                $this->dispatchBlockStop($blockType, $event->data['block_index']);
+            })(),
             MessageTypes::TOOL_CALL => $this->dispatchToolCall(
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
