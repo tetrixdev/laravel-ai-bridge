@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge\Server;
 
 use GuzzleHttp\Psr7\Message;
 use Psr\Http\Message\RequestInterface;
+use GuzzleHttp\Psr7\HttpFactory;
 use Ratchet\RFC6455\Handshake\RequestVerifier;
 use Ratchet\RFC6455\Handshake\ServerNegotiator;
 use Ratchet\RFC6455\Messaging\CloseFrameChecker;
@@ -66,7 +67,7 @@ class BridgeWebSocketServer
     {
         $this->loop = Loop::get();
 
-        $this->negotiator = new ServerNegotiator(new RequestVerifier());
+        $this->negotiator = new ServerNegotiator(new RequestVerifier(), new HttpFactory());
 
         $handler = new BridgeWebSocketHandler(
             $this->connectionManager,
