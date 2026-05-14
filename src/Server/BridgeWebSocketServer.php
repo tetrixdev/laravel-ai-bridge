@@ -128,6 +128,13 @@ class BridgeWebSocketServer
 
             $httpBuffer = '';
 
+            // Check if this is a WebSocket upgrade request or a plain HTTP request
+            if (! $this->isWebSocketUpgrade($request)) {
+                $this->handleHttpRequest($tcpConnection, $request);
+
+                return;
+            }
+
             $this->upgradeConnection($tcpConnection, $request, $handler);
         });
     }
@@ -260,5 +267,220 @@ class BridgeWebSocketServer
     public function getPort(): int
     {
         return $this->port;
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal HTTP API
+    // -------------------------------------------------------------------------
+    // The bridge server accepts plain HTTP requests alongside WebSocket
+    // connections. This allows the web app (PHP-FPM) to communicate with
+    // connected bridge clients through the same port.
+    //
+    // Endpoints:
+    //   POST /api/request   — Send an ai_request to a user's bridge
+    //   GET  /api/status    — Check connected users
+    //   GET  /api/health    — Health check
+    // -------------------------------------------------------------------------
+
+    /**
+     * Check whether the HTTP request is a WebSocket upgrade.
+     */
+    private function isWebSocketUpgrade(RequestInterface $request): bool
+    {
+        $upgrade = strtolower($request->getHeaderLine('Upgrade'));
+
+        return $upgrade === 'websocket';
+    }
+
+    /**
+     * Handle a plain HTTP request (non-WebSocket).
+     *
+     * Routes to internal API endpoints for inter-process communication.
+     * Validates Bearer token authentication on protected endpoints.
+     */
+    private function handleHttpRequest(ConnectionInterface $tcpConnection, RequestInterface $request): void
+    {
+        $method = strtoupper($request->getMethod());
+        $path = $request->getUri()->getPath();
+
+        // Health check — no auth required
+        if ($method === 'GET' && $path === '/api/health') {
+            $this->httpResponse($tcpConnection, 200, [
+                'status' => 'ok',
+                'connections' => $this->connectionManager->connectionCount(),
+            ]);
+
+            return;
+        }
+
+        // Validate Bearer token for protected endpoints
+        $authHeader = $request->getHeaderLine('Authorization');
+        if (! str_starts_with($authHeader, 'Bearer ')) {
+            $this->httpResponse($tcpConnection, 401, [
+                'error' => 'missing_token',
+                'message' => 'Authorization header with Bearer token required.',
+            ]);
+
+            return;
+        }
+
+        $token = substr($authHeader, 7);
+
+        try {
+            $decoded = $this->tokenManager->validate($token);
+        } catch (\Throwable $e) {
+            $this->httpResponse($tcpConnection, 401, [
+                'error' => 'invalid_token',
+                'message' => $e->getMessage(),
+            ]);
+
+            return;
+        }
+
+        // Route to endpoints
+        match (true) {
+            $method === 'GET' && $path === '/api/status' => $this->apiStatus($tcpConnection),
+            $method === 'POST' && $path === '/api/request' => $this->apiRequest($tcpConnection, $request, $decoded),
+            default => $this->httpResponse($tcpConnection, 404, [
+                'error' => 'not_found',
+                'message' => "Unknown endpoint: {$method} {$path}",
+            ]),
+        };
+    }
+
+    /**
+     * GET /api/status — Return connected users and their connection metadata.
+     */
+    private function apiStatus(ConnectionInterface $tcpConnection): void
+    {
+        $userIds = $this->connectionManager->connectedUserIds();
+        $connections = [];
+
+        foreach ($userIds as $userId) {
+            $data = $this->connectionManager->getConnection($userId);
+            $connections[] = [
+                'user_id' => $userId,
+                'connection_id' => $data['connection_id'] ?? null,
+                'connected_at' => $data['connected_at'] ?? null,
+            ];
+        }
+
+        $this->httpResponse($tcpConnection, 200, [
+            'connections' => $connections,
+            'count' => count($connections),
+        ]);
+    }
+
+    /**
+     * POST /api/request — Send an ai_request to a user's connected bridge.
+     *
+     * Expected body:
+     * {
+     *   "user_id": "1",
+     *   "provider": "claude",
+     *   "message": "Hello!",
+     *   "conversation_id": "conv-001",
+     *   "system_prompt": "You are helpful.",
+     *   "options": { "max_tokens": 100 }
+     * }
+     */
+    private function apiRequest(ConnectionInterface $tcpConnection, RequestInterface $request, object $decoded): void
+    {
+        $body = json_decode((string) $request->getBody(), true);
+
+        if (! is_array($body)) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'invalid_body',
+                'message' => 'Request body must be valid JSON.',
+            ]);
+
+            return;
+        }
+
+        // The user_id can be specified in the body, or default to the token's sub
+        $userId = (string) ($body['user_id'] ?? $decoded->sub ?? '');
+        $provider = $body['provider'] ?? '';
+        $message = $body['message'] ?? '';
+        $conversationId = $body['conversation_id'] ?? '';
+
+        if (empty($provider) || empty($message)) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'missing_fields',
+                'message' => 'Fields "provider" and "message" are required.',
+            ]);
+
+            return;
+        }
+
+        if (! $this->connectionManager->hasConnection($userId)) {
+            $this->httpResponse($tcpConnection, 404, [
+                'error' => 'bridge_not_connected',
+                'message' => "No active bridge connection for user '{$userId}'.",
+                'connected_users' => $this->connectionManager->connectedUserIds(),
+            ]);
+
+            return;
+        }
+
+        // Build ai_request payload
+        $requestId = 'req-' . bin2hex(random_bytes(8));
+        $payload = [
+            'type' => 'ai_request',
+            'request_id' => $requestId,
+            'provider' => $provider,
+            'conversation_id' => $conversationId,
+            'message' => $message,
+            'options' => $body['options'] ?? [],
+        ];
+
+        if (isset($body['system_prompt'])) {
+            $payload['system_prompt'] = $body['system_prompt'];
+        }
+
+        if (isset($body['messages'])) {
+            $payload['messages'] = $body['messages'];
+        }
+
+        $sent = $this->connectionManager->sendToUser($userId, $payload);
+
+        if (! $sent) {
+            $this->httpResponse($tcpConnection, 500, [
+                'error' => 'send_failed',
+                'message' => 'Failed to send ai_request to bridge.',
+            ]);
+
+            return;
+        }
+
+        $this->httpResponse($tcpConnection, 200, [
+            'ok' => true,
+            'request_id' => $requestId,
+            'user_id' => $userId,
+            'provider' => $provider,
+        ]);
+    }
+
+    /**
+     * Send an HTTP JSON response on the TCP connection and close it.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function httpResponse(ConnectionInterface $tcpConnection, int $statusCode, array $data): void
+    {
+        $statusTexts = [200 => 'OK', 400 => 'Bad Request', 401 => 'Unauthorized', 404 => 'Not Found', 500 => 'Internal Server Error'];
+        $statusText = $statusTexts[$statusCode] ?? 'Unknown';
+
+        $json = json_encode($data, JSON_UNESCAPED_SLASHES);
+        $length = strlen($json);
+
+        $response = "HTTP/1.1 {$statusCode} {$statusText}\r\n" .
+            "Content-Type: application/json\r\n" .
+            "Content-Length: {$length}\r\n" .
+            "Connection: close\r\n" .
+            "\r\n" .
+            $json;
+
+        $tcpConnection->write($response);
+        $tcpConnection->end();
     }
 }
