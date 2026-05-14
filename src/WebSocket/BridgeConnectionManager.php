@@ -162,7 +162,7 @@ class BridgeConnectionManager
     {
         foreach ($this->connections as $userId => $data) {
             if ($data['connection_id'] === $connectionId) {
-                return $userId;
+                return (string) $userId;
             }
         }
 
