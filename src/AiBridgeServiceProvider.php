@@ -54,6 +54,7 @@ class AiBridgeServiceProvider extends ServiceProvider
             return new AiBridgeManager(
                 $app->make(ToolRegistry::class),
                 $app->make(BridgeConnectionManager::class),
+                $app->make(TokenManager::class),
             );
         });
     }
