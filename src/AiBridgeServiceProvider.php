@@ -1,0 +1,73 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tetrix\AiBridge;
+
+use Illuminate\Support\ServiceProvider;
+use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Tools\ToolRegistry;
+use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
+use Tetrix\AiBridge\WebSocket\MessageHandler;
+
+/**
+ * Laravel service provider for the AI Bridge package.
+ *
+ * Registers config, routes, and binds all core services as singletons.
+ */
+class AiBridgeServiceProvider extends ServiceProvider
+{
+    /**
+     * Register services.
+     */
+    public function register(): void
+    {
+        // Merge package config with app config
+        $this->mergeConfigFrom(
+            __DIR__.'/../config/ai-bridge.php',
+            'ai-bridge'
+        );
+
+        // Bind core services as singletons
+        $this->app->singleton(ToolRegistry::class, function () {
+            return new ToolRegistry();
+        });
+
+        $this->app->singleton(TokenManager::class, function () {
+            return new TokenManager();
+        });
+
+        $this->app->singleton(BridgeConnectionManager::class, function () {
+            return new BridgeConnectionManager();
+        });
+
+        $this->app->singleton(MessageHandler::class, function ($app) {
+            return new MessageHandler(
+                $app->make(BridgeConnectionManager::class),
+                $app->make(TokenManager::class),
+                $app->make(ToolRegistry::class),
+            );
+        });
+
+        $this->app->singleton(AiBridgeManager::class, function ($app) {
+            return new AiBridgeManager(
+                $app->make(ToolRegistry::class),
+                $app->make(BridgeConnectionManager::class),
+            );
+        });
+    }
+
+    /**
+     * Bootstrap services.
+     */
+    public function boot(): void
+    {
+        // Publish config
+        $this->publishes([
+            __DIR__.'/../config/ai-bridge.php' => config_path('ai-bridge.php'),
+        ], 'ai-bridge-config');
+
+        // Register routes
+        $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
+    }
+}

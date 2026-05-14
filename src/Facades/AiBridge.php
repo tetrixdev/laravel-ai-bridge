@@ -1,0 +1,38 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tetrix\AiBridge\Facades;
+
+use Closure;
+use Illuminate\Support\Facades\Facade;
+use Tetrix\AiBridge\AiBridgeManager;
+use Tetrix\AiBridge\Contracts\ToolHandler;
+use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Streaming\StreamHandler;
+use Tetrix\AiBridge\Tools\ToolRegistry;
+use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
+
+/**
+ * Facade for the AiBridgeManager.
+ *
+ * @method static StreamHandler stream(string $conversationId, string $message, array $options = [])
+ * @method static AiBridgeManager registerTool(string $name, string $description, array $parameters, Closure $handler)
+ * @method static AiBridgeManager registerToolHandler(ToolHandler $handler)
+ * @method static ToolRegistry tools()
+ * @method static BridgeConnectionManager connections()
+ * @method static bool hasBridge(int|string $userId)
+ * @method static ProviderMode mode()
+ *
+ * @see AiBridgeManager
+ */
+class AiBridge extends Facade
+{
+    /**
+     * Get the registered name of the component.
+     */
+    protected static function getFacadeAccessor(): string
+    {
+        return AiBridgeManager::class;
+    }
+}

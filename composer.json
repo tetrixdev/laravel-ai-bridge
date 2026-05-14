@@ -1,0 +1,39 @@
+{
+    "name": "tetrixdev/laravel-ai-bridge",
+    "description": "Laravel package for AI Bridge — unified streaming interface for CLI Bridge, BYOK, and managed AI modes",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/routing": "^11.0|^12.0",
+        "illuminate/http": "^11.0|^12.0",
+        "firebase/php-jwt": "^6.10|^7.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Tetrix\\AiBridge\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tetrix\\AiBridge\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Tetrix\\AiBridge\\AiBridgeServiceProvider"
+            ],
+            "aliases": {
+                "AiBridge": "Tetrix\\AiBridge\\Facades\\AiBridge"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
