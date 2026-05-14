@@ -152,6 +152,24 @@ class BridgeConnectionManager
     }
 
     /**
+     * Look up the user ID associated with a connection ID.
+     *
+     * This is useful when a message arrives on a connection that was already
+     * authenticated at connect time (e.g. via JWT in URL query param), and the
+     * MessageHandler needs to know the user without re-authenticating.
+     */
+    public function getUserIdByConnectionId(string $connectionId): ?string
+    {
+        foreach ($this->connections as $userId => $data) {
+            if ($data['connection_id'] === $connectionId) {
+                return $userId;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Send a message payload to a user's bridge connection.
      *
      * Supports two sending mechanisms:

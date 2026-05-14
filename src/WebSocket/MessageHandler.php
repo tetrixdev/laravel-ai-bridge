@@ -80,23 +80,52 @@ class MessageHandler
     }
 
     /**
-     * Handle a 'hello' message — authenticate the bridge connection.
+     * Handle a 'hello' message — complete the protocol handshake.
      *
-     * Expected message format:
-     *   { "type": "hello", "token": "<JWT>", "version": "0.1", ... }
+     * Authentication can happen in two ways:
+     * 1. Pre-authenticated: The dedicated BridgeWebSocketServer validates the JWT
+     *    at connection time (via ?token= URL param). The connection is already
+     *    registered in BridgeConnectionManager before the hello arrives.
+     * 2. Token in hello body: For custom WebSocket integrations where authentication
+     *    happens via the hello message instead. Falls back to this if not pre-authed.
      *
      * @return array<string, mixed>  Welcome or connection_error response.
      */
     private function handleHello(string $connectionId, mixed $connection, array $message): array
     {
-        $token = $message['token'] ?? '';
         $protocolVersion = $message['version'] ?? $message['protocol_version'] ?? 'unknown';
+
+        // Check if this connection was already authenticated at connect time
+        // (e.g. by BridgeWebSocketServer via ?token= URL param)
+        $existingUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+
+        if ($existingUserId !== null) {
+            // Already authenticated — just log and return welcome
+            Log::info('AI Bridge: bridge hello (pre-authenticated)', [
+                'user_id' => $existingUserId,
+                'connection_id' => $connectionId,
+                'protocol_version' => $protocolVersion,
+            ]);
+
+            return [
+                'type' => MessageTypes::WELCOME,
+                'session_id' => $connectionId,
+                'tools' => $this->toolRegistry->toArray(),
+                'config' => [
+                    'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
+                    'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
+                ],
+            ];
+        }
+
+        // Not pre-authenticated — require token in the hello body
+        $token = $message['token'] ?? '';
 
         if (empty($token)) {
             return [
                 'type' => MessageTypes::CONNECTION_ERROR,
                 'error' => 'missing_token',
-                'message' => 'Hello message must include a "token" field.',
+                'message' => 'Hello message must include a "token" field (or authenticate via ?token= URL param).',
             ];
         }
 
