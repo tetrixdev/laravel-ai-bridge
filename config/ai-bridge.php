@@ -61,4 +61,36 @@ return [
         'model' => env('AI_BRIDGE_MODEL'),              // e.g. gpt-4o
         'max_tokens' => env('AI_BRIDGE_MAX_TOKENS', 4096),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Bridge WebSocket Server Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for the dedicated WebSocket server that handles CLI bridge
+    | connections. This is separate from Laravel Reverb — it runs on its own
+    | port and speaks the AI Bridge Protocol.
+    |
+    */
+
+    'server' => [
+        'host' => env('AI_BRIDGE_SERVER_HOST', '0.0.0.0'),
+        'port' => env('AI_BRIDGE_SERVER_PORT', 8085),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Broadcasting Settings
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for broadcasting AI stream events via Laravel Reverb.
+    | When enabled, you can use AiBridge::streamAndBroadcast() to push
+    | events to a Reverb channel for real-time browser updates.
+    |
+    */
+
+    'broadcasting' => [
+        'enabled' => env('AI_BRIDGE_BROADCAST', true),
+        'connection' => env('AI_BRIDGE_BROADCAST_CONNECTION', 'reverb'),
+    ],
 ];

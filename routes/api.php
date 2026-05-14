@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use Tetrix\AiBridge\Http\Controllers\BridgeController;
+use Tetrix\AiBridge\Http\Controllers\StreamController;
 
 /*
 |--------------------------------------------------------------------------
@@ -9,8 +10,8 @@ use Tetrix\AiBridge\Http\Controllers\BridgeController;
 |--------------------------------------------------------------------------
 |
 | These routes are loaded by the AiBridgeServiceProvider within the 'api'
-| middleware group. They provide HTTP endpoints for token generation and
-| bridge status checking.
+| middleware group. They provide HTTP endpoints for token generation,
+| bridge status checking, and AI streaming.
 |
 | IMPORTANT: The consuming application should add its own auth middleware
 | to protect these routes. This package does not force a specific auth
@@ -29,4 +30,8 @@ use Tetrix\AiBridge\Http\Controllers\BridgeController;
 Route::middleware(['api'])->prefix('ai-bridge')->group(function () {
     Route::post('/token', [BridgeController::class, 'generateToken']);
     Route::get('/status', [BridgeController::class, 'status']);
+
+    // Streaming endpoints
+    Route::post('/stream/sse', [StreamController::class, 'sse']);
+    Route::post('/stream/broadcast', [StreamController::class, 'broadcast']);
 });

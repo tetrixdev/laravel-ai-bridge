@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge\Facades;
 
 use Closure;
 use Illuminate\Support\Facades\Facade;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\AiBridgeManager;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
@@ -17,6 +18,8 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * Facade for the AiBridgeManager.
  *
  * @method static StreamHandler stream(string $conversationId, string $message, array $options = [])
+ * @method static StreamedResponse streamToResponse(string $conversationId, string $message, array $options = [])
+ * @method static string streamAndBroadcast(string $conversationId, string $message, string $channel, array $options = [])
  * @method static AiBridgeManager registerTool(string $name, string $description, array $parameters, Closure $handler)
  * @method static AiBridgeManager registerToolHandler(ToolHandler $handler)
  * @method static ToolRegistry tools()

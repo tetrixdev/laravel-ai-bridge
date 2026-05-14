@@ -8,7 +8,11 @@
         "illuminate/support": "^11.0|^12.0",
         "illuminate/routing": "^11.0|^12.0",
         "illuminate/http": "^11.0|^12.0",
-        "firebase/php-jwt": "^6.10|^7.0"
+        "firebase/php-jwt": "^6.10|^7.0",
+        "laravel/reverb": "^1.0",
+        "react/socket": "^1.14",
+        "ratchet/rfc6455": "^0.4",
+        "cboden/ratchet": "^0.4"
     },
     "require-dev": {
         "orchestra/testbench": "^9.0|^10.0",

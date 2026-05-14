@@ -154,6 +154,12 @@ class BridgeConnectionManager
     /**
      * Send a message payload to a user's bridge connection.
      *
+     * Supports two sending mechanisms:
+     * 1. Direct Ratchet ConnectionInterface — if the stored connection object
+     *    implements ConnectionInterface, send JSON directly.
+     * 2. Send callback — for custom transport integrations, falls back to
+     *    the registered send callback.
+     *
      * @param  int|string  $userId  The user ID.
      * @param  array<string, mixed>  $payload  The message to send.
      * @return bool  True if the message was sent successfully.
@@ -167,6 +173,20 @@ class BridgeConnectionManager
             return false;
         }
 
+        $connection = $connectionData['connection'] ?? null;
+
+        // Try direct Ratchet ConnectionInterface first
+        if ($connection instanceof \Ratchet\ConnectionInterface) {
+            try {
+                $connection->send(json_encode($payload));
+
+                return true;
+            } catch (\Throwable) {
+                return false;
+            }
+        }
+
+        // Fall back to send callback
         if ($this->sendCallback === null) {
             // No send callback configured — the consuming app hasn't set one up.
             // This is expected during development or when using a mock transport.
@@ -174,7 +194,7 @@ class BridgeConnectionManager
         }
 
         try {
-            return (bool) ($this->sendCallback)($connectionData['connection'], $payload);
+            return (bool) ($this->sendCallback)($connection, $payload);
         } catch (\Throwable) {
             return false;
         }

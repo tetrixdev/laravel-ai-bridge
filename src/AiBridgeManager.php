@@ -6,9 +6,12 @@ namespace Tetrix\AiBridge;
 
 use Closure;
 use InvalidArgumentException;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -121,6 +124,161 @@ class AiBridgeManager
     public function hasBridge(int|string $userId): bool
     {
         return $this->connectionManager->hasConnection($userId);
+    }
+
+    /**
+     * SSE streaming — returns a StreamedResponse that delivers normalized
+     * AI events as Server-Sent Events.
+     *
+     * Each event is sent as: data: {"event": "...", "data": {...}}
+     * The stream ends with: data: [DONE]
+     *
+     * @param  string  $conversationId  Unique conversation identifier.
+     * @param  string  $message  The user's message to send to the AI.
+     * @param  array<string, mixed>  $options  Additional options (system_prompt, temperature, etc.).
+     * @return StreamedResponse
+     */
+    public function streamToResponse(string $conversationId, string $message, array $options = []): StreamedResponse
+    {
+        return new StreamedResponse(function () use ($conversationId, $message, $options) {
+            $stream = $this->stream($conversationId, $message, $options);
+
+            $send = function (array $payload): void {
+                echo 'data: ' . json_encode($payload) . "\n\n";
+
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            };
+
+            $stream->onBlockStart(function (StreamEvent $event) use ($send) {
+                $send([
+                    'event' => $event->event,
+                    'data' => $event->data,
+                ]);
+            });
+
+            $stream->onBlockDelta(function (StreamEvent $event) use ($send) {
+                $send([
+                    'event' => $event->event,
+                    'data' => $event->data,
+                ]);
+            });
+
+            $stream->onBlockStop(function (StreamEvent $event) use ($send) {
+                $send([
+                    'event' => $event->event,
+                    'data' => $event->data,
+                ]);
+            });
+
+            $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($send) {
+                $send([
+                    'event' => 'tool_call',
+                    'data' => [
+                        'tool_name' => $toolName,
+                        'parameters' => $params,
+                        'call_id' => $callId,
+                    ],
+                ]);
+            });
+
+            $stream->onDone(function (?array $usage) use ($send) {
+                $send([
+                    'event' => 'done',
+                    'data' => [
+                        'usage' => $usage,
+                    ],
+                ]);
+
+                echo "data: [DONE]\n\n";
+
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            });
+
+            $stream->onError(function (string $code, string $errorMessage) use ($send) {
+                $send([
+                    'event' => 'error',
+                    'data' => [
+                        'code' => $code,
+                        'message' => $errorMessage,
+                    ],
+                ]);
+
+                echo "data: [DONE]\n\n";
+
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            });
+
+            $stream->start();
+        }, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
+    }
+
+    /**
+     * Reverb broadcasting — starts a stream and broadcasts each event
+     * to the specified Reverb channel. Returns immediately with a request ID.
+     *
+     * Events are broadcast as "ai.stream" events on the given channel.
+     * The consuming app can listen via Laravel Echo / Reverb.
+     *
+     * @param  string  $conversationId  Unique conversation identifier.
+     * @param  string  $message  The user's message to send to the AI.
+     * @param  string  $channel  The broadcast channel name (e.g. "game.123").
+     * @param  array<string, mixed>  $options  Additional options (system_prompt, temperature, etc.).
+     * @return string  The request ID for this stream.
+     */
+    public function streamAndBroadcast(string $conversationId, string $message, string $channel, array $options = []): string
+    {
+        $stream = $this->stream($conversationId, $message, $options);
+        $requestId = $stream->requestId;
+
+        $broadcast = function (string $event, array $data) use ($channel, $requestId): void {
+            event(new AiStreamEvent($channel, $requestId, $event, $data));
+        };
+
+        $stream->onBlockStart(function (StreamEvent $event) use ($broadcast) {
+            $broadcast($event->event, $event->data);
+        });
+
+        $stream->onBlockDelta(function (StreamEvent $event) use ($broadcast) {
+            $broadcast($event->event, $event->data);
+        });
+
+        $stream->onBlockStop(function (StreamEvent $event) use ($broadcast) {
+            $broadcast($event->event, $event->data);
+        });
+
+        $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($broadcast) {
+            $broadcast('tool_call', [
+                'tool_name' => $toolName,
+                'parameters' => $params,
+                'call_id' => $callId,
+            ]);
+        });
+
+        $stream->onDone(function (?array $usage) use ($broadcast) {
+            $broadcast('done', ['usage' => $usage]);
+        });
+
+        $stream->onError(function (string $code, string $errorMessage) use ($broadcast) {
+            $broadcast('error', ['code' => $code, 'message' => $errorMessage]);
+        });
+
+        $stream->start();
+
+        return $requestId;
     }
 
     /**

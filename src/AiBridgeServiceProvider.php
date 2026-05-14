@@ -68,6 +68,11 @@ class AiBridgeServiceProvider extends ServiceProvider
             __DIR__.'/../config/ai-bridge.php' => config_path('ai-bridge.php'),
         ], 'ai-bridge-config');
 
+        // Publish JavaScript client
+        $this->publishes([
+            __DIR__.'/../resources/js/ai-bridge.js' => resource_path('js/vendor/ai-bridge.js'),
+        ], 'ai-bridge-js');
+
         // Register named middleware for bridge token validation
         $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
 
@@ -79,6 +84,7 @@ class AiBridgeServiceProvider extends ServiceProvider
             $this->commands([
                 \Tetrix\AiBridge\Console\GenerateTokenCommand::class,
                 \Tetrix\AiBridge\Console\TestCommand::class,
+                \Tetrix\AiBridge\Console\ServeCommand::class,
             ]);
         }
     }
