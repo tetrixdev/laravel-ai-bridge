@@ -414,9 +414,6 @@ class BridgeWebSocketServer
             $this->httpResponse($tcpConnection, 400, [
                 'error' => 'invalid_body',
                 'message' => 'Request body must be valid JSON.',
-                'debug_raw_body' => substr($rawBody, 0, 200),
-                'debug_raw_length' => strlen($rawBody),
-                'debug_content_length' => $request->getHeaderLine('Content-Length'),
             ]);
 
             return;
