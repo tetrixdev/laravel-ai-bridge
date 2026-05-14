@@ -1,5 +1,5 @@
 {
-    "name": "tetrixdev/laravel-ai-bridge",
+    "name": "tetrix/laravel-ai-bridge",
     "description": "Laravel package for AI Bridge — unified streaming interface for CLI Bridge, BYOK, and managed AI modes",
     "type": "library",
     "license": "MIT",
