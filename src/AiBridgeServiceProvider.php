@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge;
 
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Http\Middleware\ValidateBridgeToken;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -67,7 +68,18 @@ class AiBridgeServiceProvider extends ServiceProvider
             __DIR__.'/../config/ai-bridge.php' => config_path('ai-bridge.php'),
         ], 'ai-bridge-config');
 
+        // Register named middleware for bridge token validation
+        $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
+
         // Register routes
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
+
+        // Register artisan commands
+        if ($this->app->runningInConsole()) {
+            $this->commands([
+                \Tetrix\AiBridge\Console\GenerateTokenCommand::class,
+                \Tetrix\AiBridge\Console\TestCommand::class,
+            ]);
+        }
     }
 }

@@ -69,12 +69,10 @@ class MessageHandler
 
         return match ($type) {
             MessageTypes::HELLO => $this->handleHello($connectionId, $connection, $message),
-            MessageTypes::PONG => $this->handlePong($connectionId, $message),
-            MessageTypes::BLOCK_START => $this->handleStreamEvent($connectionId, $message),
-            MessageTypes::BLOCK_DELTA => $this->handleStreamEvent($connectionId, $message),
-            MessageTypes::BLOCK_STOP => $this->handleStreamEvent($connectionId, $message),
+            MessageTypes::PING => $this->handlePing($connectionId, $message),
+            MessageTypes::AI_REQUEST_ACK => $this->handleAiRequestAck($connectionId, $message),
+            MessageTypes::STREAM => $this->handleStreamEnvelope($connectionId, $message),
             MessageTypes::TOOL_CALL => $this->handleToolCall($connectionId, $message),
-            MessageTypes::DONE => $this->handleDone($connectionId, $message),
             MessageTypes::ERROR => $this->handleError($connectionId, $message),
             MessageTypes::CANCELLED => $this->handleCancelled($connectionId, $message),
             default => null,
@@ -85,14 +83,14 @@ class MessageHandler
      * Handle a 'hello' message — authenticate the bridge connection.
      *
      * Expected message format:
-     *   { "type": "hello", "token": "<JWT>", "protocol_version": "0.1" }
+     *   { "type": "hello", "token": "<JWT>", "version": "0.1", ... }
      *
      * @return array<string, mixed>  Welcome or connection_error response.
      */
     private function handleHello(string $connectionId, mixed $connection, array $message): array
     {
         $token = $message['token'] ?? '';
-        $protocolVersion = $message['protocol_version'] ?? 'unknown';
+        $protocolVersion = $message['version'] ?? $message['protocol_version'] ?? 'unknown';
 
         if (empty($token)) {
             return [
@@ -129,47 +127,99 @@ class MessageHandler
 
         return [
             'type' => MessageTypes::WELCOME,
-            'connection_id' => $connectionId,
-            'heartbeat_interval' => config('ai-bridge.websocket.heartbeat_interval', 30),
+            'session_id' => $connectionId,
             'tools' => $this->toolRegistry->toArray(),
+            'config' => [
+                'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
+                'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
+            ],
         ];
     }
 
     /**
-     * Handle a 'pong' message — bridge responding to our ping.
+     * Handle a 'ping' message — bridge checking server liveness.
+     *
+     * Per PROTOCOL.md, the bridge sends ping and the server responds with pong.
      */
-    private function handlePong(string $connectionId, array $message): ?array
+    private function handlePing(string $connectionId, array $message): ?array
     {
-        // Pong received — the connection is alive. In a full implementation,
-        // this would reset a heartbeat timeout timer.
-        Log::debug('AI Bridge: pong received', ['connection_id' => $connectionId]);
+        Log::debug('AI Bridge: ping received', ['connection_id' => $connectionId]);
+
+        return [
+            'type' => MessageTypes::PONG,
+            'timestamp' => $message['timestamp'] ?? time(),
+        ];
+    }
+
+    /**
+     * Handle an 'ai_request_ack' message — bridge acknowledges receipt of ai_request.
+     */
+    private function handleAiRequestAck(string $connectionId, array $message): ?array
+    {
+        $requestId = $message['request_id'] ?? '';
+        $cliSessionId = $message['cli_session_id'] ?? null;
+
+        Log::debug('AI Bridge: ai_request acknowledged', [
+            'connection_id' => $connectionId,
+            'request_id' => $requestId,
+            'cli_session_id' => $cliSessionId,
+        ]);
 
         return null;
     }
 
     /**
-     * Handle stream events (block_start, block_delta, block_stop).
+     * Handle a 'stream' envelope message from the bridge.
      *
-     * Routes the event to the appropriate StreamHandler based on request_id.
+     * Per PROTOCOL.md, all streaming events arrive in an envelope:
+     *   { "type": "stream", "request_id": "...", "event": "<event_type>", "data": {...} }
+     *
+     * The "event" field contains the actual event type (block_start, block_delta,
+     * block_stop, tool_result, done, error, tool_call).
      */
-    private function handleStreamEvent(string $connectionId, array $message): ?array
+    private function handleStreamEnvelope(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
+        $eventType = $message['event'] ?? '';
 
         if (empty($requestId)) {
-            Log::warning('AI Bridge: stream event missing request_id', [
+            Log::warning('AI Bridge: stream envelope missing request_id', [
                 'connection_id' => $connectionId,
-                'type' => $message['type'],
             ]);
 
             return null;
         }
 
+        if (empty($eventType)) {
+            Log::warning('AI Bridge: stream envelope missing event field', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
+
+        // Handle tool_call events inside the stream envelope specially
+        if ($eventType === MessageTypes::TOOL_CALL) {
+            return $this->handleToolCallFromStream($connectionId, $message);
+        }
+
+        // Handle done events — need to clean up pending request
+        if ($eventType === MessageTypes::DONE) {
+            return $this->handleDoneFromStream($connectionId, $message);
+        }
+
+        // Handle error events inside stream — need to clean up pending request
+        if ($eventType === MessageTypes::ERROR) {
+            return $this->handleErrorFromStream($connectionId, $message);
+        }
+
+        // For block_start, block_delta, block_stop, tool_result — route to StreamHandler
         $handler = $this->connectionManager->getPendingRequest($requestId);
         if (! $handler) {
             Log::debug('AI Bridge: received stream event for unknown request', [
                 'request_id' => $requestId,
-                'type' => $message['type'],
+                'event' => $eventType,
             ]);
 
             return null;
@@ -182,17 +232,18 @@ class MessageHandler
     }
 
     /**
-     * Handle a 'tool_call' message from the bridge.
+     * Handle a tool_call event from within a stream envelope.
      *
      * The bridge is relaying the AI's request to execute a tool.
-     * We execute it locally and send back a tool_result.
+     * We execute it locally and send back a tool_resolve message.
      */
-    private function handleToolCall(string $connectionId, array $message): ?array
+    private function handleToolCallFromStream(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
-        $toolName = $message['data']['tool_name'] ?? $message['tool_name'] ?? '';
-        $params = $message['data']['parameters'] ?? $message['parameters'] ?? [];
-        $callId = $message['data']['call_id'] ?? $message['call_id'] ?? '';
+        $data = $message['data'] ?? [];
+        $toolName = $data['tool_name'] ?? '';
+        $params = $data['parameters'] ?? [];
+        $callId = $data['tool_call_id'] ?? $data['call_id'] ?? '';
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
 
@@ -207,11 +258,10 @@ class MessageHandler
                 $result = $this->toolRegistry->execute($toolName, $params);
 
                 return [
-                    'type' => MessageTypes::TOOL_RESULT,
+                    'type' => MessageTypes::TOOL_RESOLVE,
                     'request_id' => $requestId,
-                    'call_id' => $callId,
+                    'tool_call_id' => $callId,
                     'result' => $result,
-                    'is_error' => false,
                 ];
             } catch (\Throwable $e) {
                 Log::error('AI Bridge: tool execution failed', [
@@ -220,11 +270,10 @@ class MessageHandler
                 ]);
 
                 return [
-                    'type' => MessageTypes::TOOL_RESULT,
+                    'type' => MessageTypes::TOOL_ERROR,
                     'request_id' => $requestId,
-                    'call_id' => $callId,
-                    'result' => ['error' => $e->getMessage()],
-                    'is_error' => true,
+                    'tool_call_id' => $callId,
+                    'error' => $e->getMessage(),
                 ];
             }
         }
@@ -232,21 +281,77 @@ class MessageHandler
         Log::warning('AI Bridge: tool not registered', ['tool' => $toolName]);
 
         return [
-            'type' => MessageTypes::TOOL_RESULT,
+            'type' => MessageTypes::TOOL_ERROR,
             'request_id' => $requestId,
-            'call_id' => $callId,
-            'result' => ['error' => "Tool '{$toolName}' is not registered."],
-            'is_error' => true,
+            'tool_call_id' => $callId,
+            'error' => "Tool '{$toolName}' is not registered.",
         ];
     }
 
     /**
-     * Handle a 'done' message — the AI response stream is complete.
+     * Handle a 'tool_call' message from the bridge (top-level, non-envelope format).
+     *
+     * The bridge is relaying the AI's request to execute a tool.
+     * We execute it locally and send back a tool_resolve message.
      */
-    private function handleDone(string $connectionId, array $message): ?array
+    private function handleToolCall(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
-        $usage = $message['data']['usage'] ?? $message['usage'] ?? null;
+        $toolName = $message['data']['tool_name'] ?? $message['tool_name'] ?? '';
+        $params = $message['data']['parameters'] ?? $message['parameters'] ?? [];
+        $callId = $message['data']['tool_call_id'] ?? $message['data']['call_id'] ?? $message['call_id'] ?? '';
+
+        $handler = $this->connectionManager->getPendingRequest($requestId);
+
+        // Dispatch to the StreamHandler's tool call callbacks
+        if ($handler) {
+            $handler->dispatchToolCall($toolName, $params, $callId);
+        }
+
+        // Execute the tool if registered
+        if ($this->toolRegistry->has($toolName)) {
+            try {
+                $result = $this->toolRegistry->execute($toolName, $params);
+
+                return [
+                    'type' => MessageTypes::TOOL_RESOLVE,
+                    'request_id' => $requestId,
+                    'tool_call_id' => $callId,
+                    'result' => $result,
+                ];
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: tool execution failed', [
+                    'tool' => $toolName,
+                    'error' => $e->getMessage(),
+                ]);
+
+                return [
+                    'type' => MessageTypes::TOOL_ERROR,
+                    'request_id' => $requestId,
+                    'tool_call_id' => $callId,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+
+        Log::warning('AI Bridge: tool not registered', ['tool' => $toolName]);
+
+        return [
+            'type' => MessageTypes::TOOL_ERROR,
+            'request_id' => $requestId,
+            'tool_call_id' => $callId,
+            'error' => "Tool '{$toolName}' is not registered.",
+        ];
+    }
+
+    /**
+     * Handle a 'done' event from within a stream envelope.
+     */
+    private function handleDoneFromStream(string $connectionId, array $message): ?array
+    {
+        $requestId = $message['request_id'] ?? '';
+        $data = $message['data'] ?? [];
+        $usage = $data['usage'] ?? null;
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
         if ($handler) {
@@ -258,12 +363,38 @@ class MessageHandler
     }
 
     /**
-     * Handle an 'error' message from the bridge.
+     * Handle an 'error' event from within a stream envelope.
+     */
+    private function handleErrorFromStream(string $connectionId, array $message): ?array
+    {
+        $requestId = $message['request_id'] ?? '';
+        $data = $message['data'] ?? [];
+        $code = $data['code'] ?? 'unknown';
+        $errorMessage = $data['message'] ?? 'Unknown error';
+
+        Log::error('AI Bridge: stream error from bridge', [
+            'connection_id' => $connectionId,
+            'request_id' => $requestId,
+            'code' => $code,
+            'message' => $errorMessage,
+        ]);
+
+        $handler = $this->connectionManager->getPendingRequest($requestId);
+        if ($handler) {
+            $handler->dispatchError($code, $errorMessage);
+            $this->connectionManager->removePendingRequest($requestId);
+        }
+
+        return null;
+    }
+
+    /**
+     * Handle an 'error' message from the bridge (top-level, non-streaming).
      */
     private function handleError(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
-        $code = $message['data']['code'] ?? $message['error'] ?? 'unknown';
+        $code = $message['data']['code'] ?? $message['code'] ?? $message['error'] ?? 'unknown';
         $errorMessage = $message['data']['message'] ?? $message['message'] ?? 'Unknown error';
 
         Log::error('AI Bridge: error from bridge', [
@@ -300,15 +431,16 @@ class MessageHandler
     }
 
     /**
-     * Generate a ping message to send to a bridge connection.
+     * Generate a pong message to send in response to a bridge ping.
      *
+     * @deprecated Use handlePing() instead which returns the pong automatically.
      * @return array<string, mixed>
      */
-    public function buildPingMessage(): array
+    public function buildPongMessage(?int $timestamp = null): array
     {
         return [
-            'type' => MessageTypes::PING,
-            'timestamp' => time(),
+            'type' => MessageTypes::PONG,
+            'timestamp' => $timestamp ?? time(),
         ];
     }
 }

@@ -29,9 +29,9 @@ class BridgeConnectionManager
     private array $connections = [];
 
     /**
-     * Map of request_id => StreamHandler for pending AI requests.
+     * Map of request_id => pending request metadata.
      *
-     * @var array<string, StreamHandler>
+     * @var array<string, array{stream_handler: StreamHandler, user_id: string}>
      */
     private array $pendingRequests = [];
 
@@ -106,6 +106,26 @@ class BridgeConnectionManager
     }
 
     /**
+     * Remove a bridge connection by its connection ID.
+     *
+     * This is useful when the consuming app's WebSocket server only knows the
+     * connection ID (not the user ID), e.g. in onClose handlers.
+     *
+     * @param  string  $connectionId  The connection ID to look up and remove.
+     * @param  string|null  $reason  The reason for disconnection.
+     */
+    public function removeConnectionByConnectionId(string $connectionId, ?string $reason = null): void
+    {
+        foreach ($this->connections as $userId => $data) {
+            if ($data['connection_id'] === $connectionId) {
+                $this->removeConnection($userId, $reason);
+
+                return;
+            }
+        }
+    }
+
+    /**
      * Check if a user has an active bridge connection.
      */
     public function hasConnection(int|string $userId): bool
@@ -165,10 +185,14 @@ class BridgeConnectionManager
      *
      * @param  string  $requestId  The unique request ID.
      * @param  StreamHandler  $handler  The stream handler to dispatch events to.
+     * @param  string  $userId  The user ID that owns this request.
      */
-    public function registerPendingRequest(string $requestId, StreamHandler $handler): void
+    public function registerPendingRequest(string $requestId, StreamHandler $handler, string $userId = ''): void
     {
-        $this->pendingRequests[$requestId] = $handler;
+        $this->pendingRequests[$requestId] = [
+            'stream_handler' => $handler,
+            'user_id' => $userId,
+        ];
     }
 
     /**
@@ -176,7 +200,9 @@ class BridgeConnectionManager
      */
     public function getPendingRequest(string $requestId): ?StreamHandler
     {
-        return $this->pendingRequests[$requestId] ?? null;
+        $entry = $this->pendingRequests[$requestId] ?? null;
+
+        return $entry ? $entry['stream_handler'] : null;
     }
 
     /**
@@ -207,11 +233,17 @@ class BridgeConnectionManager
 
     /**
      * Fail all pending requests for a given user (e.g. on disconnect).
+     *
+     * Iterates all pending requests, finds those belonging to the given user,
+     * dispatches an error event to their StreamHandlers, and removes them.
      */
-    private function failPendingRequestsForUser(string $userId): void
+    protected function failPendingRequestsForUser(string $userId): void
     {
-        // We don't track request→user mapping here, so we can't selectively fail.
-        // In a production implementation, you'd want to maintain that mapping.
-        // For now, this is a placeholder for the consuming app's integration.
+        foreach ($this->pendingRequests as $requestId => $handler) {
+            if ($handler['user_id'] === $userId) {
+                $handler['stream_handler']->dispatchError('bridge_disconnected', 'Bridge connection lost');
+                unset($this->pendingRequests[$requestId]);
+            }
+        }
     }
 }

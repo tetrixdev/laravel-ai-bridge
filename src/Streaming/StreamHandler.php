@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Streaming;
 
 use Closure;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\BlockType;
+use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Events\StreamCompleted;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 
 /**
@@ -48,6 +52,12 @@ class StreamHandler
     private array $errorCallbacks = [];
 
     private bool $cancelled = false;
+
+    /** Track the start time for duration reporting in StreamCompleted. */
+    private float $startedAt = 0;
+
+    /** The conversation ID, set when start() is called for StreamCompleted dispatch. */
+    private string $conversationId = '';
 
     public readonly string $requestId;
 
@@ -135,6 +145,7 @@ class StreamHandler
     public function start(): void
     {
         $this->cancelled = false;
+        $this->startedAt = microtime(true);
         $this->provider->start();
     }
 
@@ -155,6 +166,16 @@ class StreamHandler
         return $this->cancelled;
     }
 
+    /**
+     * Set the conversation ID (used for StreamCompleted event dispatch).
+     *
+     * @internal Set by the provider or manager.
+     */
+    public function setConversationId(string $conversationId): void
+    {
+        $this->conversationId = $conversationId;
+    }
+
     // ── Internal dispatch methods (called by provider implementations) ──
 
     /**
@@ -171,7 +192,14 @@ class StreamHandler
         $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex);
 
         foreach ($this->blockStartCallbacks as $callback) {
-            $callback($event);
+            try {
+                $callback($event);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in blockStart callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -189,7 +217,14 @@ class StreamHandler
         $event = StreamEvent::blockDelta($this->requestId, $blockType, $blockIndex, $content);
 
         foreach ($this->blockDeltaCallbacks as $callback) {
-            $callback($event);
+            try {
+                $callback($event);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in blockDelta callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -207,7 +242,14 @@ class StreamHandler
         $event = StreamEvent::blockStop($this->requestId, $blockType, $blockIndex);
 
         foreach ($this->blockStopCallbacks as $callback) {
-            $callback($event);
+            try {
+                $callback($event);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in blockStop callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
@@ -223,31 +265,71 @@ class StreamHandler
         }
 
         foreach ($this->toolCallCallbacks as $callback) {
-            $callback($toolName, $params, $callId);
+            try {
+                $callback($toolName, $params, $callId);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in toolCall callback', [
+                    'request_id' => $this->requestId,
+                    'tool' => $toolName,
+                    'error' => $e->getMessage(),
+                ]);
+            }
         }
     }
 
     /**
      * Dispatch a done event to all registered callbacks.
      *
+     * Also dispatches the StreamCompleted Laravel event for logging/analytics.
+     *
      * @internal Called by StreamableProvider implementations.
      */
     public function dispatchDone(?array $usage = null): void
     {
         foreach ($this->doneCallbacks as $callback) {
-            $callback($usage);
+            try {
+                $callback($usage);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in done callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->dispatchStreamCompleted(true, $usage);
+
+        // Mark BridgeStream as completed if applicable
+        if ($this->provider instanceof BridgeStream) {
+            $this->provider->markCompleted();
         }
     }
 
     /**
      * Dispatch an error event to all registered callbacks.
      *
+     * Also dispatches the StreamCompleted Laravel event (with success=false).
+     *
      * @internal Called by StreamableProvider implementations.
      */
     public function dispatchError(string $code, string $message): void
     {
         foreach ($this->errorCallbacks as $callback) {
-            $callback($code, $message);
+            try {
+                $callback($code, $message);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in error callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->dispatchStreamCompleted(false, null, "{$code}: {$message}");
+
+        // Mark BridgeStream as completed if applicable
+        if ($this->provider instanceof BridgeStream) {
+            $this->provider->markCompleted();
         }
     }
 
@@ -259,30 +341,61 @@ class StreamHandler
     public function dispatchEvent(StreamEvent $event): void
     {
         match ($event->event) {
-            'block_start' => $this->dispatchBlockStart(
+            MessageTypes::BLOCK_START => $this->dispatchBlockStart(
                 BlockType::from($event->data['block_type']),
                 $event->data['block_index'],
             ),
-            'block_delta' => $this->dispatchBlockDelta(
+            MessageTypes::BLOCK_DELTA => $this->dispatchBlockDelta(
                 BlockType::from($event->data['block_type']),
                 $event->data['block_index'],
                 $event->data['content'] ?? '',
             ),
-            'block_stop' => $this->dispatchBlockStop(
+            MessageTypes::BLOCK_STOP => $this->dispatchBlockStop(
                 BlockType::from($event->data['block_type']),
                 $event->data['block_index'],
             ),
-            'tool_call' => $this->dispatchToolCall(
+            MessageTypes::TOOL_CALL => $this->dispatchToolCall(
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
-                $event->data['call_id'] ?? '',
+                $event->data['call_id'] ?? $event->data['tool_call_id'] ?? '',
             ),
-            'done' => $this->dispatchDone($event->data['usage'] ?? null),
-            'error' => $this->dispatchError(
+            MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
+            MessageTypes::ERROR => $this->dispatchError(
                 $event->data['code'] ?? 'unknown',
                 $event->data['message'] ?? 'Unknown error',
             ),
             default => null, // Ignore unknown event types
         };
+    }
+
+    /**
+     * Dispatch the StreamCompleted Laravel event for logging/analytics.
+     */
+    private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null): void
+    {
+        $durationMs = $this->startedAt > 0
+            ? (int) ((microtime(true) - $this->startedAt) * 1000)
+            : null;
+
+        $mode = $this->provider instanceof BridgeStream
+            ? ProviderMode::Bridge
+            : ProviderMode::Byok;
+
+        try {
+            event(new StreamCompleted(
+                conversationId: $this->conversationId,
+                requestId: $this->requestId,
+                mode: $mode,
+                success: $success,
+                usage: $usage,
+                error: $error,
+                durationMs: $durationMs,
+            ));
+        } catch (\Throwable $e) {
+            Log::error('AI Bridge: failed to dispatch StreamCompleted event', [
+                'request_id' => $this->requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 }

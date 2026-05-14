@@ -16,19 +16,12 @@ use InvalidArgumentException;
  *
  * Tokens are short-lived JWTs that a bridge client presents during WebSocket
  * upgrade to prove it is authorized to act on behalf of a specific user.
+ *
+ * Config values are read lazily to avoid issues with early instantiation
+ * before the application config is fully loaded.
  */
 class TokenManager
 {
-    private string $secret;
-
-    private int $ttl;
-
-    public function __construct()
-    {
-        $this->secret = config('ai-bridge.token.secret', '');
-        $this->ttl = (int) config('ai-bridge.token.ttl', 86400);
-    }
-
     /**
      * Generate a JWT connection token for the given user.
      *
@@ -47,12 +40,12 @@ class TokenManager
         $payload = array_merge($claims, [
             'sub' => (string) $userId,
             'iat' => $now,
-            'exp' => $now + $this->ttl,
+            'exp' => $now + $this->getTtl(),
             'jti' => Str::uuid()->toString(),
             'iss' => 'ai-bridge',
         ]);
 
-        return JWT::encode($payload, $this->secret, 'HS256');
+        return JWT::encode($payload, $this->getSecret(), 'HS256');
     }
 
     /**
@@ -69,7 +62,7 @@ class TokenManager
         $this->ensureSecretConfigured();
 
         try {
-            $decoded = JWT::decode($token, new Key($this->secret, 'HS256'));
+            $decoded = JWT::decode($token, new Key($this->getSecret(), 'HS256'));
         } catch (ExpiredException $e) {
             throw new TokenValidationException('Token has expired.', 'token_expired', $e);
         } catch (SignatureInvalidException $e) {
@@ -121,11 +114,19 @@ class TokenManager
     }
 
     /**
-     * Get the configured TTL in seconds.
+     * Get the configured TTL in seconds (read lazily from config).
      */
     public function getTtl(): int
     {
-        return $this->ttl;
+        return (int) config('ai-bridge.token.ttl', 86400);
+    }
+
+    /**
+     * Get the configured JWT secret (read lazily from config).
+     */
+    private function getSecret(): string
+    {
+        return config('ai-bridge.token.secret', '');
     }
 
     /**
@@ -135,7 +136,7 @@ class TokenManager
      */
     private function ensureSecretConfigured(): void
     {
-        if (empty($this->secret)) {
+        if (empty($this->getSecret())) {
             throw new InvalidArgumentException(
                 'AI Bridge token secret is not configured. Set AI_BRIDGE_TOKEN_SECRET in your .env file.'
             );

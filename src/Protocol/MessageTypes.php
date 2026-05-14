@@ -25,10 +25,10 @@ final class MessageTypes
 
     // ── Heartbeat ───────────────────────────────────────────────────────
 
-    /** Sent by server to check bridge liveness. */
+    /** Sent by bridge to check server liveness. */
     public const PING = 'ping';
 
-    /** Sent by bridge in response to ping. */
+    /** Sent by server in response to ping. */
     public const PONG = 'pong';
 
     // ── AI Request / Response ───────────────────────────────────────────
@@ -36,22 +36,59 @@ final class MessageTypes
     /** Sent by server to request an AI completion from the bridge. */
     public const AI_REQUEST = 'ai_request';
 
-    /** Sent by bridge: a new content block has started. */
+    /** Sent by bridge to acknowledge receipt of an ai_request. */
+    public const AI_REQUEST_ACK = 'ai_request_ack';
+
+    /** Sent by server to replay conversation history after a lost session. */
+    public const SESSION_RESET = 'session_reset';
+
+    // ── Streaming ───────────────────────────────────────────────────────
+
+    /**
+     * The envelope type for all streaming events from bridge to server.
+     *
+     * Streaming events are wrapped in: { "type": "stream", "event": "<event_type>", ... }
+     * The individual event types (block_start, block_delta, etc.) appear in the "event" field.
+     */
+    public const STREAM = 'stream';
+
+    /** Stream event: a new content block has started. */
     public const BLOCK_START = 'block_start';
 
-    /** Sent by bridge: a delta (chunk) within a content block. */
+    /** Stream event: a delta (chunk) within a content block. */
     public const BLOCK_DELTA = 'block_delta';
 
-    /** Sent by bridge: a content block has ended. */
+    /** Stream event: a content block has ended. */
     public const BLOCK_STOP = 'block_stop';
 
-    /** Sent by bridge: the AI wants to call a tool. */
+    /** Stream event: the AI wants to call a tool. */
     public const TOOL_CALL = 'tool_call';
 
-    /** Sent by server: the result of a tool execution. */
+    /**
+     * Stream event (bridge → server): acknowledges receipt of a tool result.
+     *
+     * This is a streaming event sent by the bridge inside the "stream" envelope
+     * to confirm it received a tool_resolve message and passed the result to the CLI.
+     */
     public const TOOL_RESULT = 'tool_result';
 
-    /** Sent by bridge: the entire AI response is complete. */
+    /**
+     * Server → bridge: sends the result of a tool execution back to the bridge.
+     *
+     * This is a top-level message type (NOT inside a stream envelope).
+     * The bridge receives this, passes the result to the CLI, and sends back
+     * a stream event with event: "tool_result" to acknowledge.
+     */
+    public const TOOL_RESOLVE = 'tool_resolve';
+
+    /**
+     * Server → bridge: a tool execution failed.
+     *
+     * Sent when the server fails to execute a tool the AI requested.
+     */
+    public const TOOL_ERROR = 'tool_error';
+
+    /** Stream event: the entire AI response is complete. */
     public const DONE = 'done';
 
     /** Sent by bridge: an error occurred during AI processing. */
@@ -79,11 +116,16 @@ final class MessageTypes
             self::PING,
             self::PONG,
             self::AI_REQUEST,
+            self::AI_REQUEST_ACK,
+            self::SESSION_RESET,
+            self::STREAM,
             self::BLOCK_START,
             self::BLOCK_DELTA,
             self::BLOCK_STOP,
             self::TOOL_CALL,
             self::TOOL_RESULT,
+            self::TOOL_RESOLVE,
+            self::TOOL_ERROR,
             self::DONE,
             self::ERROR,
             self::CANCEL,
@@ -102,18 +144,25 @@ final class MessageTypes
     /**
      * Message types that are sent by the bridge (client → server).
      *
+     * Per PROTOCOL.md:
+     * - hello: after WebSocket connects
+     * - ping: every heartbeat interval (bridge pings, server pongs)
+     * - ai_request_ack: after receiving an ai_request
+     * - stream: envelope for all streaming events (block_start, block_delta, etc.)
+     * - tool_call: AI wants to invoke a server-side tool
+     * - error: request-level error (non-streaming)
+     * - cancelled: acknowledges cancellation
+     *
      * @return string[]
      */
     public static function bridgeOrigin(): array
     {
         return [
             self::HELLO,
-            self::PONG,
-            self::BLOCK_START,
-            self::BLOCK_DELTA,
-            self::BLOCK_STOP,
+            self::PING,
+            self::AI_REQUEST_ACK,
+            self::STREAM,
             self::TOOL_CALL,
-            self::DONE,
             self::ERROR,
             self::CANCELLED,
         ];
@@ -122,16 +171,26 @@ final class MessageTypes
     /**
      * Message types that are sent by the server (server → bridge).
      *
+     * Per PROTOCOL.md:
+     * - welcome: after receiving hello
+     * - pong: after receiving ping
+     * - ai_request: new AI request for a conversation
+     * - session_reset: replay conversation after lost session
+     * - tool_resolve: returning tool execution result to bridge
+     * - tool_error: tool execution failed
+     * - cancel: cancel an in-progress request
+     *
      * @return string[]
      */
     public static function serverOrigin(): array
     {
         return [
             self::WELCOME,
-            self::CONNECTION_ERROR,
-            self::PING,
+            self::PONG,
             self::AI_REQUEST,
-            self::TOOL_RESULT,
+            self::SESSION_RESET,
+            self::TOOL_RESOLVE,
+            self::TOOL_ERROR,
             self::CANCEL,
         ];
     }

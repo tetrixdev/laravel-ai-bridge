@@ -170,6 +170,7 @@ class ChatCompletionsStream implements StreamableProvider
         $blockIndex = 0;
         $currentBlockType = null;
         $toolCallAccumulators = []; // Accumulate tool call arguments across deltas
+        $toolCallsDispatched = false; // Guard against dispatching tool calls more than once
 
         while (! $body->eof() && ! $this->cancelled) {
             $chunk = $body->read(8192);
@@ -199,16 +200,20 @@ class ChatCompletionsStream implements StreamableProvider
                     // Close any open block
                     if ($currentBlockType !== null) {
                         $this->streamHandler->dispatchBlockStop($currentBlockType, $blockIndex);
+                        $currentBlockType = null;
                     }
 
-                    // Dispatch any accumulated tool calls
-                    foreach ($toolCallAccumulators as $accum) {
-                        $params = json_decode($accum['arguments'], true) ?? [];
-                        $this->streamHandler->dispatchToolCall(
-                            $accum['name'],
-                            $params,
-                            $accum['id'],
-                        );
+                    // Dispatch any accumulated tool calls (only if not already dispatched)
+                    if (! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
+                        foreach ($toolCallAccumulators as $accum) {
+                            $params = json_decode($accum['arguments'], true) ?? [];
+                            $this->streamHandler->dispatchToolCall(
+                                $accum['name'],
+                                $params,
+                                $accum['id'],
+                            );
+                        }
+                        $toolCallsDispatched = true;
                     }
 
                     $this->streamHandler->dispatchDone(null);
@@ -226,14 +231,17 @@ class ChatCompletionsStream implements StreamableProvider
                             $currentBlockType = null;
                         }
 
-                        // Dispatch accumulated tool calls
-                        foreach ($toolCallAccumulators as $accum) {
-                            $params = json_decode($accum['arguments'], true) ?? [];
-                            $this->streamHandler->dispatchToolCall(
-                                $accum['name'],
-                                $params,
-                                $accum['id'],
-                            );
+                        // Dispatch accumulated tool calls (only if not already dispatched)
+                        if (! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
+                            foreach ($toolCallAccumulators as $accum) {
+                                $params = json_decode($accum['arguments'], true) ?? [];
+                                $this->streamHandler->dispatchToolCall(
+                                    $accum['name'],
+                                    $params,
+                                    $accum['id'],
+                                );
+                            }
+                            $toolCallsDispatched = true;
                         }
                         $toolCallAccumulators = [];
 
@@ -306,8 +314,8 @@ class ChatCompletionsStream implements StreamableProvider
                         $currentBlockType = null;
                     }
 
-                    // Dispatch any accumulated tool calls
-                    if ($finishReason === 'tool_calls') {
+                    // Dispatch any accumulated tool calls (only once)
+                    if ($finishReason === 'tool_calls' && ! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
                         foreach ($toolCallAccumulators as $accum) {
                             $params = json_decode($accum['arguments'], true) ?? [];
                             $this->streamHandler->dispatchToolCall(
@@ -316,6 +324,7 @@ class ChatCompletionsStream implements StreamableProvider
                                 $accum['id'],
                             );
                         }
+                        $toolCallsDispatched = true;
                         $toolCallAccumulators = [];
                     }
 

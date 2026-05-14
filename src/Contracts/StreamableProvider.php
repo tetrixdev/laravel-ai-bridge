@@ -12,6 +12,18 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * Both BridgeStream (WebSocket-based) and ChatCompletionsStream (HTTP SSE-based)
  * implement this interface, ensuring the consuming application gets the same
  * streaming API regardless of the underlying transport.
+ *
+ * IMPORTANT: Blocking behavior differs between implementations:
+ *
+ * - ChatCompletionsStream::start() is SYNCHRONOUS — it blocks the current
+ *   thread/process while reading the HTTP SSE stream. When start() returns,
+ *   the stream is complete and all callbacks have been invoked.
+ *
+ * - BridgeStream::start() is ASYNCHRONOUS — it sends the ai_request message
+ *   over WebSocket and returns immediately. Events arrive later via the
+ *   WebSocket server and are dispatched to the StreamHandler by the
+ *   MessageHandler as they come in. The consuming app must handle this
+ *   async flow (e.g. via event listeners or a WebSocket server loop).
  */
 interface StreamableProvider
 {
@@ -35,8 +47,12 @@ interface StreamableProvider
     /**
      * Begin streaming the AI response.
      *
-     * This method should not return until the stream is complete,
-     * an error occurs, or the stream is cancelled.
+     * For synchronous providers (ChatCompletionsStream), this method blocks
+     * until the stream is complete, an error occurs, or the stream is cancelled.
+     *
+     * For asynchronous providers (BridgeStream), this method sends the request
+     * and returns immediately. Events are dispatched asynchronously via the
+     * WebSocket server.
      */
     public function start(): void;
 

@@ -16,11 +16,15 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * When the consuming app calls start(), this class:
  * 1. Looks up the user's active bridge connection
  * 2. Sends an ai_request message over the WebSocket
- * 3. Listens for stream events from the bridge
- * 4. Routes events through the StreamHandler callbacks
+ * 3. Registers the request as pending so incoming events can be routed
  *
- * Note: The actual WebSocket transport depends on the consuming app's WebSocket
- * server (e.g. Laravel Reverb, Ratchet, Swoole). This class provides the message
+ * Note: BridgeStream is inherently asynchronous. Unlike ChatCompletionsStream which
+ * blocks during start() until the HTTP SSE stream completes, BridgeStream's start()
+ * returns immediately after sending the ai_request. Events arrive asynchronously via
+ * the WebSocket server and are dispatched to the StreamHandler by the MessageHandler.
+ *
+ * The actual WebSocket transport depends on the consuming app's WebSocket server
+ * (e.g. Laravel Reverb, Ratchet, Swoole). This class provides the message
  * structure and event routing; the transport integration is handled by the
  * BridgeConnectionManager.
  */
@@ -36,6 +40,15 @@ class BridgeStream implements StreamableProvider
     private StreamHandler $streamHandler;
 
     private bool $cancelled = false;
+
+    /**
+     * Whether the stream has completed (done or error received).
+     * Useful for the consuming app to check completion state in async scenarios.
+     */
+    private bool $completed = false;
+
+    /** The provider name to route to on the bridge (e.g. 'claude', 'codex', 'gemini'). */
+    private string $provider = '';
 
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
@@ -66,9 +79,39 @@ class BridgeStream implements StreamableProvider
         return $this;
     }
 
+    /**
+     * Set the provider name for routing on the bridge side.
+     *
+     * @param  string  $provider  The provider name (e.g. 'claude', 'codex', 'gemini').
+     */
+    public function setProvider(string $provider): static
+    {
+        $this->provider = $provider;
+
+        return $this;
+    }
+
     public function getStreamHandler(): StreamHandler
     {
         return $this->streamHandler;
+    }
+
+    /**
+     * Check whether the stream has completed (done or error received).
+     */
+    public function isCompleted(): bool
+    {
+        return $this->completed;
+    }
+
+    /**
+     * Mark the stream as completed.
+     *
+     * @internal Called by the StreamHandler when done or error is dispatched.
+     */
+    public function markCompleted(): void
+    {
+        $this->completed = true;
     }
 
     /**
@@ -82,6 +125,7 @@ class BridgeStream implements StreamableProvider
             'type' => MessageTypes::AI_REQUEST,
             'request_id' => $this->streamHandler->requestId,
             'conversation_id' => $this->conversationId,
+            'provider' => $this->provider,
             'message' => $this->message,
         ];
 
@@ -89,12 +133,17 @@ class BridgeStream implements StreamableProvider
             $payload['system_prompt'] = $this->options['system_prompt'];
         }
 
+        $requestOptions = [];
         if (isset($this->options['temperature'])) {
-            $payload['temperature'] = $this->options['temperature'];
+            $requestOptions['temperature'] = $this->options['temperature'];
         }
 
         if (isset($this->options['max_tokens'])) {
-            $payload['max_tokens'] = $this->options['max_tokens'];
+            $requestOptions['max_tokens'] = $this->options['max_tokens'];
+        }
+
+        if (! empty($requestOptions)) {
+            $payload['options'] = $requestOptions;
         }
 
         if (isset($this->options['messages'])) {
@@ -110,9 +159,18 @@ class BridgeStream implements StreamableProvider
         return $payload;
     }
 
+    /**
+     * Send the ai_request to the bridge and register as pending.
+     *
+     * NOTE: This method is non-blocking for BridgeStream. Unlike ChatCompletionsStream::start()
+     * which blocks until the HTTP stream completes, this returns immediately after sending
+     * the request. Events arrive asynchronously via WebSocket and are dispatched to the
+     * StreamHandler by the MessageHandler as they arrive.
+     */
     public function start(): void
     {
         $this->cancelled = false;
+        $this->completed = false;
 
         // Verify the user has an active bridge connection
         if (! $this->connectionManager->hasConnection($this->userId)) {
@@ -143,6 +201,7 @@ class BridgeStream implements StreamableProvider
         $this->connectionManager->registerPendingRequest(
             $this->streamHandler->requestId,
             $this->streamHandler,
+            (string) $this->userId,
         );
 
         // The actual streaming happens asynchronously via the WebSocket server.

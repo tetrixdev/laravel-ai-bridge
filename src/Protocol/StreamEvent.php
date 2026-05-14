@@ -104,22 +104,39 @@ final class StreamEvent
     }
 
     /**
-     * Serialize the event to an array suitable for JSON encoding or WebSocket transmission.
+     * Serialize the event to the protocol envelope format for WebSocket transmission.
+     *
+     * Per PROTOCOL.md, streaming events use an envelope:
+     *   { "type": "stream", "request_id": "...", "event": "<event_type>", "data": {...} }
      */
     public function toArray(): array
     {
         return [
+            'type' => MessageTypes::STREAM,
             'request_id' => $this->requestId,
-            'type' => $this->event,
+            'event' => $this->event,
             'data' => $this->data,
         ];
     }
 
     /**
      * Create a StreamEvent from an incoming array (e.g. decoded WebSocket message).
+     *
+     * Supports both the envelope format (type: "stream" with event field)
+     * and legacy flat format (type is the event type directly).
      */
     public static function fromArray(array $payload): self
     {
+        // Envelope format: { "type": "stream", "event": "block_start", ... }
+        if (($payload['type'] ?? '') === MessageTypes::STREAM && isset($payload['event'])) {
+            return new self(
+                requestId: $payload['request_id'] ?? '',
+                event: $payload['event'],
+                data: $payload['data'] ?? [],
+            );
+        }
+
+        // Legacy flat format: { "type": "block_start", ... }
         return new self(
             requestId: $payload['request_id'] ?? '',
             event: $payload['type'] ?? '',

@@ -64,7 +64,10 @@ class AiBridgeManager
         $provider->setMessage($message);
         $provider->setOptions($options);
 
-        return $provider->getStreamHandler();
+        $handler = $provider->getStreamHandler();
+        $handler->setConversationId($conversationId);
+
+        return $handler;
     }
 
     /**
@@ -168,11 +171,19 @@ class AiBridgeManager
             );
         }
 
-        return new BridgeStream(
+        $stream = new BridgeStream(
             $this->connectionManager,
             $this->toolRegistry,
             $userId,
         );
+
+        // Set the provider name for routing on the bridge side
+        $provider = $options['provider'] ?? config('ai-bridge.bridge.provider', '');
+        if (! empty($provider)) {
+            $stream->setProvider($provider);
+        }
+
+        return $stream;
     }
 
     /**
