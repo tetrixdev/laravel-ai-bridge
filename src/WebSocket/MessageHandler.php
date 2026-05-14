@@ -100,11 +100,16 @@ class MessageHandler
         $existingUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
 
         if ($existingUserId !== null) {
-            // Already authenticated — just log and return welcome
+            // Already authenticated — store providers from hello and return welcome
+            $providers = $message['providers'] ?? [];
+            $this->connectionManager->setProviders($existingUserId, $providers);
+
+            $availableProviders = array_filter($providers, fn ($p) => ($p['available'] ?? false));
             Log::info('AI Bridge: bridge hello (pre-authenticated)', [
                 'user_id' => $existingUserId,
                 'connection_id' => $connectionId,
                 'protocol_version' => $protocolVersion,
+                'providers' => array_map(fn ($p) => $p['name'] ?? 'unknown', $availableProviders),
             ]);
 
             return [
@@ -145,13 +150,16 @@ class MessageHandler
             ];
         }
 
-        // Register the connection
-        $this->connectionManager->addConnection($userId, $connectionId, $connection);
+        // Register the connection with provider capabilities
+        $providers = $message['providers'] ?? [];
+        $this->connectionManager->addConnection($userId, $connectionId, $connection, $providers);
 
+        $availableProviders = array_filter($providers, fn ($p) => ($p['available'] ?? false));
         Log::info('AI Bridge: bridge connected', [
             'user_id' => $userId,
             'connection_id' => $connectionId,
             'protocol_version' => $protocolVersion,
+            'providers' => array_map(fn ($p) => $p['name'] ?? 'unknown', $availableProviders),
         ]);
 
         return [

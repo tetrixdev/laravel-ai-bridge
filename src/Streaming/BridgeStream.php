@@ -142,6 +142,10 @@ class BridgeStream implements StreamableProvider
             $requestOptions['max_tokens'] = $this->options['max_tokens'];
         }
 
+        if (isset($this->options['model'])) {
+            $requestOptions['model'] = $this->options['model'];
+        }
+
         if (! empty($requestOptions)) {
             $payload['options'] = $requestOptions;
         }

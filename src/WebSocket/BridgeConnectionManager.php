@@ -24,7 +24,7 @@ class BridgeConnectionManager
     /**
      * Map of user_id => connection metadata.
      *
-     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed}>
+     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>}>
      */
     private array $connections = [];
 
@@ -62,8 +62,9 @@ class BridgeConnectionManager
      * @param  int|string  $userId  The authenticated user ID.
      * @param  string  $connectionId  A unique identifier for this connection.
      * @param  mixed  $connection  The underlying WebSocket connection object.
+     * @param  array<int, array<string, mixed>>  $providers  Provider capabilities from the bridge hello message.
      */
-    public function addConnection(int|string $userId, string $connectionId, mixed $connection = null): void
+    public function addConnection(int|string $userId, string $connectionId, mixed $connection = null, array $providers = []): void
     {
         $userId = (string) $userId;
 
@@ -76,6 +77,7 @@ class BridgeConnectionManager
             'connection_id' => $connectionId,
             'connected_at' => time(),
             'connection' => $connection,
+            'providers' => $providers,
         ];
 
         Event::dispatch(new BridgeConnected($userId, $connectionId, time()));
@@ -167,6 +169,35 @@ class BridgeConnectionManager
         }
 
         return null;
+    }
+
+    /**
+     * Store provider capabilities from the bridge hello message.
+     *
+     * For pre-authenticated connections, the connection is registered before
+     * the hello arrives. This method allows updating providers after the fact.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @param  array<int, array<string, mixed>>  $providers  Provider capabilities from hello message.
+     */
+    public function setProviders(int|string $userId, array $providers): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['providers'] = $providers;
+        }
+    }
+
+    /**
+     * Get the provider capabilities for a user's bridge connection.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @return array<int, array<string, mixed>>  Provider capabilities (may be empty if not yet received).
+     */
+    public function getProviders(int|string $userId): array
+    {
+        return $this->connections[(string) $userId]['providers'] ?? [];
     }
 
     /**

@@ -379,10 +379,13 @@ class BridgeWebSocketServer
 
         foreach ($userIds as $userId) {
             $data = $this->connectionManager->getConnection($userId);
+            $providers = $this->connectionManager->getProviders($userId);
+
             $connections[] = [
                 'user_id' => $userId,
                 'connection_id' => $data['connection_id'] ?? null,
                 'connected_at' => $data['connected_at'] ?? null,
+                'providers' => $providers,
             ];
         }
 
