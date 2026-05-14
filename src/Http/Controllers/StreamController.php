@@ -9,7 +9,6 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\AiBridgeManager;
-use Tetrix\AiBridge\Protocol\StreamEvent;
 
 /**
  * HTTP endpoints for streaming AI responses to the browser.
@@ -41,10 +40,7 @@ class StreamController extends Controller
         $message = $request->input('message', '');
         $systemPrompt = $request->input('system_prompt', '');
 
-        $options = $request->input('options', []);
-        if (is_string($options)) {
-            $options = json_decode($options, true) ?? [];
-        }
+        $options = $this->sanitizeOptions($request);
 
         if (! empty($systemPrompt)) {
             $options['system_prompt'] = $systemPrompt;
@@ -55,10 +51,6 @@ class StreamController extends Controller
             $options['model'] = $request->input('model');
         }
 
-        // SEC: endpoint, api_key, and mode are NOT accepted from the request body.
-        // These are server-side configuration only — accepting them from the client
-        // would allow SSRF (endpoint), credential override (api_key), and mode switching.
-
         return $this->manager->streamToResponse($conversationId, $message, $options);
     }
 
@@ -67,25 +59,34 @@ class StreamController extends Controller
      *
      * POST /ai-bridge/stream/broadcast
      *
-     * Accepts: conversation_id, message, system_prompt, channel, options
+     * Accepts: conversation_id, message, system_prompt, options
      * Returns: JSON { "status": "started", "request_id": "..." }
      *
-     * Events are broadcast to the specified Reverb channel as "ai.stream" events.
+     * Events are broadcast to a private Reverb channel derived server-side
+     * from the authenticated user. Clients listen via Laravel Echo.
      */
     public function broadcast(Request $request): JsonResponse
     {
+        // SEC: Reject unauthenticated requests — no 'anon' fallback.
+        // Broadcasting to a channel without a real user ID would bypass authorization.
+        $userId = $request->user()?->getAuthIdentifier();
+        if ($userId === null) {
+            return response()->json([
+                'error' => 'unauthenticated',
+                'message' => 'Authentication required for broadcast streaming.',
+            ], 401);
+        }
+
         $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
         $message = $request->input('message', '');
         $systemPrompt = $request->input('system_prompt', '');
+
         // SEC: Channel name is derived server-side to prevent cross-user injection.
         // The client cannot choose which channel to broadcast on.
-        $userId = $request->user()?->getAuthIdentifier() ?? 'anon';
-        $channel = "private-user.{$userId}.conversation.{$conversationId}";
+        // Note: PrivateChannel prepends "private-" automatically, so pass without prefix.
+        $channel = "user.{$userId}.conversation.{$conversationId}";
 
-        $options = $request->input('options', []);
-        if (is_string($options)) {
-            $options = json_decode($options, true) ?? [];
-        }
+        $options = $this->sanitizeOptions($request);
 
         if (! empty($systemPrompt)) {
             $options['system_prompt'] = $systemPrompt;
@@ -107,5 +108,27 @@ class StreamController extends Controller
             'request_id' => $requestId,
             'channel' => $channel,
         ]);
+    }
+
+    /**
+     * Parse and sanitize the options from the request.
+     *
+     * Strips fields that must not be controlled by the client:
+     * - endpoint, api_key: Would allow SSRF / credential override.
+     * - mode: Would allow switching provider mode.
+     * - user_id: Must come from auth, not client input.
+     *
+     * @return array<string, mixed>
+     */
+    private function sanitizeOptions(Request $request): array
+    {
+        $options = $request->input('options', []);
+        if (is_string($options)) {
+            $options = json_decode($options, true) ?? [];
+        }
+
+        unset($options['endpoint'], $options['api_key'], $options['mode'], $options['user_id']);
+
+        return $options;
     }
 }

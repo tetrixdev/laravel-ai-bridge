@@ -53,6 +53,12 @@ class StreamHandler
 
     private bool $cancelled = false;
 
+    /**
+     * Whether a terminal event (done or error) has already been dispatched.
+     * Prevents double-dispatch if both done and error fire.
+     */
+    private bool $terminated = false;
+
     /** Track the start time for duration reporting in StreamCompleted. */
     private float $startedAt = 0;
 
@@ -145,6 +151,7 @@ class StreamHandler
     public function start(): void
     {
         $this->cancelled = false;
+        $this->terminated = false;
         $this->startedAt = microtime(true);
         $this->provider->start();
     }
@@ -286,6 +293,11 @@ class StreamHandler
      */
     public function dispatchDone(?array $usage = null): void
     {
+        if ($this->terminated) {
+            return;
+        }
+        $this->terminated = true;
+
         foreach ($this->doneCallbacks as $callback) {
             try {
                 $callback($usage);
@@ -314,6 +326,11 @@ class StreamHandler
      */
     public function dispatchError(string $code, string $message): void
     {
+        if ($this->terminated) {
+            return;
+        }
+        $this->terminated = true;
+
         foreach ($this->errorCallbacks as $callback) {
             try {
                 $callback($code, $message);
@@ -341,31 +358,9 @@ class StreamHandler
     public function dispatchEvent(StreamEvent $event): void
     {
         match ($event->event) {
-            MessageTypes::BLOCK_START => (function () use ($event) {
-                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
-                if ($blockType === null) {
-                    Log::warning('AI Bridge: unknown block_type in block_start, skipping', [
-                        'request_id' => $this->requestId,
-                        'block_type' => $event->data['block_type'] ?? '',
-                    ]);
-                    return;
-                }
-                $this->dispatchBlockStart($blockType, $event->data['block_index']);
-            })(),
-            MessageTypes::BLOCK_DELTA => (function () use ($event) {
-                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
-                if ($blockType === null) {
-                    return; // Silently skip — warning already logged on block_start
-                }
-                $this->dispatchBlockDelta($blockType, $event->data['block_index'], $event->data['content'] ?? '');
-            })(),
-            MessageTypes::BLOCK_STOP => (function () use ($event) {
-                $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
-                if ($blockType === null) {
-                    return; // Silently skip — warning already logged on block_start
-                }
-                $this->dispatchBlockStop($blockType, $event->data['block_index']);
-            })(),
+            MessageTypes::BLOCK_START => $this->dispatchBlockStartFromEvent($event),
+            MessageTypes::BLOCK_DELTA => $this->dispatchBlockDeltaFromEvent($event),
+            MessageTypes::BLOCK_STOP => $this->dispatchBlockStopFromEvent($event),
             MessageTypes::TOOL_CALL => $this->dispatchToolCall(
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
@@ -378,6 +373,47 @@ class StreamHandler
             ),
             default => null, // Ignore unknown event types
         };
+    }
+
+    /**
+     * Validate block_type and dispatch block_start from a raw StreamEvent.
+     */
+    private function dispatchBlockStartFromEvent(StreamEvent $event): void
+    {
+        $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+        if ($blockType === null) {
+            Log::warning('AI Bridge: unknown block_type in block_start, skipping', [
+                'request_id' => $this->requestId,
+                'block_type' => $event->data['block_type'] ?? '',
+            ]);
+
+            return;
+        }
+        $this->dispatchBlockStart($blockType, $event->data['block_index']);
+    }
+
+    /**
+     * Validate block_type and dispatch block_delta from a raw StreamEvent.
+     */
+    private function dispatchBlockDeltaFromEvent(StreamEvent $event): void
+    {
+        $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+        if ($blockType === null) {
+            return; // Silently skip — warning already logged on block_start
+        }
+        $this->dispatchBlockDelta($blockType, $event->data['block_index'], $event->data['content'] ?? '');
+    }
+
+    /**
+     * Validate block_type and dispatch block_stop from a raw StreamEvent.
+     */
+    private function dispatchBlockStopFromEvent(StreamEvent $event): void
+    {
+        $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
+        if ($blockType === null) {
+            return; // Silently skip — warning already logged on block_start
+        }
+        $this->dispatchBlockStop($blockType, $event->data['block_index']);
     }
 
     /**

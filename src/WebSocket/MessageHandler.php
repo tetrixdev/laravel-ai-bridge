@@ -278,51 +278,13 @@ class MessageHandler
     {
         $requestId = $message['request_id'] ?? '';
         $data = $message['data'] ?? [];
-        $toolName = $data['tool_name'] ?? '';
-        $params = $data['parameters'] ?? [];
-        $callId = $data['tool_call_id'] ?? $data['call_id'] ?? '';
 
-        $handler = $this->connectionManager->getPendingRequest($requestId);
-
-        // Dispatch to the StreamHandler's tool call callbacks
-        if ($handler) {
-            $handler->dispatchToolCall($toolName, $params, $callId);
-        }
-
-        // Execute the tool if registered
-        if ($this->toolRegistry->has($toolName)) {
-            try {
-                $result = $this->toolRegistry->execute($toolName, $params);
-
-                return [
-                    'type' => MessageTypes::TOOL_RESOLVE,
-                    'request_id' => $requestId,
-                    'tool_call_id' => $callId,
-                    'result' => $result,
-                ];
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: tool execution failed', [
-                    'tool' => $toolName,
-                    'error' => $e->getMessage(),
-                ]);
-
-                return [
-                    'type' => MessageTypes::TOOL_ERROR,
-                    'request_id' => $requestId,
-                    'tool_call_id' => $callId,
-                    'error' => $e->getMessage(),
-                ];
-            }
-        }
-
-        Log::warning('AI Bridge: tool not registered', ['tool' => $toolName]);
-
-        return [
-            'type' => MessageTypes::TOOL_ERROR,
-            'request_id' => $requestId,
-            'tool_call_id' => $callId,
-            'error' => "Tool '{$toolName}' is not registered.",
-        ];
+        return $this->executeToolCall(
+            $requestId,
+            $data['tool_name'] ?? '',
+            $data['parameters'] ?? [],
+            $data['tool_call_id'] ?? $data['call_id'] ?? '',
+        );
     }
 
     /**
@@ -334,10 +296,22 @@ class MessageHandler
     private function handleToolCall(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
-        $toolName = $message['data']['tool_name'] ?? $message['tool_name'] ?? '';
-        $params = $message['data']['parameters'] ?? $message['parameters'] ?? [];
-        $callId = $message['data']['tool_call_id'] ?? $message['data']['call_id'] ?? $message['call_id'] ?? '';
 
+        return $this->executeToolCall(
+            $requestId,
+            $message['data']['tool_name'] ?? $message['tool_name'] ?? '',
+            $message['data']['parameters'] ?? $message['parameters'] ?? [],
+            $message['data']['tool_call_id'] ?? $message['data']['call_id'] ?? $message['call_id'] ?? '',
+        );
+    }
+
+    /**
+     * Execute a tool call: dispatch to StreamHandler callbacks, run the tool, return response.
+     *
+     * Shared implementation for both stream-envelope and top-level tool_call messages.
+     */
+    private function executeToolCall(string $requestId, string $toolName, array $params, string $callId): ?array
+    {
         $handler = $this->connectionManager->getPendingRequest($requestId);
 
         // Dispatch to the StreamHandler's tool call callbacks

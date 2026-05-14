@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge\Streaming;
 
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
+use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
@@ -63,6 +64,7 @@ class BridgeStream implements StreamableProvider
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
         private readonly ToolRegistry $toolRegistry,
+        private readonly TokenManager $tokenManager,
         private readonly int|string $userId,
     ) {
         $this->streamHandler = new StreamHandler($this);
@@ -234,7 +236,6 @@ class BridgeStream implements StreamableProvider
     {
         $host = config('ai-bridge.server.host', '127.0.0.1');
         $port = (int) config('ai-bridge.server.port', 8085);
-        $tokenSecret = config('ai-bridge.token.secret', '');
 
         // Use 127.0.0.1 for localhost connections (0.0.0.0 is a listen address, not connectable)
         if ($host === '0.0.0.0') {
@@ -244,25 +245,26 @@ class BridgeStream implements StreamableProvider
         $url = "http://{$host}:{$port}/api/request";
 
         try {
-            // Generate a short-lived token for internal API auth
-            $tokenManager = app(\Tetrix\AiBridge\Auth\TokenManager::class);
-            $internalToken = $tokenManager->generate($this->userId, [], 60);
+            $internalToken = $this->tokenManager->generate($this->userId, [], 60);
 
             $response = Http::withToken($internalToken)
                 ->timeout(5)
                 ->post($url, [
+                    'request_id' => $payload['request_id'] ?? '',
                     'provider' => $payload['provider'] ?? '',
                     'message' => $payload['message'] ?? '',
                     'conversation_id' => $payload['conversation_id'] ?? '',
                     'system_prompt' => $payload['system_prompt'] ?? null,
                     'options' => $payload['options'] ?? [],
                     'messages' => $payload['messages'] ?? null,
+                    'tools' => $payload['tools'] ?? [],
                 ]);
 
             if ($response->failed()) {
                 $body = $response->json();
                 $error = $body['error'] ?? 'unknown';
-                $message = $body['message'] ?? "HTTP API returned status {$response->status()}";
+                // Don't leak internal server details in error messages
+                $message = $body['message'] ?? 'Bridge server returned an error.';
 
                 $this->streamHandler->dispatchError($error, $message);
 
@@ -271,17 +273,23 @@ class BridgeStream implements StreamableProvider
 
             // Request was accepted by the bridge server. Events will arrive
             // asynchronously via WebSocket → MessageHandler → broadcasting.
-            // NOTE: In SSE mode, the caller will NOT receive these events
-            // because the HTTP response has already been sent. Use broadcasting mode.
-            Log::debug('AI Bridge: relayed request via HTTP API', [
+            // SSE callers will NOT receive async events — they should use
+            // broadcasting (Reverb) mode when running under PHP-FPM with bridge.
+            Log::info('AI Bridge: relayed request via HTTP API (events arrive via broadcasting)', [
                 'request_id' => $payload['request_id'] ?? '',
                 'user_id' => $this->userId,
             ]);
 
         } catch (\Exception $e) {
+            // Don't leak internal host/port in error messages
+            Log::error('AI Bridge: failed to relay request to bridge server', [
+                'url' => $url,
+                'error' => $e->getMessage(),
+            ]);
+
             $this->streamHandler->dispatchError(
                 'bridge_relay_failed',
-                'Failed to relay request to bridge server: ' . $e->getMessage()
+                'Failed to relay request to bridge server. Check server logs for details.'
             );
         }
     }
@@ -290,13 +298,13 @@ class BridgeStream implements StreamableProvider
     {
         $this->cancelled = true;
 
-        // Send cancel message to bridge
+        // Send cancel message to bridge.
+        // Don't remove pending request here — the bridge responds with a 'cancelled'
+        // message, and handleCancelled() needs the pending request to dispatch the
+        // terminal error event before cleaning up.
         $this->connectionManager->sendToUser($this->userId, [
             'type' => MessageTypes::CANCEL,
             'request_id' => $this->streamHandler->requestId,
         ]);
-
-        // Clean up the pending request
-        $this->connectionManager->removePendingRequest($this->streamHandler->requestId);
     }
 }

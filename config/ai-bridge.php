@@ -105,7 +105,7 @@ return [
     */
 
     'broadcasting' => [
-        'enabled' => env('AI_BRIDGE_BROADCAST', true),
+        'enabled' => env('AI_BRIDGE_BROADCAST', false),
         'connection' => env('AI_BRIDGE_BROADCAST_CONNECTION', 'reverb'),
     ],
 ];

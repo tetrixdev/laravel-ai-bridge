@@ -24,7 +24,9 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 class AiStreamEvent implements ShouldBroadcastNow
 {
     /**
-     * @param  string  $channelName  The channel to broadcast on (e.g. "private-user.1.conversation.456").
+     * @param  string  $channelName  The channel name WITHOUT the "private-" prefix
+     *                               (e.g. "user.1.conversation.456"). PrivateChannel
+     *                               prepends "private-" automatically.
      * @param  string  $requestId  The unique request ID for this stream.
      * @param  string  $event  The stream event type (block_start, block_delta, etc.).
      * @param  array<string, mixed>  $data  The event payload data.

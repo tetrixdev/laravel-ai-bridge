@@ -24,7 +24,7 @@ class AiBridgeStream {
         this.listeners = {};
         this._reader = null;
         this._abortController = null;
-        this._finished = false; // Guard against emitting done/error after stream ends
+        this._generation = 0; // Per-request generation counter to ignore stale events
 
         if (this.mode === 'reverb' && this.channel && typeof window.Echo !== 'undefined') {
             this._listenReverb();
@@ -33,7 +33,7 @@ class AiBridgeStream {
 
     /**
      * Register an event listener.
-     * Events: text, thinking, tool_call, done, error, block_start, block_stop, raw
+     * Events: text, thinking, tool_call, done, error, cancelled, block_start, block_stop, block_delta, raw
      */
     on(event, callback) {
         if (!this.listeners[event]) {
@@ -69,14 +69,15 @@ class AiBridgeStream {
      * Emits a 'cancelled' event so the UI receives a terminal event and doesn't hang.
      */
     abort() {
+        const gen = this._generation;
         if (this._abortController) {
             this._abortController.abort();
             this._abortController = null;
         }
-        if (!this._finished) {
-            this._finished = true;
+        // Only emit if this generation hasn't already terminated
+        if (gen === this._generation) {
+            this._generation++;
             this._emit('cancelled');
-            this._emit('done', null);
         }
     }
 
@@ -89,12 +90,14 @@ class AiBridgeStream {
 
     /** @private */
     async _sendSSE(data) {
-        // Reset state for new request (abort previous without emitting done)
+        // Abort any previous request without emitting events
         if (this._abortController) {
             this._abortController.abort();
             this._abortController = null;
         }
-        this._finished = false;
+
+        // New generation — any events from the previous request are now stale
+        const gen = ++this._generation;
         this._abortController = new AbortController();
 
         try {
@@ -110,6 +113,8 @@ class AiBridgeStream {
             });
 
             if (!response.ok) {
+                if (gen !== this._generation) return;
+                this._generation++;
                 this._emit('error', 'http_error', `HTTP ${response.status}`);
                 return;
             }
@@ -122,18 +127,23 @@ class AiBridgeStream {
                 const { done, value } = await reader.read();
                 if (done) break;
 
+                // Check if this request is still current
+                if (gen !== this._generation) return;
+
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
 
                 for (const line of lines) {
+                    if (gen !== this._generation) return;
+
                     const trimmed = line.trim();
                     if (!trimmed || !trimmed.startsWith('data: ')) continue;
 
                     const payload = trimmed.slice(6);
                     if (payload === '[DONE]') {
-                        if (!this._finished) {
-                            this._finished = true;
+                        if (gen === this._generation) {
+                            this._generation++;
                             this._emit('done', null);
                         }
                         return;
@@ -141,21 +151,31 @@ class AiBridgeStream {
 
                     try {
                         const parsed = JSON.parse(payload);
-                        this._handleEvent(parsed);
+                        this._handleEvent(parsed, gen);
                     } catch (e) {
                         // Skip unparseable lines
                     }
                 }
             }
-        } catch (err) {
-            if (err.name !== 'AbortError') {
-                this._emit('error', 'network_error', err.message);
+
+            // Stream ended without [DONE] — emit terminal event so UI doesn't hang
+            if (gen === this._generation) {
+                this._generation++;
+                this._emit('done', null);
             }
+        } catch (err) {
+            if (err.name === 'AbortError') return;
+            if (gen !== this._generation) return;
+            this._generation++;
+            this._emit('error', 'network_error', err.message);
         }
     }
 
     /** @private */
     async _sendBroadcast(data) {
+        // New generation for broadcast requests too
+        const gen = ++this._generation;
+
         try {
             const response = await fetch(this.broadcastUrl, {
                 method: 'POST',
@@ -170,9 +190,13 @@ class AiBridgeStream {
             });
 
             if (!response.ok) {
+                if (gen !== this._generation) return;
+                this._generation++;
                 this._emit('error', 'http_error', `HTTP ${response.status}`);
             }
         } catch (err) {
+            if (gen !== this._generation) return;
+            this._generation++;
             this._emit('error', 'network_error', err.message);
         }
     }
@@ -184,12 +208,15 @@ class AiBridgeStream {
         // Use private channel for authorization (matches server-side PrivateChannel)
         window.Echo.private(this.channel)
             .listen('.ai.stream', (e) => {
-                this._handleEvent(e);
+                this._handleEvent(e, this._generation);
             });
     }
 
     /** @private */
-    _handleEvent(parsed) {
+    _handleEvent(parsed, gen) {
+        // Ignore events from a stale request
+        if (gen !== this._generation) return;
+
         this._emit('raw', parsed);
 
         const event = parsed.event;
@@ -214,13 +241,16 @@ class AiBridgeStream {
                 this._emit('tool_call', data.tool_name, data.parameters || {});
                 break;
             case 'done':
-                if (!this._finished) {
-                    this._finished = true;
+                if (gen === this._generation) {
+                    this._generation++;
                     this._emit('done', data.usage || null);
                 }
                 break;
             case 'error':
-                this._emit('error', data.code || 'unknown', data.message || 'Unknown error');
+                if (gen === this._generation) {
+                    this._generation++;
+                    this._emit('error', data.code || 'unknown', data.message || 'Unknown error');
+                }
                 break;
         }
     }

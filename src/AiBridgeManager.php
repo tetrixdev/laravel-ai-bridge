@@ -12,6 +12,7 @@ use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -37,6 +38,7 @@ class AiBridgeManager
     public function __construct(
         private readonly ToolRegistry $toolRegistry,
         private readonly BridgeConnectionManager $connectionManager,
+        private readonly TokenManager $tokenManager,
     ) {}
 
     /**
@@ -53,8 +55,9 @@ class AiBridgeManager
      *   - 'temperature': Sampling temperature.
      *   - 'max_tokens': Maximum tokens in response.
      *   - 'model': Override the configured model.
+     *   - 'api_key': Override API key for BYOK (server-side only, stripped from HTTP input).
      *   - 'mode': ProviderMode enum instance for programmatic override (not from request input).
-     *   - 'user_id': User ID for bridge mode (defaults to auth user).
+     *   - 'user_id': User ID for bridge mode (server-side only, defaults to auth user).
      * @return StreamHandler
      */
     public function stream(string $conversationId, string $message, array $options = []): StreamHandler
@@ -324,6 +327,8 @@ class AiBridgeManager
      */
     private function createBridgeProvider(array $options): BridgeStream
     {
+        // SEC: user_id is resolved from auth context only — never from request options.
+        // Programmatic callers can still pass user_id for server-side use cases.
         $userId = $options['user_id'] ?? $this->resolveAuthUserId();
 
         if ($userId === null) {
@@ -335,6 +340,7 @@ class AiBridgeManager
         $stream = new BridgeStream(
             $this->connectionManager,
             $this->toolRegistry,
+            $this->tokenManager,
             $userId,
         );
 
@@ -352,10 +358,12 @@ class AiBridgeManager
      */
     private function createChatCompletionsProvider(array $options): ChatCompletionsStream
     {
-        // SEC: endpoint and api_key are always read from config — never from request options.
-        // Accepting these from the client would enable SSRF (endpoint) and credential override (api_key).
+        // endpoint is always read from config — never from request options (SSRF risk).
+        // api_key can be overridden programmatically (e.g. BYOK mode where the consuming
+        // app resolves the user's key and passes it via options). The StreamController
+        // strips api_key from HTTP request input, so only server-side callers can set it.
         $endpoint = config('ai-bridge.chat_completions.endpoint');
-        $apiKey = config('ai-bridge.chat_completions.api_key');
+        $apiKey = $options['api_key'] ?? config('ai-bridge.chat_completions.api_key');
         $model = $options['model'] ?? config('ai-bridge.chat_completions.model');
         $maxTokens = $options['max_tokens'] ?? (int) config('ai-bridge.chat_completions.max_tokens', 4096);
 

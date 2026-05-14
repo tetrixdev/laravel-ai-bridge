@@ -17,13 +17,14 @@ use Tetrix\AiBridge\Auth\TokenManager;
  */
 class GenerateTokenCommand extends Command
 {
-    protected $signature = 'ai-bridge:token {--user-id=1 : User ID to generate token for} {--ttl=3600 : Token TTL in seconds}';
+    protected $signature = 'ai-bridge:token {--user-id=1 : User ID to generate token for} {--ttl= : Token TTL in seconds (default: from config ai-bridge.token.ttl)}';
 
     protected $description = 'Generate a JWT connection token for AI Bridge testing';
 
     public function handle(TokenManager $manager): int
     {
-        $ttl = (int) $this->option('ttl');
+        $ttlOption = $this->option('ttl');
+        $ttl = $ttlOption !== null ? (int) $ttlOption : (int) config('ai-bridge.token.ttl', 86400);
 
         try {
             $token = $manager->generate($this->option('user-id'), [], $ttl > 0 ? $ttl : null);
