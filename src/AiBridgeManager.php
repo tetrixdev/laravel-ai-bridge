@@ -190,6 +190,12 @@ class AiBridgeManager
      */
     public function streamAndBroadcast(string $conversationId, string $message, string $channel, array $options = []): string
     {
+        if (! config('ai-bridge.broadcasting.enabled', true)) {
+            throw new InvalidArgumentException(
+                'Broadcasting is disabled. Set AI_BRIDGE_BROADCAST=true in .env or use streamToResponse() for SSE.'
+            );
+        }
+
         $stream = $this->stream($conversationId, $message, $options);
         $requestId = $stream->requestId;
 
@@ -199,7 +205,14 @@ class AiBridgeManager
 
         $this->wireCallbacks($stream, $broadcast);
 
-        $stream->start();
+        // For BYOK/managed modes (ChatCompletionsStream), start() blocks until the
+        // HTTP stream completes. Use afterResponse() to run the stream after the
+        // HTTP response (with the request_id/channel) has been sent to the client.
+        // For bridge mode, start() is already non-blocking, but afterResponse()
+        // is safe to use there too.
+        dispatch(function () use ($stream) {
+            $stream->start();
+        })->afterResponse();
 
         return $requestId;
     }
@@ -213,15 +226,26 @@ class AiBridgeManager
      */
     private function wireCallbacks(StreamHandler $stream, callable $sink, ?Closure $onTerminal = null): void
     {
-        $stream->onBlockStart(function (StreamEvent $event) use ($sink) {
+        $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', false);
+
+        $stream->onBlockStart(function (StreamEvent $event) use ($sink, $suppressThinking) {
+            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+                return;
+            }
             $sink(['event' => $event->event, 'data' => $event->data]);
         });
 
-        $stream->onBlockDelta(function (StreamEvent $event) use ($sink) {
+        $stream->onBlockDelta(function (StreamEvent $event) use ($sink, $suppressThinking) {
+            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+                return;
+            }
             $sink(['event' => $event->event, 'data' => $event->data]);
         });
 
-        $stream->onBlockStop(function (StreamEvent $event) use ($sink) {
+        $stream->onBlockStop(function (StreamEvent $event) use ($sink, $suppressThinking) {
+            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+                return;
+            }
             $sink(['event' => $event->event, 'data' => $event->data]);
         });
 
@@ -231,7 +255,8 @@ class AiBridgeManager
                 'data' => [
                     'tool_name' => $toolName,
                     'parameters' => $params,
-                    'call_id' => $callId,
+                    'tool_call_id' => $callId,
+                    'call_id' => $callId, // Deprecated: use tool_call_id instead
                 ],
             ]);
         });
@@ -249,14 +274,32 @@ class AiBridgeManager
                 $onTerminal();
             }
         });
+
+        $stream->onCancelled(function (string $reason) use ($sink, $onTerminal) {
+            $sink(['event' => 'cancelled', 'data' => ['reason' => $reason]]);
+            if ($onTerminal) {
+                $onTerminal();
+            }
+        });
     }
 
     /**
      * Get the active provider mode from config.
+     *
+     * @throws InvalidArgumentException If the configured mode is not a valid ProviderMode value.
      */
     public function mode(): ProviderMode
     {
-        return ProviderMode::from(config('ai-bridge.mode', 'byok'));
+        $modeValue = config('ai-bridge.mode', 'byok');
+
+        try {
+            return ProviderMode::from($modeValue);
+        } catch (\ValueError) {
+            $allowed = implode(', ', array_map(fn (ProviderMode $m) => "'{$m->value}'", ProviderMode::cases()));
+            throw new InvalidArgumentException(
+                "Invalid AI_BRIDGE_MODE value '{$modeValue}'. Allowed values: {$allowed}."
+            );
+        }
     }
 
     /**

@@ -96,19 +96,9 @@ class BridgeWebSocketHandler
             'connection' => $conn,
         ];
 
-        // Register in the BridgeConnectionManager with a send callback
+        // Register in the BridgeConnectionManager — BridgeConnection objects support
+        // direct send via the BridgeConnectionManager::sendToUser() instanceof check.
         $this->connectionManager->addConnection($userId, $connectionId, $conn);
-
-        // Set up send callback so BridgeConnectionManager can send messages
-        $this->connectionManager->setSendCallback(function (mixed $connection, array $payload): bool {
-            if ($connection instanceof BridgeConnection) {
-                $connection->send(json_encode($payload));
-
-                return true;
-            }
-
-            return false;
-        });
 
         Log::info('AI Bridge Server: connection established', [
             'connection_id' => $connectionId,
@@ -194,6 +184,15 @@ class BridgeWebSocketHandler
             'user_id' => $meta['user_id'] ?? 'unknown',
             'error' => $e->getMessage(),
         ]);
+
+        // Clean up connection tracking before closing to prevent leaks
+        if ($meta !== null) {
+            $userId = $meta['user_id'];
+            if ($userId !== null) {
+                $this->connectionManager->removeConnection($userId, 'websocket_error');
+            }
+            unset($this->connections[$resourceId]);
+        }
 
         $conn->close();
     }

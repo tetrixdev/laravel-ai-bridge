@@ -112,6 +112,14 @@ class BridgeWebSocketServer
 
             $httpBuffer .= $data;
 
+            // SEC: Prevent unbounded buffer growth before WebSocket upgrade (max 64KB).
+            if (strlen($httpBuffer) > 65536) {
+                $tcpConnection->write("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 16\r\n\r\nPayload too large");
+                $tcpConnection->end();
+
+                return;
+            }
+
             // Phase 1: wait for headers to complete (\r\n\r\n)
             if (! $headersComplete) {
                 $headerEnd = strpos($httpBuffer, "\r\n\r\n");
@@ -301,6 +309,10 @@ class BridgeWebSocketServer
     //   POST /api/request   — Send an ai_request to a user's bridge
     //   GET  /api/status    — Check connected users
     //   GET  /api/health    — Health check
+    //
+    // TODO (ARCH-005): Extract this HTTP API handling into a separate
+    // InternalHttpHandler class to improve separation of concerns.
+    // The WebSocket server class should only manage socket lifecycle.
     // -------------------------------------------------------------------------
 
     /**
@@ -459,8 +471,9 @@ class BridgeWebSocketServer
             return;
         }
 
-        // Build ai_request payload
-        $requestId = 'req-' . bin2hex(random_bytes(8));
+        // Build ai_request payload — use the request_id from the relay body if provided,
+        // to preserve the original request_id for event routing back to the caller.
+        $requestId = ! empty($body['request_id']) ? $body['request_id'] : 'req-' . bin2hex(random_bytes(8));
         $payload = [
             'type' => 'ai_request',
             'request_id' => $requestId,
@@ -477,6 +490,9 @@ class BridgeWebSocketServer
         if (isset($body['messages'])) {
             $payload['messages'] = $body['messages'];
         }
+
+        // Forward tools from relay body so the bridge knows which tools are available
+        $payload['tools'] = $body['tools'] ?? [];
 
         $sent = $this->connectionManager->sendToUser($userId, $payload);
 

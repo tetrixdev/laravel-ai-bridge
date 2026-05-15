@@ -132,7 +132,7 @@ class ChatCompletionsStream implements StreamableProvider
                 'Content-Type' => 'application/json',
                 'Accept' => 'text/event-stream',
             ])
-                ->timeout((int) config('ai-bridge.websocket.request_timeout', 300))
+                ->timeout((int) config('ai-bridge.chat_completions.stream_timeout', 300))
                 ->withOptions(['stream' => true])
                 ->post($url, $body);
 
@@ -142,10 +142,15 @@ class ChatCompletionsStream implements StreamableProvider
                     'body' => mb_substr($response->body(), 0, 1000),
                 ]);
 
-                $this->streamHandler->dispatchError(
-                    'api_error',
-                    'AI provider returned an error (HTTP '.$response->status().'). Check server logs for details.'
-                );
+                // Map HTTP status to actionable error codes and messages
+                [$errorCode, $errorMessage] = match ($response->status()) {
+                    429 => ['rate_limited', 'AI provider rate limit exceeded. Please wait and try again.'],
+                    401, 403 => ['auth_error', 'AI provider authentication failed. Check your API key configuration.'],
+                    503 => ['service_unavailable', 'AI provider is temporarily unavailable. Try again shortly.'],
+                    default => ['api_error', 'AI provider returned an error (HTTP '.$response->status().'). Check server logs for details.'],
+                };
+
+                $this->streamHandler->dispatchError($errorCode, $errorMessage);
 
                 return;
             }
@@ -171,6 +176,31 @@ class ChatCompletionsStream implements StreamableProvider
     public function cancel(): void
     {
         $this->cancelled = true;
+    }
+
+    /**
+     * Flush accumulated tool calls to the stream handler (at most once).
+     *
+     * @param  array  &$accumulators  The accumulated tool call data.
+     * @param  bool  &$dispatched  Guard flag, set to true after first flush.
+     */
+    private function flushToolCalls(array &$accumulators, bool &$dispatched): void
+    {
+        if ($dispatched || empty($accumulators)) {
+            return;
+        }
+
+        foreach ($accumulators as $accum) {
+            $params = json_decode($accum['arguments'], true) ?? [];
+            $this->streamHandler->dispatchToolCall(
+                $accum['name'],
+                $params,
+                $accum['id'],
+            );
+        }
+
+        $dispatched = true;
+        $accumulators = [];
     }
 
     /**
@@ -218,18 +248,7 @@ class ChatCompletionsStream implements StreamableProvider
                         $currentBlockType = null;
                     }
 
-                    // Dispatch any accumulated tool calls (only if not already dispatched)
-                    if (! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
-                        foreach ($toolCallAccumulators as $accum) {
-                            $params = json_decode($accum['arguments'], true) ?? [];
-                            $this->streamHandler->dispatchToolCall(
-                                $accum['name'],
-                                $params,
-                                $accum['id'],
-                            );
-                        }
-                        $toolCallsDispatched = true;
-                    }
+                    $this->flushToolCalls($toolCallAccumulators, $toolCallsDispatched);
 
                     $this->streamHandler->dispatchDone(null);
 
@@ -246,19 +265,7 @@ class ChatCompletionsStream implements StreamableProvider
                             $currentBlockType = null;
                         }
 
-                        // Dispatch accumulated tool calls (only if not already dispatched)
-                        if (! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
-                            foreach ($toolCallAccumulators as $accum) {
-                                $params = json_decode($accum['arguments'], true) ?? [];
-                                $this->streamHandler->dispatchToolCall(
-                                    $accum['name'],
-                                    $params,
-                                    $accum['id'],
-                                );
-                            }
-                            $toolCallsDispatched = true;
-                        }
-                        $toolCallAccumulators = [];
+                        $this->flushToolCalls($toolCallAccumulators, $toolCallsDispatched);
 
                         $this->streamHandler->dispatchDone($parsed['usage']);
 
@@ -329,19 +336,9 @@ class ChatCompletionsStream implements StreamableProvider
                         $currentBlockType = null;
                     }
 
-                    // Dispatch any accumulated tool calls (only once)
-                    if ($finishReason === 'tool_calls' && ! $toolCallsDispatched && ! empty($toolCallAccumulators)) {
-                        foreach ($toolCallAccumulators as $accum) {
-                            $params = json_decode($accum['arguments'], true) ?? [];
-                            $this->streamHandler->dispatchToolCall(
-                                $accum['name'],
-                                $params,
-                                $accum['id'],
-                            );
-                        }
-                        $toolCallsDispatched = true;
-                        $toolCallAccumulators = [];
-                    }
+                    // Dispatch any accumulated tool calls regardless of finish_reason value.
+                    // Some providers use 'tool_calls', others use 'stop' even when tool calls are present.
+                    $this->flushToolCalls($toolCallAccumulators, $toolCallsDispatched);
 
                     // Usage may come in the same or next chunk, so don't dispatch done yet
                     // unless this is a non-streaming finish

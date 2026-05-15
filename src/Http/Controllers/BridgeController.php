@@ -46,13 +46,17 @@ class BridgeController extends Controller
             ], 401);
         }
 
-        $token = $this->tokenManager->generate($user->getAuthIdentifier(), [
-            'name' => $user->name ?? null,
-        ]);
+        // SEC-008: Do not include PII (name) in the JWT — it ends up in logs.
+        $token = $this->tokenManager->generate($user->getAuthIdentifier());
+
+        $host = config('ai-bridge.server.host', '127.0.0.1');
+        $port = (int) config('ai-bridge.server.port', 8085);
+        $websocketUrl = "ws://{$host}:{$port}";
 
         return response()->json([
             'token' => $token,
             'expires_in' => $this->tokenManager->getTtl(),
+            'websocket_url' => $websocketUrl,
         ]);
     }
 
@@ -81,7 +85,17 @@ class BridgeController extends Controller
         }
 
         $userId = $user->getAuthIdentifier();
-        $mode = ProviderMode::from(config('ai-bridge.mode', 'byok'));
+
+        try {
+            $mode = ProviderMode::from(config('ai-bridge.mode', 'byok'));
+        } catch (\ValueError) {
+            $allowed = implode(', ', array_map(fn (ProviderMode $m) => "'{$m->value}'", ProviderMode::cases()));
+            return response()->json([
+                'error' => 'invalid_configuration',
+                'message' => "Invalid AI_BRIDGE_MODE value. Allowed values: {$allowed}.",
+            ], 500);
+        }
+
         $connected = $this->connectionManager->hasConnection($userId);
         $connectionData = $this->connectionManager->getConnection($userId);
 

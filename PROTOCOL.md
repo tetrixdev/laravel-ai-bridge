@@ -62,7 +62,7 @@ Same as BYOK, but the application provides its own API key. Users pay the app a 
 The bridge connects to the server's WebSocket endpoint:
 
 ```
-wss://{host}/api/ai-bridge/ws?token={connection_token}
+wss://{host}:{port}?token={connection_token}
 ```
 
 The `connection_token` is a short-lived JWT obtained by the user through the web application's settings page. It encodes:

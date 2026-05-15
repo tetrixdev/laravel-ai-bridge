@@ -51,6 +51,12 @@ class StreamHandler
     /** @var Closure[] */
     private array $errorCallbacks = [];
 
+    /** @var Closure[] */
+    private array $cancelledCallbacks = [];
+
+    /** @var Closure[] */
+    private array $toolResultCallbacks = [];
+
     private bool $cancelled = false;
 
     /**
@@ -144,6 +150,30 @@ class StreamHandler
     public function onError(Closure $callback): static
     {
         $this->errorCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Register a callback for when the stream is cancelled.
+     *
+     * The callback receives: string $reason.
+     */
+    public function onCancelled(Closure $callback): static
+    {
+        $this->cancelledCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Register a callback for tool_result events from the bridge.
+     *
+     * The callback receives: string $toolCallId, mixed $result.
+     */
+    public function onToolResult(Closure $callback): static
+    {
+        $this->toolResultCallbacks[] = $callback;
 
         return $this;
     }
@@ -306,7 +336,7 @@ class StreamHandler
      */
     public function dispatchDone(?array $usage = null): void
     {
-        if ($this->terminated) {
+        if ($this->cancelled || $this->terminated) {
             return;
         }
         $this->terminated = true;
@@ -358,6 +388,65 @@ class StreamHandler
     }
 
     /**
+     * Dispatch a tool_result event to all registered callbacks.
+     *
+     * @internal Called when the bridge acknowledges receipt of a tool result.
+     */
+    public function dispatchToolResult(string $toolCallId, mixed $result): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        Log::debug('AI Bridge: tool_result received', [
+            'request_id' => $this->requestId,
+            'tool_call_id' => $toolCallId,
+        ]);
+
+        foreach ($this->toolResultCallbacks as $callback) {
+            try {
+                $callback($toolCallId, $result);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in toolResult callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    /**
+     * Dispatch a cancelled event to all registered callbacks.
+     *
+     * Unlike error, this emits event type 'cancelled' so consumers can
+     * differentiate between errors and intentional cancellation.
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchCancelled(string $reason = 'Request was cancelled.'): void
+    {
+        if ($this->terminated) {
+            return;
+        }
+        $this->terminated = true;
+
+        foreach ($this->cancelledCallbacks as $callback) {
+            try {
+                $callback($reason);
+            } catch (\Throwable $e) {
+                Log::error('AI Bridge: exception in cancelled callback', [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}");
+
+        $this->provider->markCompleted();
+    }
+
+    /**
      * Dispatch a raw StreamEvent. Routes to the appropriate typed dispatch method.
      *
      * @internal Useful for providers that produce StreamEvent objects directly.
@@ -372,6 +461,10 @@ class StreamHandler
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
                 $event->data['call_id'] ?? $event->data['tool_call_id'] ?? '',
+            ),
+            MessageTypes::TOOL_RESULT => $this->dispatchToolResult(
+                $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
+                $event->data['result'] ?? null,
             ),
             MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
             MessageTypes::ERROR => $this->dispatchError(
@@ -432,9 +525,10 @@ class StreamHandler
             ? (int) ((microtime(true) - $this->startedAt) * 1000)
             : null;
 
-        $mode = $this->mode ?? ($this->provider instanceof BridgeStream
-            ? ProviderMode::Bridge
-            : ProviderMode::Byok);
+        if ($this->mode === null) {
+            Log::warning('AI Bridge: StreamHandler mode not set, defaulting to Byok. Call setMode() before start().');
+        }
+        $mode = $this->mode ?? ProviderMode::Byok;
 
         try {
             event(new StreamCompleted(

@@ -36,32 +36,12 @@ class StreamController extends Controller
      */
     public function sse(Request $request): StreamedResponse|JsonResponse
     {
-        // Validate required message field
-        $message = $request->input('message', '');
-        if (empty(trim($message))) {
-            return response()->json([
-                'error' => 'validation_error',
-                'message' => 'The message field is required and cannot be empty.',
-            ], 422);
+        $prepared = $this->prepareRequestOptions($request);
+        if ($prepared instanceof JsonResponse) {
+            return $prepared;
         }
 
-        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
-
-        $isManagedMode = config('ai-bridge.mode') === 'managed';
-        $options = $this->sanitizeOptions($request);
-
-        // Only allow per-request overrides in non-managed mode.
-        // In managed mode, the app controls AI behavior and cost.
-        if (! $isManagedMode) {
-            $systemPrompt = $request->input('system_prompt', '');
-            if (! empty($systemPrompt)) {
-                $options['system_prompt'] = $systemPrompt;
-            }
-
-            if ($request->has('model')) {
-                $options['model'] = $request->input('model');
-            }
-        }
+        [$conversationId, $message, $options] = $prepared;
 
         return $this->manager->streamToResponse($conversationId, $message, $options);
     }
@@ -89,7 +69,42 @@ class StreamController extends Controller
             ], 401);
         }
 
-        // Validate required message field
+        $prepared = $this->prepareRequestOptions($request);
+        if ($prepared instanceof JsonResponse) {
+            return $prepared;
+        }
+
+        [$conversationId, $message, $options] = $prepared;
+
+        // SEC: Channel name is derived server-side to prevent cross-user injection.
+        // The client cannot choose which channel to broadcast on.
+        // Note: PrivateChannel prepends "private-" automatically, so pass without prefix.
+        $channel = "user.{$userId}.conversation.{$conversationId}";
+
+        $requestId = $this->manager->streamAndBroadcast(
+            $conversationId,
+            $message,
+            $channel,
+            $options,
+        );
+
+        return response()->json([
+            'status' => 'started',
+            'request_id' => $requestId,
+            'channel' => $channel,
+        ]);
+    }
+
+    /**
+     * Validate and prepare request options shared between sse() and broadcast().
+     *
+     * Returns either a [conversationId, message, options] array on success,
+     * or a JsonResponse on validation failure.
+     *
+     * @return array{string, string, array<string, mixed>}|JsonResponse
+     */
+    private function prepareRequestOptions(Request $request): array|JsonResponse
+    {
         $message = $request->input('message', '');
         if (empty(trim($message))) {
             return response()->json([
@@ -100,12 +115,8 @@ class StreamController extends Controller
 
         $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
 
-        // SEC: Channel name is derived server-side to prevent cross-user injection.
-        // The client cannot choose which channel to broadcast on.
-        // Note: PrivateChannel prepends "private-" automatically, so pass without prefix.
-        $channel = "user.{$userId}.conversation.{$conversationId}";
-
-        $isManagedMode = config('ai-bridge.mode') === 'managed';
+        $mode = config('ai-bridge.mode');
+        $isManagedMode = $mode === 'managed';
         $options = $this->sanitizeOptions($request);
 
         // Only allow per-request overrides in non-managed mode.
@@ -121,18 +132,7 @@ class StreamController extends Controller
             }
         }
 
-        $requestId = $this->manager->streamAndBroadcast(
-            $conversationId,
-            $message,
-            $channel,
-            $options,
-        );
-
-        return response()->json([
-            'status' => 'started',
-            'request_id' => $requestId,
-            'channel' => $channel,
-        ]);
+        return [$conversationId, $message, $options];
     }
 
     /**

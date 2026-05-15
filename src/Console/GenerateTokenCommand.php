@@ -43,7 +43,7 @@ class GenerateTokenCommand extends Command
         $this->line($token);
         $this->newLine();
         $this->info('Use with bridge:');
-        $this->line("npx @tetrixdev/ai-bridge --server=ws://localhost:{$port}/ai-bridge/ws --token={$token}");
+        $this->line("npx @tetrixdev/ai-bridge --server=ws://localhost:{$port} --token={$token}");
 
         return 0;
     }

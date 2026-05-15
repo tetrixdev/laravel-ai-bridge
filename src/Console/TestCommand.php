@@ -20,11 +20,16 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
  * Usage:
  *   php artisan ai-bridge:test
  *   php artisan ai-bridge:test "What is 2+2?"
+ *   php artisan ai-bridge:test "Hello!" --mode=bridge --provider=claude
  *   php artisan ai-bridge:test "Hello!" --mode=byok
  */
 class TestCommand extends Command
 {
-    protected $signature = 'ai-bridge:test {message=Hello from AI Bridge!} {--mode=byok}';
+    protected $signature = 'ai-bridge:test
+        {message=Hello from AI Bridge!}
+        {--mode=byok}
+        {--provider= : Provider to use in bridge mode (claude, codex, gemini)}
+        {--user-id=1 : User ID to simulate for bridge mode}';
 
     protected $description = 'Send a test AI request through the bridge';
 
@@ -43,11 +48,25 @@ class TestCommand extends Command
             $this->newLine();
         }
 
+        $failed = false;
+
+        $options = [
+            'mode' => ProviderMode::from($mode),
+            'system_prompt' => 'You are a helpful assistant. Keep responses brief.',
+        ];
+
+        // Bridge mode requires a user_id (artisan commands have no auth context)
+        if ($mode === 'bridge') {
+            $options['user_id'] = $this->option('user-id') ?? '1';
+        }
+
+        // Allow provider selection for bridge mode
+        if ($provider = $this->option('provider')) {
+            $options['provider'] = $provider;
+        }
+
         try {
-            $stream = $manager->stream('test-conversation', $message, [
-                'mode' => ProviderMode::from($mode),
-                'system_prompt' => 'You are a helpful assistant. Keep responses brief.',
-            ]);
+            $stream = $manager->stream('test-conversation', $message, $options);
 
             $stream->onBlockStart(function (StreamEvent $event) {
                 $blockType = $event->data['block_type'] ?? 'unknown';
@@ -81,9 +100,10 @@ class TestCommand extends Command
                 }
             });
 
-            $stream->onError(function (string $code, string $errorMessage) {
+            $stream->onError(function (string $code, string $errorMessage) use (&$failed) {
                 $this->newLine();
                 $this->error("Stream error [{$code}]: {$errorMessage}");
+                $failed = true;
             });
 
             $stream->start();
@@ -98,13 +118,13 @@ class TestCommand extends Command
                 $this->line('  AI_BRIDGE_MODEL=gpt-4o');
             }
 
-            return 1;
+            return self::FAILURE;
         } catch (\Exception $e) {
             $this->error('Unexpected error: '.$e->getMessage());
 
-            return 1;
+            return self::FAILURE;
         }
 
-        return 0;
+        return $failed ? self::FAILURE : self::SUCCESS;
     }
 }

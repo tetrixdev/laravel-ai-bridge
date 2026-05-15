@@ -75,6 +75,7 @@ return [
         'api_key' => env('AI_BRIDGE_API_KEY'),          // User's key (BYOK) or app's key (managed)
         'model' => env('AI_BRIDGE_MODEL'),              // e.g. gpt-4o
         'max_tokens' => env('AI_BRIDGE_MAX_TOKENS', 4096),
+        'stream_timeout' => env('AI_BRIDGE_STREAM_TIMEOUT', 300), // seconds before stream HTTP timeout
     ],
 
     /*
@@ -89,9 +90,15 @@ return [
     */
 
     'server' => [
-        'host' => env('AI_BRIDGE_SERVER_HOST', '0.0.0.0'),
+        'host' => env('AI_BRIDGE_SERVER_HOST', '127.0.0.1'),
         'port' => env('AI_BRIDGE_SERVER_PORT', 8085),
         'relay_timeout' => env('AI_BRIDGE_RELAY_TIMEOUT', 5), // seconds for internal HTTP relay
+
+        // URL for internal relay requests (PHP-FPM → bridge server communication).
+        // Override to use HTTPS if the bridge server is behind a TLS-terminating proxy.
+        // Security: When running the bridge server on a separate host, use HTTPS to
+        // protect internal relay tokens in transit.
+        'relay_url' => env('AI_BRIDGE_RELAY_URL'),
     ],
 
     /*
@@ -108,5 +115,18 @@ return [
     'broadcasting' => [
         'enabled' => env('AI_BRIDGE_BROADCAST', true),
         'connection' => env('AI_BRIDGE_BROADCAST_CONNECTION', 'reverb'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Streaming Options
+    |--------------------------------------------------------------------------
+    */
+
+    'streaming' => [
+        // When true, thinking/reasoning block events are suppressed from SSE and
+        // broadcast outputs. Useful when internal AI reasoning should not be
+        // exposed to end users.
+        'suppress_thinking_blocks' => env('AI_BRIDGE_SUPPRESS_THINKING', false),
     ],
 ];

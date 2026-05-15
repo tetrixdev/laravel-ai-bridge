@@ -94,8 +94,9 @@ class ChatController extends Controller
 ```html
 <div id="chat">
     <div id="messages"></div>
+    <div id="error" style="color: red; display: none;"></div>
     <input type="text" id="input" placeholder="Type a message...">
-    <button onclick="send()">Send</button>
+    <button id="send-btn" onclick="send()">Send</button>
 </div>
 
 <script src="/js/vendor/ai-bridge.js"></script>
@@ -111,10 +112,27 @@ stream.on('text', (content) => {
 
 stream.on('done', () => {
     document.getElementById('messages').innerHTML += '<br><br>';
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('input').disabled = false;
+});
+
+stream.on('error', (code, message) => {
+    const el = document.getElementById('error');
+    el.textContent = `Error: ${message}`;
+    el.style.display = 'block';
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('input').disabled = false;
 });
 
 function send() {
     const input = document.getElementById('input');
+    if (!input.value.trim()) return;
+
+    // Disable input during streaming
+    document.getElementById('send-btn').disabled = true;
+    input.disabled = true;
+    document.getElementById('error').style.display = 'none';
+
     stream.send({ message: input.value, conversation_id: 'conv-1' });
     input.value = '';
 }
@@ -324,6 +342,18 @@ php artisan vendor:publish --tag=ai-bridge-js
 ```
 
 This copies `ai-bridge.js` to `resources/js/vendor/ai-bridge.js`.
+
+**Using with Vite (recommended):** Import it in your `resources/js/app.js`:
+
+```js
+import './vendor/ai-bridge.js';
+```
+
+**Manual approach:** Copy the file to `public/js/vendor/ai-bridge.js` and include with a script tag:
+
+```html
+<script src="/js/vendor/ai-bridge.js"></script>
+```
 
 ### SSE Mode
 

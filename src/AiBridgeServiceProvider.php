@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge;
 
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Http\Middleware\ValidateBridgeToken;
@@ -76,6 +77,12 @@ class AiBridgeServiceProvider extends ServiceProvider
 
         // Register named middleware for bridge token validation
         $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
+
+        // SEC-010: Warn when route_middleware is empty — routes will be unprotected
+        $routeMiddleware = config('ai-bridge.route_middleware', ['auth']);
+        if (empty($routeMiddleware)) {
+            Log::warning('AI Bridge: route_middleware is empty — all AI Bridge HTTP routes are unprotected. Set ai-bridge.route_middleware to ["auth"] or ["auth:sanctum"] for production.');
+        }
 
         // Register routes
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');

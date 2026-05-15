@@ -35,6 +35,8 @@ class AiBridgeStream {
         this._reader = null;
         this._abortController = null;
         this._generation = 0; // Per-request generation counter to ignore stale events
+        this._inactivityTimeout = (config.inactivityTimeout || 60) * 1000; // ms
+        this._inactivityTimer = null;
 
         if (this.mode === 'reverb' && this.channel && typeof window.Echo !== 'undefined') {
             this._listenReverb();
@@ -101,6 +103,7 @@ class AiBridgeStream {
             this._abortController.abort();
             this._abortController = null;
         }
+        this._clearInactivityTimer();
         if (this.channel && typeof window.Echo !== 'undefined') {
             window.Echo.leave(this.channel);
         }
@@ -125,6 +128,7 @@ class AiBridgeStream {
         // New generation — any events from the previous request are now stale
         const gen = ++this._generation;
         this._abortController = new AbortController();
+        this._resetInactivityTimer();
 
         try {
             const response = await fetch(this.url, {
@@ -141,7 +145,8 @@ class AiBridgeStream {
             if (!response.ok) {
                 if (gen !== this._generation) return;
                 this._generation++;
-                this._emit('error', 'http_error', `HTTP ${response.status}`);
+                const errorCode = this._mapHttpStatus(response.status);
+                this._emit('error', errorCode, `HTTP ${response.status}`);
                 return;
             }
 
@@ -237,10 +242,49 @@ class AiBridgeStream {
             });
     }
 
+    /** @private Start or reset the inactivity timer */
+    _resetInactivityTimer() {
+        this._clearInactivityTimer();
+        this._inactivityTimer = setTimeout(() => {
+            if (this._generation > 0) {
+                const gen = this._generation;
+                this._generation++;
+                this._emit('error', 'inactivity_timeout', 'No events received within the inactivity timeout period.');
+            }
+        }, this._inactivityTimeout);
+    }
+
+    /** @private Clear the inactivity timer */
+    _clearInactivityTimer() {
+        if (this._inactivityTimer) {
+            clearTimeout(this._inactivityTimer);
+            this._inactivityTimer = null;
+        }
+    }
+
+    /** @private Map HTTP status codes to readable error codes */
+    _mapHttpStatus(status) {
+        const map = {
+            401: 'auth_error',
+            403: 'auth_error',
+            404: 'not_found',
+            422: 'validation_error',
+            429: 'rate_limited',
+            500: 'server_error',
+            502: 'service_unavailable',
+            503: 'service_unavailable',
+            504: 'gateway_timeout',
+        };
+        return map[status] || 'http_error';
+    }
+
     /** @private */
     _handleEvent(parsed, gen) {
         // Ignore events from a stale request
         if (gen !== this._generation) return;
+
+        // Reset inactivity timer on each received event
+        this._resetInactivityTimer();
 
         this._emit('raw', parsed);
 
@@ -270,6 +314,7 @@ class AiBridgeStream {
                 // Emit both 'cancelled' and 'done' for consistent terminal handling.
                 if (gen === this._generation) {
                     this._generation++;
+                    this._clearInactivityTimer();
                     this._emit('cancelled');
                     this._emit('done', null);
                 }
@@ -277,12 +322,14 @@ class AiBridgeStream {
             case 'done':
                 if (gen === this._generation) {
                     this._generation++;
+                    this._clearInactivityTimer();
                     this._emit('done', data.usage || null);
                 }
                 break;
             case 'error':
                 if (gen === this._generation) {
                     this._generation++;
+                    this._clearInactivityTimer();
                     this._emit('error', data.code || 'unknown', data.message || 'Unknown error');
                 }
                 break;

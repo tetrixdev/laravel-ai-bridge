@@ -100,7 +100,7 @@ class BridgeConnectionManager
         $connectionId = $this->connections[$userId]['connection_id'];
 
         // Fail any pending requests for this user
-        $this->failPendingRequestsForUser($userId);
+        $this->failPendingRequestsForUser($userId, $reason);
 
         unset($this->connections[$userId]);
 
@@ -283,6 +283,16 @@ class BridgeConnectionManager
     }
 
     /**
+     * Get the user ID that owns a pending request.
+     */
+    public function getPendingRequestUserId(string $requestId): ?string
+    {
+        $entry = $this->pendingRequests[$requestId] ?? null;
+
+        return $entry ? ($entry['user_id'] ?: null) : null;
+    }
+
+    /**
      * Get all active connection user IDs.
      *
      * @return string[]
@@ -306,11 +316,18 @@ class BridgeConnectionManager
      * Iterates all pending requests, finds those belonging to the given user,
      * dispatches an error event to their StreamHandlers, and removes them.
      */
-    protected function failPendingRequestsForUser(string $userId): void
+    protected function failPendingRequestsForUser(string $userId, ?string $reason = null): void
     {
+        // When the disconnection reason is 'replaced_by_new_connection', the bridge
+        // is reconnecting — use a more specific error code so consumers can differentiate.
+        $errorCode = $reason === 'replaced_by_new_connection' ? 'bridge_reconnecting' : 'bridge_disconnected';
+        $errorMessage = $reason === 'replaced_by_new_connection'
+            ? 'Bridge is reconnecting. In-flight request was interrupted.'
+            : 'Bridge connection lost';
+
         foreach ($this->pendingRequests as $requestId => $handler) {
             if ($handler['user_id'] === $userId) {
-                $handler['stream_handler']->dispatchError('bridge_disconnected', 'Bridge connection lost');
+                $handler['stream_handler']->dispatchError($errorCode, $errorMessage);
                 unset($this->pendingRequests[$requestId]);
             }
         }

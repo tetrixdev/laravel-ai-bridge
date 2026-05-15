@@ -264,6 +264,19 @@ class MessageHandler
             return null;
         }
 
+        // SEC-009: Verify the connection sending this event owns the pending request
+        $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+        $requestUserId = $this->connectionManager->getPendingRequestUserId($requestId);
+        if ($senderUserId !== null && $requestUserId !== null && $senderUserId !== $requestUserId) {
+            Log::warning('AI Bridge: stream event from wrong user', [
+                'request_id' => $requestId,
+                'sender_user_id' => $senderUserId,
+                'request_user_id' => $requestUserId,
+            ]);
+
+            return null;
+        }
+
         $event = StreamEvent::fromArray($message);
         $handler->dispatchEvent($event);
 
@@ -316,10 +329,24 @@ class MessageHandler
     {
         $handler = $this->connectionManager->getPendingRequest($requestId);
 
-        // Dispatch to the StreamHandler's tool call callbacks
-        if ($handler) {
-            $handler->dispatchToolCall($toolName, $params, $callId);
+        // If the request is no longer pending (stream already terminated),
+        // return a tool_error to prevent the bridge from hanging.
+        if (! $handler) {
+            Log::warning('AI Bridge: tool call received for completed/unknown request', [
+                'request_id' => $requestId,
+                'tool' => $toolName,
+            ]);
+
+            return [
+                'type' => MessageTypes::TOOL_ERROR,
+                'request_id' => $requestId,
+                'tool_call_id' => $callId,
+                'error' => 'request_already_completed',
+            ];
         }
+
+        // Dispatch to the StreamHandler's tool call callbacks
+        $handler->dispatchToolCall($toolName, $params, $callId);
 
         // Check for empty tool name
         if (empty($toolName)) {
@@ -340,6 +367,21 @@ class MessageHandler
             try {
                 $result = $this->toolRegistry->execute($toolName, $params);
 
+                // Validate that the result is JSON-serializable
+                if (json_encode($result) === false) {
+                    Log::error('AI Bridge: tool result not JSON-serializable', [
+                        'tool' => $toolName,
+                        'json_error' => json_last_error_msg(),
+                    ]);
+
+                    return [
+                        'type' => MessageTypes::TOOL_ERROR,
+                        'request_id' => $requestId,
+                        'tool_call_id' => $callId,
+                        'error' => 'Tool execution failed',
+                    ];
+                }
+
                 return [
                     'type' => MessageTypes::TOOL_RESOLVE,
                     'request_id' => $requestId,
@@ -347,16 +389,18 @@ class MessageHandler
                     'result' => $result,
                 ];
             } catch (\Throwable $e) {
+                // SEC-007: Return generic message to client, log full exception server-side
                 Log::error('AI Bridge: tool execution failed', [
                     'tool' => $toolName,
                     'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
                 ]);
 
                 return [
                     'type' => MessageTypes::TOOL_ERROR,
                     'request_id' => $requestId,
                     'tool_call_id' => $callId,
-                    'error' => $e->getMessage(),
+                    'error' => 'Tool execution failed',
                 ];
             }
         }
@@ -384,6 +428,12 @@ class MessageHandler
         if ($handler) {
             $handler->dispatchDone($usage);
             $this->connectionManager->removePendingRequest($requestId);
+        } else {
+            Log::debug('AI Bridge: done event received for unknown request (expected in PHP-FPM relay mode)', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+                'usage' => $usage,
+            ]);
         }
 
         return null;
@@ -459,7 +509,7 @@ class MessageHandler
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
         if ($handler) {
-            $handler->dispatchError('cancelled', 'Request was cancelled.');
+            $handler->dispatchCancelled('Request was cancelled.');
             $this->connectionManager->removePendingRequest($requestId);
         }
 

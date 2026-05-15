@@ -27,10 +27,15 @@ $middleware = array_filter(array_merge(
 ));
 
 Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
-    Route::post('/token', [BridgeController::class, 'generateToken']);
-    Route::get('/status', [BridgeController::class, 'status']);
+    // Token and status endpoints — throttle:20,1 (20 requests per minute)
+    Route::middleware('throttle:20,1')->group(function () {
+        Route::post('/token', [BridgeController::class, 'generateToken']);
+        Route::get('/status', [BridgeController::class, 'status']);
+    });
 
-    // Streaming endpoints
-    Route::post('/stream/sse', [StreamController::class, 'sse']);
-    Route::post('/stream/broadcast', [StreamController::class, 'broadcast']);
+    // Streaming endpoints — throttle:10,1 (10 requests per minute)
+    Route::middleware('throttle:10,1')->group(function () {
+        Route::post('/stream/sse', [StreamController::class, 'sse']);
+        Route::post('/stream/broadcast', [StreamController::class, 'broadcast']);
+    });
 });

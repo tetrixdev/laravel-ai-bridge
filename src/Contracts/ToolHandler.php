@@ -33,8 +33,17 @@ interface ToolHandler
     /**
      * Execute the tool with the given parameters.
      *
+     * IMPORTANT: Parameters are NOT automatically validated against the JSON Schema
+     * defined in parameters(). Implementations MUST self-validate input (type check,
+     * required fields, bounds) before processing. The AI may pass malformed or
+     * unexpected values.
+     *
+     * The return value MUST be JSON-serializable (scalars, arrays, objects implementing
+     * JsonSerializable). Non-serializable return values will result in a tool_error
+     * being sent to the AI.
+     *
      * @param  array<string, mixed>  $params  The parameters passed by the AI.
-     * @return mixed  The result to send back to the AI.
+     * @return mixed  The result to send back to the AI. Must be JSON-serializable.
      */
     public function handle(array $params): mixed;
 }

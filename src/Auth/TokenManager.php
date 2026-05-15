@@ -25,16 +25,28 @@ class TokenManager
     /**
      * Generate a JWT connection token for the given user.
      *
+     * NOTE: $claims cannot override reserved keys (sub, iat, exp, jti, iss).
+     * These are always set by the token manager to ensure security invariants.
+     * An InvalidArgumentException is thrown if reserved keys are passed.
+     *
      * @param  int|string  $userId  The authenticated user's ID.
      * @param  array<string, mixed>  $claims  Additional claims to embed in the token.
      * @param  int|null  $ttl  TTL in seconds. Defaults to the configured TTL if null.
      * @return string  The encoded JWT.
      *
-     * @throws InvalidArgumentException If the token secret is not configured.
+     * @throws InvalidArgumentException If the token secret is not configured or reserved claims are passed.
      */
     public function generate(int|string $userId, array $claims = [], ?int $ttl = null): string
     {
         $this->ensureSecretConfigured();
+
+        $reservedKeys = ['sub', 'iat', 'exp', 'jti', 'iss'];
+        $conflicts = array_intersect($reservedKeys, array_keys($claims));
+        if (! empty($conflicts)) {
+            throw new InvalidArgumentException(
+                'Cannot override reserved JWT claims: ' . implode(', ', $conflicts) . '. These are managed internally.'
+            );
+        }
 
         $now = time();
 
@@ -51,6 +63,12 @@ class TokenManager
 
     /**
      * Validate a JWT connection token and return its decoded claims.
+     *
+     * NOTE: Individual token revocation is not currently supported. JWTs are
+     * stateless and valid until expiry. To revoke all tokens immediately,
+     * rotate the AI_BRIDGE_TOKEN_SECRET value. This invalidates every
+     * outstanding token but requires all bridge clients to reconnect with
+     * a new token.
      *
      * @param  string  $token  The JWT to validate.
      * @return object  The decoded token payload.
@@ -131,15 +149,26 @@ class TokenManager
     }
 
     /**
-     * Ensure the JWT secret is configured.
+     * Ensure the JWT secret is configured and meets minimum length requirements.
+     *
+     * The secret must be at least 32 bytes (256 bits) for HS256 security.
+     * Generate with: openssl rand -hex 32
      *
      * @throws InvalidArgumentException
      */
     private function ensureSecretConfigured(): void
     {
-        if (empty($this->getSecret())) {
+        $secret = $this->getSecret();
+
+        if (empty($secret)) {
             throw new InvalidArgumentException(
-                'AI Bridge token secret is not configured. Set AI_BRIDGE_TOKEN_SECRET in your .env file.'
+                'AI Bridge token secret is not configured. Set AI_BRIDGE_TOKEN_SECRET in your .env file. Generate with: openssl rand -hex 32'
+            );
+        }
+
+        if (strlen($secret) < 32) {
+            throw new InvalidArgumentException(
+                'AI Bridge token secret must be at least 32 bytes for HS256 security. Current length: ' . strlen($secret) . '. Generate with: openssl rand -hex 32'
             );
         }
     }
