@@ -34,21 +34,33 @@ class StreamController extends Controller
      * Each SSE line is: data: {"event": "...", "data": {...}}
      * Stream ends with: data: [DONE]
      */
-    public function sse(Request $request): StreamedResponse
+    public function sse(Request $request): StreamedResponse|JsonResponse
     {
-        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
+        // Validate required message field
         $message = $request->input('message', '');
-        $systemPrompt = $request->input('system_prompt', '');
-
-        $options = $this->sanitizeOptions($request);
-
-        if (! empty($systemPrompt)) {
-            $options['system_prompt'] = $systemPrompt;
+        if (empty(trim($message))) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The message field is required and cannot be empty.',
+            ], 422);
         }
 
-        // Allow per-request model override (safe: controls which model, not where requests go)
-        if ($request->has('model')) {
-            $options['model'] = $request->input('model');
+        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
+
+        $isManagedMode = config('ai-bridge.mode') === 'managed';
+        $options = $this->sanitizeOptions($request);
+
+        // Only allow per-request overrides in non-managed mode.
+        // In managed mode, the app controls AI behavior and cost.
+        if (! $isManagedMode) {
+            $systemPrompt = $request->input('system_prompt', '');
+            if (! empty($systemPrompt)) {
+                $options['system_prompt'] = $systemPrompt;
+            }
+
+            if ($request->has('model')) {
+                $options['model'] = $request->input('model');
+            }
         }
 
         return $this->manager->streamToResponse($conversationId, $message, $options);
@@ -77,23 +89,36 @@ class StreamController extends Controller
             ], 401);
         }
 
-        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
+        // Validate required message field
         $message = $request->input('message', '');
-        $systemPrompt = $request->input('system_prompt', '');
+        if (empty(trim($message))) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The message field is required and cannot be empty.',
+            ], 422);
+        }
+
+        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
 
         // SEC: Channel name is derived server-side to prevent cross-user injection.
         // The client cannot choose which channel to broadcast on.
         // Note: PrivateChannel prepends "private-" automatically, so pass without prefix.
         $channel = "user.{$userId}.conversation.{$conversationId}";
 
+        $isManagedMode = config('ai-bridge.mode') === 'managed';
         $options = $this->sanitizeOptions($request);
 
-        if (! empty($systemPrompt)) {
-            $options['system_prompt'] = $systemPrompt;
-        }
+        // Only allow per-request overrides in non-managed mode.
+        // In managed mode, the app controls AI behavior and cost.
+        if (! $isManagedMode) {
+            $systemPrompt = $request->input('system_prompt', '');
+            if (! empty($systemPrompt)) {
+                $options['system_prompt'] = $systemPrompt;
+            }
 
-        if ($request->has('model')) {
-            $options['model'] = $request->input('model');
+            if ($request->has('model')) {
+                $options['model'] = $request->input('model');
+            }
         }
 
         $requestId = $this->manager->streamAndBroadcast(
@@ -118,6 +143,9 @@ class StreamController extends Controller
      * - mode: Would allow switching provider mode.
      * - user_id: Must come from auth, not client input.
      *
+     * In managed mode, also strips cost/behavior fields (model, max_tokens,
+     * system_prompt, messages) since the application controls AI behavior.
+     *
      * @return array<string, mixed>
      */
     private function sanitizeOptions(Request $request): array
@@ -127,7 +155,14 @@ class StreamController extends Controller
             $options = json_decode($options, true) ?? [];
         }
 
+        // Always strip security-sensitive fields
         unset($options['endpoint'], $options['api_key'], $options['mode'], $options['user_id']);
+
+        // In managed mode, also strip fields that control cost and AI behavior.
+        // The application bears the cost, so clients must not override model, tokens, etc.
+        if (config('ai-bridge.mode') === 'managed') {
+            unset($options['model'], $options['max_tokens'], $options['system_prompt'], $options['messages']);
+        }
 
         return $options;
     }

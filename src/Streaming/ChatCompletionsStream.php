@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Streaming;
 
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\BlockType;
@@ -136,9 +137,14 @@ class ChatCompletionsStream implements StreamableProvider
                 ->post($url, $body);
 
             if ($response->failed()) {
+                Log::error('AI Bridge: Chat Completions API error', [
+                    'status' => $response->status(),
+                    'body' => mb_substr($response->body(), 0, 1000),
+                ]);
+
                 $this->streamHandler->dispatchError(
                     'api_error',
-                    'Chat Completions API returned HTTP '.$response->status().': '.$response->body()
+                    'AI provider returned an error (HTTP '.$response->status().'). Check server logs for details.'
                 );
 
                 return;
@@ -146,11 +152,20 @@ class ChatCompletionsStream implements StreamableProvider
 
             $this->processStream($response);
         } catch (\Exception $e) {
+            Log::error('AI Bridge: Chat Completions request failed', [
+                'error' => $e->getMessage(),
+            ]);
+
             $this->streamHandler->dispatchError(
                 'request_failed',
-                'Chat Completions request failed: '.$e->getMessage()
+                'Failed to connect to AI provider. Check server logs for details.'
             );
         }
+    }
+
+    public function markCompleted(): void
+    {
+        // No-op: ChatCompletionsStream is synchronous and doesn't need completion tracking.
     }
 
     public function cancel(): void

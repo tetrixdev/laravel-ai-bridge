@@ -10,9 +10,19 @@
  *   stream.send({ message: 'Hello', conversation_id: 'conv-1' });
  *
  * Usage (Reverb):
- *   const stream = new AiBridgeStream({ mode: 'reverb', channel: 'game.123' });
+ *   // 1. POST to broadcast endpoint to get channel
+ *   const res = await fetch('/ai-bridge/stream/broadcast', { ... });
+ *   const { channel } = await res.json();
+ *   // 2. Create stream with the server-provided channel
+ *   const stream = new AiBridgeStream({ mode: 'reverb', channel: channel });
  *   stream.on('text', (content) => { ... });
  *   stream.send({ message: 'Hello', conversation_id: 'conv-1' });
+ *
+ * Terminal events:
+ *   Both 'done' and 'cancelled' are terminal events. Always listen for both
+ *   to ensure UI cleanup runs regardless of how the stream ends:
+ *   stream.on('done', () => resetUI());
+ *   stream.on('cancelled', () => resetUI());
  */
 class AiBridgeStream {
     constructor(config = {}) {
@@ -66,7 +76,7 @@ class AiBridgeStream {
 
     /**
      * Abort the current SSE stream.
-     * Emits a 'cancelled' event so the UI receives a terminal event and doesn't hang.
+     * Emits 'cancelled' followed by 'done' so the UI receives terminal events and doesn't hang.
      */
     abort() {
         const gen = this._generation;
@@ -78,7 +88,23 @@ class AiBridgeStream {
         if (gen === this._generation) {
             this._generation++;
             this._emit('cancelled');
+            this._emit('done', null);
         }
+    }
+
+    /**
+     * Clean up resources. Must be called before discarding the instance in SPAs
+     * to prevent duplicate Reverb listeners and memory leaks.
+     */
+    destroy() {
+        if (this._abortController) {
+            this._abortController.abort();
+            this._abortController = null;
+        }
+        if (this.channel && typeof window.Echo !== 'undefined') {
+            window.Echo.leave(this.channel);
+        }
+        this.listeners = {};
     }
 
     /** @private */
@@ -158,10 +184,11 @@ class AiBridgeStream {
                 }
             }
 
-            // Stream ended without [DONE] — emit terminal event so UI doesn't hang
+            // Stream ended without [DONE] — likely a connection drop or truncation.
+            // Emit error so the UI knows the response may be incomplete.
             if (gen === this._generation) {
                 this._generation++;
-                this._emit('done', null);
+                this._emit('error', 'stream_incomplete', 'Stream ended without completion signal. The response may be truncated.');
             }
         } catch (err) {
             if (err.name === 'AbortError') return;
@@ -173,8 +200,9 @@ class AiBridgeStream {
 
     /** @private */
     async _sendBroadcast(data) {
-        // New generation for broadcast requests too
-        const gen = ++this._generation;
+        // Don't increment generation for broadcast — events arrive via the separate
+        // Reverb listener, not via this HTTP response. The generation was already
+        // set when the Reverb listener was attached.
 
         try {
             const response = await fetch(this.broadcastUrl, {
@@ -183,19 +211,16 @@ class AiBridgeStream {
                     'Content-Type': 'application/json',
                     ...this.headers,
                 },
-                body: JSON.stringify({
-                    ...data,
-                    channel: this.channel,
-                }),
+                // Don't send channel — the server derives it from the authenticated user
+                body: JSON.stringify(data),
             });
 
             if (!response.ok) {
-                if (gen !== this._generation) return;
+                if (this._generation < 1) return;
                 this._generation++;
                 this._emit('error', 'http_error', `HTTP ${response.status}`);
             }
         } catch (err) {
-            if (gen !== this._generation) return;
             this._generation++;
             this._emit('error', 'network_error', err.message);
         }
@@ -239,6 +264,15 @@ class AiBridgeStream {
                 break;
             case 'tool_call':
                 this._emit('tool_call', data.tool_name, data.parameters || {});
+                break;
+            case 'cancelled':
+                // Server-side cancellation (e.g. bridge mode via Reverb).
+                // Emit both 'cancelled' and 'done' for consistent terminal handling.
+                if (gen === this._generation) {
+                    this._generation++;
+                    this._emit('cancelled');
+                    this._emit('done', null);
+                }
                 break;
             case 'done':
                 if (gen === this._generation) {

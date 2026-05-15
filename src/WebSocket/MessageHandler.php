@@ -104,23 +104,9 @@ class MessageHandler
             $providers = $message['providers'] ?? [];
             $this->connectionManager->setProviders($existingUserId, $providers);
 
-            $availableProviders = array_filter($providers, fn ($p) => ($p['available'] ?? false));
-            Log::info('AI Bridge: bridge hello (pre-authenticated)', [
-                'user_id' => $existingUserId,
-                'connection_id' => $connectionId,
-                'protocol_version' => $protocolVersion,
-                'providers' => array_map(fn ($p) => $p['name'] ?? 'unknown', $availableProviders),
-            ]);
+            $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
-            return [
-                'type' => MessageTypes::WELCOME,
-                'session_id' => $connectionId,
-                'tools' => $this->toolRegistry->toArray(),
-                'config' => [
-                    'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
-                    'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
-                ],
-            ];
+            return $this->buildWelcomeResponse($connectionId);
         }
 
         // Not pre-authenticated — require token in the hello body
@@ -154,14 +140,16 @@ class MessageHandler
         $providers = $message['providers'] ?? [];
         $this->connectionManager->addConnection($userId, $connectionId, $connection, $providers);
 
-        $availableProviders = array_filter($providers, fn ($p) => ($p['available'] ?? false));
-        Log::info('AI Bridge: bridge connected', [
-            'user_id' => $userId,
-            'connection_id' => $connectionId,
-            'protocol_version' => $protocolVersion,
-            'providers' => array_map(fn ($p) => $p['name'] ?? 'unknown', $availableProviders),
-        ]);
+        $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
+        return $this->buildWelcomeResponse($connectionId);
+    }
+
+    /**
+     * Build the standard welcome response sent after successful handshake.
+     */
+    private function buildWelcomeResponse(string $connectionId): array
+    {
         return [
             'type' => MessageTypes::WELCOME,
             'session_id' => $connectionId,
@@ -171,6 +159,20 @@ class MessageHandler
                 'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
             ],
         ];
+    }
+
+    /**
+     * Log a bridge connection event with provider details.
+     */
+    private function logBridgeConnection(string $userId, string $connectionId, string $protocolVersion, array $providers, string $label): void
+    {
+        $availableProviders = array_filter($providers, fn ($p) => ($p['available'] ?? false));
+        Log::info("AI Bridge: bridge {$label}", [
+            'user_id' => $userId,
+            'connection_id' => $connectionId,
+            'protocol_version' => $protocolVersion,
+            'providers' => array_map(fn ($p) => $p['name'] ?? 'unknown', $availableProviders),
+        ]);
     }
 
     /**
@@ -319,6 +321,20 @@ class MessageHandler
             $handler->dispatchToolCall($toolName, $params, $callId);
         }
 
+        // Check for empty tool name
+        if (empty($toolName)) {
+            Log::warning('AI Bridge: tool call received with empty tool_name', [
+                'request_id' => $requestId,
+            ]);
+
+            return [
+                'type' => MessageTypes::TOOL_ERROR,
+                'request_id' => $requestId,
+                'tool_call_id' => $callId,
+                'error' => 'Tool call received with empty tool_name — check the bridge client is sending a valid tool_name field.',
+            ];
+        }
+
         // Execute the tool if registered
         if ($this->toolRegistry->has($toolName)) {
             try {
@@ -381,7 +397,8 @@ class MessageHandler
         $requestId = $message['request_id'] ?? '';
         $data = $message['data'] ?? [];
         $code = $data['code'] ?? 'unknown';
-        $errorMessage = $data['message'] ?? 'Unknown error';
+        $rawMessage = $data['message'] ?? 'Unknown error';
+        $errorMessage = mb_substr(strip_tags($rawMessage), 0, 500);
 
         Log::error('AI Bridge: stream error from bridge', [
             'connection_id' => $connectionId,
@@ -406,7 +423,8 @@ class MessageHandler
     {
         $requestId = $message['request_id'] ?? '';
         $code = $message['data']['code'] ?? $message['code'] ?? $message['error'] ?? 'unknown';
-        $errorMessage = $message['data']['message'] ?? $message['message'] ?? 'Unknown error';
+        $rawMessage = $message['data']['message'] ?? $message['message'] ?? 'Unknown error';
+        $errorMessage = mb_substr(strip_tags($rawMessage), 0, 500);
 
         Log::error('AI Bridge: error from bridge', [
             'connection_id' => $connectionId,
@@ -442,9 +460,8 @@ class MessageHandler
         $handler = $this->connectionManager->getPendingRequest($requestId);
         if ($handler) {
             $handler->dispatchError('cancelled', 'Request was cancelled.');
+            $this->connectionManager->removePendingRequest($requestId);
         }
-
-        $this->connectionManager->removePendingRequest($requestId);
 
         return null;
     }

@@ -24,7 +24,7 @@ class GenerateTokenCommand extends Command
     public function handle(TokenManager $manager): int
     {
         $ttlOption = $this->option('ttl');
-        $ttl = $ttlOption !== null ? (int) $ttlOption : (int) config('ai-bridge.token.ttl', 86400);
+        $ttl = $ttlOption !== null ? (int) $ttlOption : (int) config('ai-bridge.token.ttl');
 
         try {
             $token = $manager->generate($this->option('user-id'), [], $ttl > 0 ? $ttl : null);
@@ -38,7 +38,8 @@ class GenerateTokenCommand extends Command
 
         $port = (int) config('ai-bridge.server.port', 8085);
 
-        $this->info('Token generated:');
+        $effectiveTtl = $ttl > 0 ? $ttl : (int) config('ai-bridge.token.ttl', 86400);
+        $this->info('Token generated (TTL: '.$effectiveTtl.'s):');
         $this->line($token);
         $this->newLine();
         $this->info('Use with bridge:');

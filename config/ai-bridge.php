@@ -91,6 +91,7 @@ return [
     'server' => [
         'host' => env('AI_BRIDGE_SERVER_HOST', '0.0.0.0'),
         'port' => env('AI_BRIDGE_SERVER_PORT', 8085),
+        'relay_timeout' => env('AI_BRIDGE_RELAY_TIMEOUT', 5), // seconds for internal HTTP relay
     ],
 
     /*
@@ -105,7 +106,7 @@ return [
     */
 
     'broadcasting' => [
-        'enabled' => env('AI_BRIDGE_BROADCAST', false),
+        'enabled' => env('AI_BRIDGE_BROADCAST', true),
         'connection' => env('AI_BRIDGE_BROADCAST_CONNECTION', 'reverb'),
     ],
 ];

@@ -7,12 +7,12 @@ namespace Tetrix\AiBridge;
 use Closure;
 use InvalidArgumentException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Protocol\StreamEvent;
-use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -55,9 +55,9 @@ class AiBridgeManager
      *   - 'temperature': Sampling temperature.
      *   - 'max_tokens': Maximum tokens in response.
      *   - 'model': Override the configured model.
-     *   - 'api_key': Override API key for BYOK (server-side only, stripped from HTTP input).
-     *   - 'mode': ProviderMode enum instance for programmatic override (not from request input).
-     *   - 'user_id': User ID for bridge mode (server-side only, defaults to auth user).
+     *   - 'api_key': Override API key for BYOK (server-side only, stripped from HTTP input by StreamController).
+     *   - 'mode': ProviderMode enum instance (server-side only, stripped from HTTP input by StreamController).
+     *   - 'user_id': User ID for bridge mode (server-side only, stripped from HTTP input by StreamController).
      * @return StreamHandler
      */
     public function stream(string $conversationId, string $message, array $options = []): StreamHandler
@@ -71,6 +71,7 @@ class AiBridgeManager
 
         $handler = $provider->getStreamHandler();
         $handler->setConversationId($conversationId);
+        $handler->setMode($mode);
 
         return $handler;
     }
@@ -154,70 +155,16 @@ class AiBridgeManager
                 flush();
             };
 
-            $stream->onBlockStart(function (StreamEvent $event) use ($send) {
-                $send([
-                    'event' => $event->event,
-                    'data' => $event->data,
-                ]);
-            });
-
-            $stream->onBlockDelta(function (StreamEvent $event) use ($send) {
-                $send([
-                    'event' => $event->event,
-                    'data' => $event->data,
-                ]);
-            });
-
-            $stream->onBlockStop(function (StreamEvent $event) use ($send) {
-                $send([
-                    'event' => $event->event,
-                    'data' => $event->data,
-                ]);
-            });
-
-            $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($send) {
-                $send([
-                    'event' => 'tool_call',
-                    'data' => [
-                        'tool_name' => $toolName,
-                        'parameters' => $params,
-                        'call_id' => $callId,
-                    ],
-                ]);
-            });
-
-            $stream->onDone(function (?array $usage) use ($send) {
-                $send([
-                    'event' => 'done',
-                    'data' => [
-                        'usage' => $usage,
-                    ],
-                ]);
-
+            $sendTerminal = function () {
                 echo "data: [DONE]\n\n";
 
                 if (ob_get_level() > 0) {
                     ob_flush();
                 }
                 flush();
-            });
+            };
 
-            $stream->onError(function (string $code, string $errorMessage) use ($send) {
-                $send([
-                    'event' => 'error',
-                    'data' => [
-                        'code' => $code,
-                        'message' => $errorMessage,
-                    ],
-                ]);
-
-                echo "data: [DONE]\n\n";
-
-                if (ob_get_level() > 0) {
-                    ob_flush();
-                }
-                flush();
-            });
+            $this->wireCallbacks($stream, $send, $sendTerminal);
 
             $stream->start();
         }, 200, [
@@ -246,41 +193,62 @@ class AiBridgeManager
         $stream = $this->stream($conversationId, $message, $options);
         $requestId = $stream->requestId;
 
-        $broadcast = function (string $event, array $data) use ($channel, $requestId): void {
-            event(new AiStreamEvent($channel, $requestId, $event, $data));
+        $broadcast = function (array $payload) use ($channel, $requestId): void {
+            event(new AiStreamEvent($channel, $requestId, $payload['event'], $payload['data']));
         };
 
-        $stream->onBlockStart(function (StreamEvent $event) use ($broadcast) {
-            $broadcast($event->event, $event->data);
-        });
-
-        $stream->onBlockDelta(function (StreamEvent $event) use ($broadcast) {
-            $broadcast($event->event, $event->data);
-        });
-
-        $stream->onBlockStop(function (StreamEvent $event) use ($broadcast) {
-            $broadcast($event->event, $event->data);
-        });
-
-        $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($broadcast) {
-            $broadcast('tool_call', [
-                'tool_name' => $toolName,
-                'parameters' => $params,
-                'call_id' => $callId,
-            ]);
-        });
-
-        $stream->onDone(function (?array $usage) use ($broadcast) {
-            $broadcast('done', ['usage' => $usage]);
-        });
-
-        $stream->onError(function (string $code, string $errorMessage) use ($broadcast) {
-            $broadcast('error', ['code' => $code, 'message' => $errorMessage]);
-        });
+        $this->wireCallbacks($stream, $broadcast);
 
         $stream->start();
 
         return $requestId;
+    }
+
+    /**
+     * Wire all six stream callbacks to a sink callable.
+     *
+     * Reduces duplication between streamToResponse and streamAndBroadcast.
+     * The $sink receives a normalized payload array with 'event' and 'data' keys.
+     * The optional $onTerminal callback is called after done/error events (e.g. for SSE [DONE] flush).
+     */
+    private function wireCallbacks(StreamHandler $stream, callable $sink, ?Closure $onTerminal = null): void
+    {
+        $stream->onBlockStart(function (StreamEvent $event) use ($sink) {
+            $sink(['event' => $event->event, 'data' => $event->data]);
+        });
+
+        $stream->onBlockDelta(function (StreamEvent $event) use ($sink) {
+            $sink(['event' => $event->event, 'data' => $event->data]);
+        });
+
+        $stream->onBlockStop(function (StreamEvent $event) use ($sink) {
+            $sink(['event' => $event->event, 'data' => $event->data]);
+        });
+
+        $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($sink) {
+            $sink([
+                'event' => 'tool_call',
+                'data' => [
+                    'tool_name' => $toolName,
+                    'parameters' => $params,
+                    'call_id' => $callId,
+                ],
+            ]);
+        });
+
+        $stream->onDone(function (?array $usage) use ($sink, $onTerminal) {
+            $sink(['event' => 'done', 'data' => ['usage' => $usage]]);
+            if ($onTerminal) {
+                $onTerminal();
+            }
+        });
+
+        $stream->onError(function (string $code, string $errorMessage) use ($sink, $onTerminal) {
+            $sink(['event' => 'error', 'data' => ['code' => $code, 'message' => $errorMessage]]);
+            if ($onTerminal) {
+                $onTerminal();
+            }
+        });
     }
 
     /**
@@ -327,8 +295,8 @@ class AiBridgeManager
      */
     private function createBridgeProvider(array $options): BridgeStream
     {
-        // SEC: user_id is resolved from auth context only — never from request options.
-        // Programmatic callers can still pass user_id for server-side use cases.
+        // SEC: user_id is stripped from HTTP request input by StreamController.
+        // Programmatic callers (jobs, artisan commands) can pass user_id via options.
         $userId = $options['user_id'] ?? $this->resolveAuthUserId();
 
         if ($userId === null) {
@@ -369,19 +337,19 @@ class AiBridgeManager
 
         if (empty($endpoint)) {
             throw new InvalidArgumentException(
-                'Chat Completions endpoint is not configured. Set AI_BRIDGE_ENDPOINT in your .env file.'
+                'Chat Completions endpoint is not configured. Set AI_BRIDGE_ENDPOINT in .env (e.g. https://api.openai.com), or pass endpoint via config.'
             );
         }
 
         if (empty($apiKey)) {
             throw new InvalidArgumentException(
-                'Chat Completions API key is not configured. Set AI_BRIDGE_API_KEY in your .env file.'
+                'Chat Completions API key is not configured. Set AI_BRIDGE_API_KEY in .env, or pass api_key in the options array for per-user BYOK.'
             );
         }
 
         if (empty($model)) {
             throw new InvalidArgumentException(
-                'Chat Completions model is not configured. Set AI_BRIDGE_MODEL in your .env file.'
+                'Chat Completions model is not configured. Set AI_BRIDGE_MODEL in .env (e.g. gpt-4o).'
             );
         }
 

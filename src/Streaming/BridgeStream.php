@@ -248,7 +248,7 @@ class BridgeStream implements StreamableProvider
             $internalToken = $this->tokenManager->generate($this->userId, [], 60);
 
             $response = Http::withToken($internalToken)
-                ->timeout(5)
+                ->timeout((int) config('ai-bridge.server.relay_timeout', 5))
                 ->post($url, [
                     'request_id' => $payload['request_id'] ?? '',
                     'provider' => $payload['provider'] ?? '',
@@ -263,34 +263,50 @@ class BridgeStream implements StreamableProvider
             if ($response->failed()) {
                 $body = $response->json();
                 $error = $body['error'] ?? 'unknown';
-                // Don't leak internal server details in error messages
-                $message = $body['message'] ?? 'Bridge server returned an error.';
 
-                $this->streamHandler->dispatchError($error, $message);
+                Log::error('AI Bridge: bridge server returned error', [
+                    'request_id' => $payload['request_id'] ?? '',
+                    'status' => $response->status(),
+                    'error' => $error,
+                    'body' => mb_substr($response->body(), 0, 500),
+                ]);
+
+                $this->streamHandler->dispatchError(
+                    $error,
+                    'Bridge server returned HTTP '.$response->status().'. Check server logs for details.'
+                );
 
                 return;
             }
 
             // Request was accepted by the bridge server. Events will arrive
             // asynchronously via WebSocket → MessageHandler → broadcasting.
-            // SSE callers will NOT receive async events — they should use
-            // broadcasting (Reverb) mode when running under PHP-FPM with bridge.
             Log::info('AI Bridge: relayed request via HTTP API (events arrive via broadcasting)', [
                 'request_id' => $payload['request_id'] ?? '',
                 'user_id' => $this->userId,
             ]);
 
+            // Warn: if the caller is using SSE (streamToResponse), the async events
+            // won't be delivered because PHP-FPM exits after the HTTP response.
+            Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
+                'request_id' => $payload['request_id'] ?? '',
+            ]);
+
         } catch (\Exception $e) {
-            // Don't leak internal host/port in error messages
             Log::error('AI Bridge: failed to relay request to bridge server', [
+                'request_id' => $payload['request_id'] ?? '',
                 'url' => $url,
                 'error' => $e->getMessage(),
             ]);
 
-            $this->streamHandler->dispatchError(
-                'bridge_relay_failed',
-                'Failed to relay request to bridge server. Check server logs for details.'
-            );
+            // Categorize the error for more actionable user-facing messages
+            $userMessage = str_contains($e->getMessage(), 'timed out')
+                ? 'Bridge server did not respond within the timeout period.'
+                : (str_contains($e->getMessage(), 'Connection refused')
+                    ? 'Could not connect to bridge server. Is it running?'
+                    : 'Failed to relay request to bridge server. Check server logs for details.');
+
+            $this->streamHandler->dispatchError('bridge_relay_failed', $userMessage);
         }
     }
 

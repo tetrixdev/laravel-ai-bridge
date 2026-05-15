@@ -65,4 +65,11 @@ interface StreamableProvider
      * Get the StreamHandler that manages event callbacks for this provider.
      */
     public function getStreamHandler(): StreamHandler;
+
+    /**
+     * Mark the stream as completed. Called by StreamHandler after terminal events.
+     *
+     * Implement as a no-op if the provider doesn't need completion tracking.
+     */
+    public function markCompleted(): void;
 }

@@ -45,7 +45,7 @@ class TestCommand extends Command
 
         try {
             $stream = $manager->stream('test-conversation', $message, [
-                'mode' => $mode,
+                'mode' => ProviderMode::from($mode),
                 'system_prompt' => 'You are a helpful assistant. Keep responses brief.',
             ]);
 

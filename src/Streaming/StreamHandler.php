@@ -59,6 +59,9 @@ class StreamHandler
      */
     private bool $terminated = false;
 
+    /** The resolved provider mode, for accurate StreamCompleted reporting. */
+    private ?ProviderMode $mode = null;
+
     /** Track the start time for duration reporting in StreamCompleted. */
     private float $startedAt = 0;
 
@@ -183,6 +186,16 @@ class StreamHandler
         $this->conversationId = $conversationId;
     }
 
+    /**
+     * Set the provider mode (used for StreamCompleted event dispatch).
+     *
+     * @internal Set by AiBridgeManager after mode resolution.
+     */
+    public function setMode(ProviderMode $mode): void
+    {
+        $this->mode = $mode;
+    }
+
     // ── Internal dispatch methods (called by provider implementations) ──
 
     /**
@@ -192,7 +205,7 @@ class StreamHandler
      */
     public function dispatchBlockStart(BlockType $blockType, int $blockIndex): void
     {
-        if ($this->cancelled) {
+        if ($this->cancelled || $this->terminated) {
             return;
         }
 
@@ -217,7 +230,7 @@ class StreamHandler
      */
     public function dispatchBlockDelta(BlockType $blockType, int $blockIndex, string $content): void
     {
-        if ($this->cancelled) {
+        if ($this->cancelled || $this->terminated) {
             return;
         }
 
@@ -242,7 +255,7 @@ class StreamHandler
      */
     public function dispatchBlockStop(BlockType $blockType, int $blockIndex): void
     {
-        if ($this->cancelled) {
+        if ($this->cancelled || $this->terminated) {
             return;
         }
 
@@ -267,7 +280,7 @@ class StreamHandler
      */
     public function dispatchToolCall(string $toolName, array $params, string $callId): void
     {
-        if ($this->cancelled) {
+        if ($this->cancelled || $this->terminated) {
             return;
         }
 
@@ -311,10 +324,7 @@ class StreamHandler
 
         $this->dispatchStreamCompleted(true, $usage);
 
-        // Mark BridgeStream as completed if applicable
-        if ($this->provider instanceof BridgeStream) {
-            $this->provider->markCompleted();
-        }
+        $this->provider->markCompleted();
     }
 
     /**
@@ -344,10 +354,7 @@ class StreamHandler
 
         $this->dispatchStreamCompleted(false, null, "{$code}: {$message}");
 
-        // Mark BridgeStream as completed if applicable
-        if ($this->provider instanceof BridgeStream) {
-            $this->provider->markCompleted();
-        }
+        $this->provider->markCompleted();
     }
 
     /**
@@ -425,9 +432,9 @@ class StreamHandler
             ? (int) ((microtime(true) - $this->startedAt) * 1000)
             : null;
 
-        $mode = $this->provider instanceof BridgeStream
+        $mode = $this->mode ?? ($this->provider instanceof BridgeStream
             ? ProviderMode::Bridge
-            : ProviderMode::Byok;
+            : ProviderMode::Byok);
 
         try {
             event(new StreamCompleted(
