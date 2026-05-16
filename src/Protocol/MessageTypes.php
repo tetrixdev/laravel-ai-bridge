@@ -9,9 +9,17 @@ namespace Tetrix\AiBridge\Protocol;
  *
  * These constants define the message types exchanged between the server
  * (this package) and CLI bridge clients over WebSocket.
+ *
+ * NOTE (CONS-006): This is intentionally a constants class rather than a
+ * backed enum (unlike BlockType / ProviderMode) because the all() / bridgeOrigin() /
+ * serverOrigin() grouping methods require runtime-composable arrays that backed
+ * enums cannot express without extra boilerplate. The static cache below removes
+ * the repeated array-construction cost that was flagged in EFF-006.
  */
 final class MessageTypes
 {
+    /** @var string[]|null Cached result of all() — populated once on first call. */
+    private static ?array $allCache = null;
     // ── Connection Lifecycle ────────────────────────────────────────────
 
     /** Sent by bridge immediately after WebSocket upgrade. */
@@ -115,11 +123,18 @@ final class MessageTypes
     /**
      * All valid message types as an array, useful for validation.
      *
+     * EFF-006: Result is cached in a static property after the first call so the
+     * 20-element array is not reconstructed on every incoming WebSocket message.
+     *
      * @return string[]
      */
     public static function all(): array
     {
-        return [
+        if (self::$allCache !== null) {
+            return self::$allCache;
+        }
+
+        return self::$allCache = [
             self::HELLO,
             self::WELCOME,
             self::CONNECTION_ERROR,

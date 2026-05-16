@@ -7,3 +7,7 @@ composer.lock
 *.swp
 *.swo
 .DS_Store
+# SEC-005: Exclude local env files to prevent accidental commit of dev/test secrets
+.env
+.env.*
+!.env.example

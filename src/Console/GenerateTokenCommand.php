@@ -39,7 +39,10 @@ class GenerateTokenCommand extends Command
         $port = (int) config('ai-bridge.server.port', 8085);
 
         $effectiveTtl = $ttl > 0 ? $ttl : (int) config('ai-bridge.token.ttl', 86400);
-        $this->info('Token generated (TTL: '.$effectiveTtl.'s):');
+        // UX-007: Include an absolute expiry timestamp so operators can tell users
+        // when to renew without needing to calculate from raw seconds.
+        $expiresAt = now()->addSeconds($effectiveTtl)->toDateTimeString().' UTC';
+        $this->info('Token generated (TTL: '.$effectiveTtl.'s, expires at '.$expiresAt.'):');
         $this->line($token);
         $this->newLine();
         $this->info('Use with bridge:');

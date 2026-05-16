@@ -58,7 +58,8 @@ A minimal BYOK example in three steps.
 ### 1. Configure `.env`
 
 ```env
-AI_BRIDGE_TOKEN_SECRET=change-me
+# Generate with: openssl rand -hex 32
+AI_BRIDGE_TOKEN_SECRET=REPLACE_WITH_OUTPUT_OF_openssl_rand_hex_32
 AI_BRIDGE_MODE=byok
 AI_BRIDGE_ENDPOINT=https://api.openai.com
 AI_BRIDGE_API_KEY=sk-your-key
@@ -76,11 +77,20 @@ use Tetrix\AiBridge\Facades\AiBridge;
 
 class ChatController extends Controller
 {
-    public function stream()
+    public function stream(Request $request)
     {
+        // NOTE (UX-001): conversation_id must stay CONSTANT across all messages in the
+        // same conversation. Generating a new ID on every request (e.g. uniqid()) creates
+        // a brand-new conversation each time, so the AI has no memory of previous messages.
+        // Store the ID in the session and reuse it for follow-up messages.
+        $conversationId = $request->input('conversation_id')
+            ?? $request->session()->get('ai_conversation_id')
+            ?? 'conv-' . Str::uuid();
+        $request->session()->put('ai_conversation_id', $conversationId);
+
         return AiBridge::streamToResponse(
-            conversationId: 'conv-' . uniqid(),
-            message: request('message'),
+            conversationId: $conversationId,
+            message: $request->input('message'),
             options: [
                 'system_prompt' => 'You are a helpful assistant.',
             ],
@@ -94,6 +104,7 @@ class ChatController extends Controller
 ```html
 <div id="chat">
     <div id="messages"></div>
+    <div id="loading" style="display:none; color: grey;">AI is thinking...</div>
     <div id="error" style="color: red; display: none;"></div>
     <input type="text" id="input" placeholder="Type a message...">
     <button id="send-btn" onclick="send()">Send</button>
@@ -101,6 +112,11 @@ class ChatController extends Controller
 
 <script src="/js/vendor/ai-bridge.js"></script>
 <script>
+// NOTE (UX-001): Generate conversationId ONCE at page load and reuse it for all
+// messages in this conversation. Regenerating on each send() creates a fresh
+// conversation every time and the AI loses all context from previous messages.
+const conversationId = 'conv-' + crypto.randomUUID();
+
 const stream = new AiBridgeStream({
     mode: 'sse',
     url: '/ai-bridge/stream/sse',
@@ -116,6 +132,14 @@ stream.on('text', (content) => {
 
 stream.on('done', () => {
     document.getElementById('messages').textContent += '\n\n';
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('input').disabled = false;
+});
+
+// UX-008: Also handle cancelled so UI is never left stuck after destroy() or cancellation
+stream.on('cancelled', () => {
+    document.getElementById('loading').style.display = 'none';
     document.getElementById('send-btn').disabled = false;
     document.getElementById('input').disabled = false;
 });
@@ -124,6 +148,7 @@ stream.on('error', (code, message) => {
     const el = document.getElementById('error');
     el.textContent = `Error: ${message}`;
     el.style.display = 'block';
+    document.getElementById('loading').style.display = 'none';
     document.getElementById('send-btn').disabled = false;
     document.getElementById('input').disabled = false;
 });
@@ -132,14 +157,17 @@ function send() {
     const input = document.getElementById('input');
     if (!input.value.trim()) return;
 
-    // Disable input during streaming
+    // Disable input during streaming and show loading indicator (UX-008)
     document.getElementById('send-btn').disabled = true;
     input.disabled = true;
+    document.getElementById('loading').style.display = 'block';
     document.getElementById('error').style.display = 'none';
 
-    // UX: conversation_id must be unique per conversation — use Date.now() or a UUID.
-    // A hardcoded ID causes all conversations to share AI context across users/sessions.
-    stream.send({ message: input.value, conversation_id: 'conv-' + Date.now() });
+    // NOTE (UX-001): The conversation_id must remain STABLE across all messages in the
+    // same conversation so the AI can remember the context. Generate it ONCE when the
+    // page loads and reuse it for every send() call in this conversation session.
+    // Using Date.now() here would create a new conversation on every message.
+    stream.send({ message: input.value, conversation_id: conversationId });
     input.value = '';
 }
 </script>

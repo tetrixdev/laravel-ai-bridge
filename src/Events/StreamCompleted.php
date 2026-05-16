@@ -12,6 +12,12 @@ use Tetrix\AiBridge\Enums\ProviderMode;
  * Dispatched when an AI response stream completes (successfully or with error).
  *
  * Consuming applications can use this for logging, billing, analytics, etc.
+ *
+ * SerializesModels is intentionally retained here (unlike BridgeConnected /
+ * BridgeDisconnected) because StreamCompleted is the primary hook for billing
+ * and analytics, which are commonly handled by queued listeners. Queued listeners
+ * require SerializesModels to safely serialize and re-hydrate event properties
+ * across process boundaries.
  */
 class StreamCompleted
 {
@@ -32,5 +38,12 @@ class StreamCompleted
         public readonly ?string $error = null,
         /** Duration of the stream in milliseconds. */
         public readonly ?int $durationMs = null,
+        /**
+         * How the stream ended: 'success', 'error', or 'cancelled'.
+         *
+         * BL-012: Provides a clean, non-fragile way to distinguish cancellations
+         * from errors in analytics listeners — no need to parse the error string prefix.
+         */
+        public readonly string $terminatedBy = 'success',
     ) {}
 }

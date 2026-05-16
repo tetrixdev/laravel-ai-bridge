@@ -87,6 +87,18 @@ class ServeCommand extends Command
         $this->line("  Port:    <fg=green>{$port}</>");
         $this->line("  URL:     <fg=green>ws://{$host}:{$port}</>");
         $this->newLine();
+
+        // UX-005: Warn when the server is bound to a non-loopback address — browsers
+        // block ws:// (mixed-content) on HTTPS pages. Operators should set
+        // AI_BRIDGE_PUBLIC_URL=wss://... for production TLS deployments.
+        $isPublicBind = ! in_array($host, ['127.0.0.1', 'localhost', '::1'], true);
+        if ($isPublicBind && empty(config('ai-bridge.server.public_url'))) {
+            $this->line('  <fg=yellow;options=bold>⚠  TLS warning:</> Binding to a public interface with ws:// (plaintext).');
+            $this->line('     Browsers block ws:// connections on HTTPS pages (mixed-content policy).');
+            $this->line('     For production: set AI_BRIDGE_PUBLIC_URL=wss://your-domain in .env');
+            $this->newLine();
+        }
+
         $this->line('  Bridge clients can connect with:');
         $this->line("  <fg=yellow>npx @tetrixdev/ai-bridge --server=ws://{$host}:{$port} --token=<JWT></>");
         $this->newLine();

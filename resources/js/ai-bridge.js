@@ -35,7 +35,11 @@ class AiBridgeStream {
         this._reader = null;
         this._abortController = null;
         this._generation = 0; // Per-request generation counter to ignore stale events
-        this._inactivityTimeout = (config.inactivityTimeout || 60) * 1000; // ms
+        // UX-004: Default raised from 60s to 120s to reduce false-positives for slow AI
+        // responses (extended thinking, cold starts, queued requests). Configurable via
+        // config.inactivityTimeout (seconds). For providers with extended reasoning, set
+        // to 120-300s. The timer only fires if NO events are received in the window.
+        this._inactivityTimeout = (config.inactivityTimeout || 120) * 1000; // ms
         this._inactivityTimer = null;
 
         if (this.mode === 'reverb' && this.channel && typeof window.Echo !== 'undefined') {
@@ -97,13 +101,27 @@ class AiBridgeStream {
     /**
      * Clean up resources. Must be called before discarding the instance in SPAs
      * to prevent duplicate Reverb listeners and memory leaks.
+     *
+     * UX-003: If a stream is in-flight when destroy() is called, terminal events
+     * (cancelled + done) are emitted before listeners are cleared so UI cleanup
+     * callbacks (re-enabling buttons, hiding spinners) still fire and the UI is
+     * never left in a permanently stuck state.
      */
     destroy() {
+        const wasInFlight = this._abortController !== null || this._generation > 0;
+
         if (this._abortController) {
             this._abortController.abort();
             this._abortController = null;
         }
         this._clearInactivityTimer();
+
+        // UX-003: Emit terminal events before clearing listeners so cleanup callbacks run.
+        if (wasInFlight) {
+            this._emit('cancelled');
+            this._emit('done', null);
+        }
+
         if (this.channel && typeof window.Echo !== 'undefined') {
             window.Echo.leave(this.channel);
         }
@@ -258,10 +276,16 @@ class AiBridgeStream {
     _listenReverb() {
         if (typeof window.Echo === 'undefined') return;
 
+        // BL-002: Capture the generation counter AT SUBSCRIPTION TIME so events from a
+        // previous send() are correctly discarded even if they arrive after a new send().
+        // Without this capture, _handleEvent(e, this._generation) always reads the LIVE
+        // generation (always matching itself), making the stale-event guard a no-op.
+        const capturedGen = this._generation;
+
         // Use private channel for authorization (matches server-side PrivateChannel)
         window.Echo.private(this.channel)
             .listen('.ai.stream', (e) => {
-                this._handleEvent(e, this._generation);
+                this._handleEvent(e, capturedGen);
             })
             // UX-010: Handle channel authorization failures (session expiry, policy changes).
             // Without this handler, a 403 from the broadcasting auth endpoint is completely
@@ -278,8 +302,10 @@ class AiBridgeStream {
     _resetInactivityTimer() {
         this._clearInactivityTimer();
         this._inactivityTimer = setTimeout(() => {
+            // EFF-007: The inactivity timer intentionally reads this._generation at fire
+            // time (not captured at reset time) so it always acts on the current stream.
+            // The 'const gen = ...' that appeared here was dead code — removed.
             if (this._generation > 0) {
-                const gen = this._generation;
                 this._generation++;
                 this._emit('error', 'inactivity_timeout', 'No events received within the inactivity timeout period.');
             }
@@ -337,6 +363,12 @@ class AiBridgeStream {
                 break;
             case 'block_stop':
                 this._emit('block_stop', data.block_type, data.block_index);
+                break;
+            case 'conversation_id':
+                // UX-002: The server emits a 'conversation_id' event as the first SSE event
+                // so the client can capture it for use in subsequent multi-turn messages.
+                // Emit it so consuming apps can store and reuse the conversation ID.
+                this._emit('conversation_id', data.conversation_id || '');
                 break;
             case 'tool_call':
                 this._emit('tool_call', data.tool_name, data.parameters || {});

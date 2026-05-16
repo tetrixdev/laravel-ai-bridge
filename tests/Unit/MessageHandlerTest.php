@@ -342,6 +342,167 @@ test('StreamHandler::dispatchEvent() falls back to call_id for legacy events (CO
     expect($receivedCallId)->toBe('legacy-call-id');
 });
 
+// --- BL-001: stream-envelope tool_call ownership bypass ---
+
+test('stream-envelope tool_call from correct user is processed (BL-001)', function () {
+    $registry = new ToolRegistry();
+    $registry->register('ping', 'Ping tool', ['type' => 'object'], fn ($p) => ['pong' => true]);
+    $mh = makeMessageHandler($this->manager, $registry);
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-1',
+        'event' => MessageTypes::TOOL_CALL,
+        'data' => [
+            'tool_name' => 'ping',
+            'parameters' => [],
+            'tool_call_id' => 'call-abc',
+        ],
+    ]);
+
+    $response = $mh->handleMessage('conn-1', null, $rawMsg);
+
+    // The tool ran and returned a tool_resolve
+    expect($response)->toBeArray();
+    expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($response['result'])->toBe(['pong' => true]);
+});
+
+test('stream-envelope tool_call from wrong user is discarded (BL-001)', function () {
+    $registry = new ToolRegistry();
+    $toolExecuted = false;
+    $registry->register('ping', 'Ping tool', ['type' => 'object'], function ($p) use (&$toolExecuted) {
+        $toolExecuted = true;
+        return ['pong' => true];
+    });
+    $mh = makeMessageHandler($this->manager, $registry);
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->addConnection('user-2', 'conn-2');
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-1',
+        'event' => MessageTypes::TOOL_CALL,
+        'data' => [
+            'tool_name' => 'ping',
+            'parameters' => [],
+            'tool_call_id' => 'call-evil',
+        ],
+    ]);
+
+    // conn-2 belongs to user-2, but the request belongs to user-1
+    $response = $mh->handleMessage('conn-2', null, $rawMsg);
+
+    expect($response)->toBeNull(); // Discarded — ownership mismatch
+    expect($toolExecuted)->toBeFalse(); // Tool must NOT execute
+});
+
+test('stream-envelope tool_call from unregistered connection is discarded (BL-001 fail-closed)', function () {
+    $registry = new ToolRegistry();
+    $toolExecuted = false;
+    $registry->register('ping', 'Ping tool', ['type' => 'object'], function ($p) use (&$toolExecuted) {
+        $toolExecuted = true;
+        return [];
+    });
+    $mh = makeMessageHandler($this->manager, $registry);
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-1',
+        'event' => MessageTypes::TOOL_CALL,
+        'data' => [
+            'tool_name' => 'ping',
+            'parameters' => [],
+            'tool_call_id' => 'call-ghost',
+        ],
+    ]);
+
+    // 'conn-ghost' is not registered — verifySenderOwnsRequest must reject it
+    $response = $mh->handleMessage('conn-ghost', null, $rawMsg);
+
+    expect($response)->toBeNull();
+    expect($toolExecuted)->toBeFalse();
+});
+
+// --- SEC-001: CANCELLED handler ownership check ---
+
+test('cancelled message from correct user dispatches cancellation (SEC-001)', function () {
+    $handler = makeHandler($this->manager);
+
+    $cancelledFired = false;
+    $handler->onCancelled(function () use (&$cancelledFired) {
+        $cancelledFired = true;
+    });
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::CANCELLED,
+        'request_id' => 'req-1',
+    ]);
+
+    $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    expect($cancelledFired)->toBeTrue();
+    expect($this->manager->getPendingRequest('req-1'))->toBeNull(); // cleaned up
+});
+
+test('cancelled message from wrong user is discarded (SEC-001)', function () {
+    $handler = makeHandler($this->manager);
+
+    $cancelledFired = false;
+    $handler->onCancelled(function () use (&$cancelledFired) {
+        $cancelledFired = true;
+    });
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->addConnection('user-2', 'conn-2');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::CANCELLED,
+        'request_id' => 'req-1',
+    ]);
+
+    // conn-2 belongs to user-2, but request belongs to user-1
+    $this->messageHandler->handleMessage('conn-2', null, $rawMsg);
+
+    expect($cancelledFired)->toBeFalse();
+    expect($this->manager->getPendingRequest('req-1'))->not->toBeNull(); // NOT cleaned up
+});
+
+test('cancelled message from unregistered connection is discarded (SEC-001 fail-closed)', function () {
+    $handler = makeHandler($this->manager);
+
+    $cancelledFired = false;
+    $handler->onCancelled(function () use (&$cancelledFired) {
+        $cancelledFired = true;
+    });
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::CANCELLED,
+        'request_id' => 'req-1',
+    ]);
+
+    // 'conn-unknown' is not in the manager — fail-closed means null userId => reject
+    $this->messageHandler->handleMessage('conn-unknown', null, $rawMsg);
+
+    expect($cancelledFired)->toBeFalse();
+    expect($this->manager->getPendingRequest('req-1'))->not->toBeNull();
+});
+
 // --- Protocol version mismatch (ARCH-005) ---
 
 test('hello with incompatible major protocol version is rejected (ARCH-005)', function () {
@@ -374,4 +535,36 @@ test('hello with compatible minor version difference is accepted (ARCH-005)', fu
 
     expect($response)->toBeArray();
     expect($response['type'])->toBe(MessageTypes::WELCOME);
+});
+
+// --- EFF-006: MessageTypes::all() caching ---
+
+test('MessageTypes::all() returns same array reference on second call (EFF-006)', function () {
+    // First call populates the cache
+    $first = \Tetrix\AiBridge\Protocol\MessageTypes::all();
+    // Second call must hit the cache and return identical result
+    $second = \Tetrix\AiBridge\Protocol\MessageTypes::all();
+
+    expect($first)->toBe($second); // Same array, not just equal
+});
+
+test('MessageTypes::all() contains all expected message type constants (EFF-006)', function () {
+    $all = \Tetrix\AiBridge\Protocol\MessageTypes::all();
+
+    expect($all)->toContain(MessageTypes::HELLO);
+    expect($all)->toContain(MessageTypes::WELCOME);
+    expect($all)->toContain(MessageTypes::PING);
+    expect($all)->toContain(MessageTypes::PONG);
+    expect($all)->toContain(MessageTypes::STREAM);
+    expect($all)->toContain(MessageTypes::DONE);
+    expect($all)->toContain(MessageTypes::TOOL_CALL);
+    expect($all)->toContain(MessageTypes::CANCELLED);
+    expect($all)->toHaveCount(20);
+});
+
+test('MessageTypes::isValid() accepts known types and rejects unknown (EFF-006)', function () {
+    expect(MessageTypes::isValid(MessageTypes::HELLO))->toBeTrue();
+    expect(MessageTypes::isValid(MessageTypes::STREAM))->toBeTrue();
+    expect(MessageTypes::isValid('not_a_real_type'))->toBeFalse();
+    expect(MessageTypes::isValid(''))->toBeFalse();
 });

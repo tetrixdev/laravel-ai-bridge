@@ -83,6 +83,10 @@ class BridgeWebSocketHandler
             $decoded = $this->tokenManager->validate($token);
             $userId = (string) $decoded->sub;
         } catch (TokenValidationException $e) {
+            // SEC-002: Log the specific error code server-side for debugging but return
+            // a generic 'token_invalid' code to the client to prevent error-oracle attacks
+            // (distinguishing expired vs wrong-signature vs wrong-scope aids forgery attempts).
+            // The HTTP middleware (ValidateBridgeToken) already applies this same pattern.
             Log::info('AI Bridge Server: connection rejected — invalid token', [
                 'resource_id' => $resourceId,
                 'error_code' => $e->errorCode,
@@ -90,8 +94,8 @@ class BridgeWebSocketHandler
 
             $conn->send(json_encode([
                 'type' => MessageTypes::CONNECTION_ERROR,
-                'error' => $e->errorCode,
-                'message' => $e->getMessage(),
+                'error' => 'token_invalid',
+                'message' => 'Token validation failed.',
             ]));
 
             $conn->close();
@@ -170,9 +174,22 @@ class BridgeWebSocketHandler
             'resource_id' => $resourceId,
         ]);
 
-        // Remove from BridgeConnectionManager (this also fails pending requests)
+        // BL-016: Guard against the reconnection race condition where the old TCP
+        // connection fires onClose after a new connection has already replaced it.
+        // Only remove from the manager if the manager's current connection_id for this
+        // user still matches the closing connection's ID. If they differ, a newer
+        // connection already took over — do not evict it.
         if ($userId !== null) {
-            $this->connectionManager->removeConnection($userId, 'websocket_closed');
+            $currentConnectionId = $this->connectionManager->getConnectionId($userId);
+            if ($currentConnectionId === $connectionId) {
+                $this->connectionManager->removeConnection($userId, 'websocket_closed');
+            } else {
+                Log::info('AI Bridge Server: stale connection closed after reconnect — skipping removeConnection', [
+                    'closing_connection_id' => $connectionId,
+                    'current_connection_id' => $currentConnectionId,
+                    'user_id' => $userId,
+                ]);
+            }
         }
 
         unset($this->connections[$resourceId]);

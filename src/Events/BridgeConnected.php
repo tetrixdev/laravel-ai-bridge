@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Events;
 
 use Illuminate\Foundation\Events\Dispatchable;
-use Illuminate\Queue\SerializesModels;
 
 /**
  * Dispatched when a CLI bridge establishes a WebSocket connection.
@@ -15,7 +14,7 @@ use Illuminate\Queue\SerializesModels;
  */
 class BridgeConnected
 {
-    use Dispatchable, SerializesModels;
+    use Dispatchable;
 
     public function __construct(
         /** The user ID that this bridge is authenticated as. */

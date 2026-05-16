@@ -19,6 +19,7 @@ use React\EventLoop\LoopInterface;
 use React\Socket\ConnectionInterface;
 use React\Socket\SocketServer;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
 
@@ -136,8 +137,8 @@ class BridgeWebSocketServer
 
             // SEC: Prevent unbounded buffer growth before WebSocket upgrade (max 64KB).
             if (strlen($httpBuffer) > 65536) {
-                $tcpConnection->write("HTTP/1.1 413 Payload Too Large\r\nContent-Length: 16\r\n\r\nPayload too large");
-                $tcpConnection->end();
+                // CONS-013: Use httpResponse() consistent with all other HTTP responses.
+                $this->httpResponse($tcpConnection, 413, ['error' => 'payload_too_large']);
 
                 return;
             }
@@ -351,9 +352,11 @@ class BridgeWebSocketServer
     //   GET  /api/status    — Check connected users
     //   GET  /api/health    — Health check
     //
-    // TODO (ARCH-005): Extract this HTTP API handling into a separate
+    // ARCH-005 (known, deferred): Extract this HTTP API handling into a separate
     // InternalHttpHandler class to improve separation of concerns.
     // The WebSocket server class should only manage socket lifecycle.
+    // Deferred — the number of internal endpoints is currently small and the coupling
+    // is manageable. Future reviewers: do not re-flag without a concrete extraction plan.
     // -------------------------------------------------------------------------
 
     /**
@@ -403,9 +406,9 @@ class BridgeWebSocketServer
         $token = substr($authHeader, 7);
 
         try {
-            // SEC-002: Require 'internal_relay' scope so user-facing bridge tokens
+            // SEC-002: Require the internal_relay scope so user-facing bridge tokens
             // cannot be used to call the internal HTTP API.
-            $decoded = $this->tokenManager->validate($token, 'internal_relay');
+            $decoded = $this->tokenManager->validate($token, TokenManager::INTERNAL_RELAY_SCOPE);
         } catch (\Throwable $e) {
             $this->httpResponse($tcpConnection, 401, [
                 'error' => 'invalid_token',
@@ -464,6 +467,12 @@ class BridgeWebSocketServer
 
     /**
      * POST /api/request — Send an ai_request to a user's connected bridge.
+     *
+     * ARCH-004 (drift risk): This method constructs the ai_request payload inline.
+     * A second payload builder exists in BridgeStream::buildRequestBody() (the
+     * direct WebSocket path). If you add a new field to the ai_request protocol,
+     * update BOTH builders to keep them in sync. A shared PayloadBuilder extraction
+     * is the correct fix — deferred until the ARCH-001 refactor.
      *
      * Expected body:
      * {
@@ -538,7 +547,7 @@ class BridgeWebSocketServer
         }
         $requestId = $callerRequestId ?? 'req-' . bin2hex(random_bytes(8));
         $payload = [
-            'type' => 'ai_request',
+            'type' => MessageTypes::AI_REQUEST, // CONS-014: use constant, not literal string
             'request_id' => $requestId,
             'provider' => $provider,
             'conversation_id' => $conversationId,
@@ -583,7 +592,9 @@ class BridgeWebSocketServer
      */
     private function httpResponse(ConnectionInterface $tcpConnection, int $statusCode, array $data): void
     {
-        $statusTexts = [200 => 'OK', 400 => 'Bad Request', 401 => 'Unauthorized', 404 => 'Not Found', 500 => 'Internal Server Error'];
+        // CONS-013: 413 is included here so the buffer-overflow guard in handleTcpConnection()
+        // can use httpResponse() consistently rather than writing a raw string directly.
+        $statusTexts = [200 => 'OK', 400 => 'Bad Request', 401 => 'Unauthorized', 404 => 'Not Found', 413 => 'Payload Too Large', 500 => 'Internal Server Error'];
         $statusText = $statusTexts[$statusCode] ?? 'Unknown';
 
         $json = json_encode($data, JSON_UNESCAPED_SLASHES);

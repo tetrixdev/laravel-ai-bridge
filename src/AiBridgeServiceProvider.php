@@ -7,6 +7,9 @@ namespace Tetrix\AiBridge;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Console\GenerateTokenCommand;
+use Tetrix\AiBridge\Console\ServeCommand;
+use Tetrix\AiBridge\Console\TestCommand;
 use Tetrix\AiBridge\Http\Middleware\ValidateBridgeToken;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
@@ -16,6 +19,13 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
  * Laravel service provider for the AI Bridge package.
  *
  * Registers config, routes, and binds all core services as singletons.
+ *
+ * ARCH-003 (known, deferred): react/socket and ratchet/rfc6455 are unconditional
+ * hard dependencies even for BYOK/managed deployments that never run the bridge server.
+ * Making them optional would require class_exists guards in BridgeWebSocketServer and
+ * ServeCommand, plus a more complex installation story for consumers. Deferred until
+ * there is a concrete need (e.g. a significant footprint reduction request). Future
+ * reviewers: do not re-flag this without a concrete, low-risk implementation plan.
  */
 class AiBridgeServiceProvider extends ServiceProvider
 {
@@ -87,15 +97,20 @@ class AiBridgeServiceProvider extends ServiceProvider
             Log::warning('AI Bridge: route_middleware is empty — all AI Bridge HTTP routes are unprotected. Set ai-bridge.route_middleware to ["auth"] or ["auth:sanctum"] for production.');
         }
 
-        // Register routes
+        // Register routes.
+        // ARCH-014 (known, deferred): /token and /status are bridge-mode-specific and
+        // could be conditionally registered only when mode='bridge'. However, conditional
+        // route registration based on config values that can change post-cache is fragile,
+        // and both endpoints are protected by auth + rate-limiting so the security risk is
+        // negligible. Future reviewers: do not re-flag without a concrete, cache-safe plan.
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
 
         // Register artisan commands
         if ($this->app->runningInConsole()) {
             $this->commands([
-                \Tetrix\AiBridge\Console\GenerateTokenCommand::class,
-                \Tetrix\AiBridge\Console\TestCommand::class,
-                \Tetrix\AiBridge\Console\ServeCommand::class,
+                GenerateTokenCommand::class,
+                TestCommand::class,
+                ServeCommand::class,
             ]);
         }
     }

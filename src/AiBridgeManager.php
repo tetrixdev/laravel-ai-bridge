@@ -33,6 +33,13 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  *
  * The manager determines which provider to use based on configuration and
  * creates the appropriate StreamableProvider implementation.
+ *
+ * ARCH-001 (known, deferred): This class combines several concerns — provider factory,
+ * streaming coordination, SSE formatting, tool registration delegation, and broadcast
+ * wiring. Extracting these into dedicated classes (e.g. StreamOutputFormatter) would
+ * improve testability and reduce coupling but is a non-trivial refactor. Deferred
+ * until the package reaches a stable API and a concrete maintenance pain point drives
+ * the split. Future reviewers: do not re-flag this without a concrete, low-risk plan.
  */
 class AiBridgeManager
 {
@@ -203,6 +210,10 @@ class AiBridgeManager
             );
         }
 
+        // BL-003: Mark the provider as broadcasting mode before start() so that
+        // relayViaHttpApi() under PHP-FPM suppresses the false bridge_sse_incompatible
+        // error. The provider is accessible via the StreamHandler in our custom stream() call.
+        $options['_broadcasting'] = true;
         $stream = $this->stream($conversationId, $message, $options);
         $requestId = $stream->requestId;
 
@@ -242,25 +253,43 @@ class AiBridgeManager
             return $suppressThinking && ($event->data['block_type'] ?? '') === 'thinking';
         };
 
-        $stream->onBlockStart(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
-            if ($shouldSuppressEvent($event)) {
+        // BL-008: When thinking blocks are suppressed, re-index visible blocks starting
+        // from 0 so consumers always receive a contiguous zero-based block_index sequence.
+        // Without this, a suppressed thinking block (index 0) leaves the first text block
+        // at index 1, which can break client rendering code that expects zero-based indexing.
+        $visibleBlockCounter = 0;
+        // Track whether a block is currently suppressed so delta/stop share the same decision.
+        $currentBlockSuppressed = false;
+
+        $stream->onBlockStart(function (StreamEvent $event) use ($sink, $shouldSuppressEvent, &$visibleBlockCounter, &$currentBlockSuppressed) {
+            $currentBlockSuppressed = $shouldSuppressEvent($event);
+            if ($currentBlockSuppressed) {
                 return;
             }
-            $sink(['event' => $event->event, 'data' => $event->data]);
+            $data = $event->data;
+            $data['block_index'] = $visibleBlockCounter;
+            $sink(['event' => $event->event, 'data' => $data]);
         });
 
-        $stream->onBlockDelta(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
-            if ($shouldSuppressEvent($event)) {
+        $stream->onBlockDelta(function (StreamEvent $event) use ($sink, &$currentBlockSuppressed, &$visibleBlockCounter) {
+            if ($currentBlockSuppressed) {
                 return;
             }
-            $sink(['event' => $event->event, 'data' => $event->data]);
+            $data = $event->data;
+            $data['block_index'] = $visibleBlockCounter;
+            $sink(['event' => $event->event, 'data' => $data]);
         });
 
-        $stream->onBlockStop(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
-            if ($shouldSuppressEvent($event)) {
+        $stream->onBlockStop(function (StreamEvent $event) use ($sink, &$currentBlockSuppressed, &$visibleBlockCounter) {
+            if ($currentBlockSuppressed) {
+                $currentBlockSuppressed = false;
+
                 return;
             }
-            $sink(['event' => $event->event, 'data' => $event->data]);
+            $data = $event->data;
+            $data['block_index'] = $visibleBlockCounter;
+            $sink(['event' => $event->event, 'data' => $data]);
+            $visibleBlockCounter++;
         });
 
         $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($sink) {
@@ -381,10 +410,20 @@ class AiBridgeManager
             $userId,
         );
 
-        // Set the provider name for routing on the bridge side
+        // Set the provider name for routing on the bridge side.
+        // CONS-010: The config key 'ai-bridge.bridge.provider' is intentionally absent from
+        // ai-bridge.php because it is not currently documented or supported as a config-based
+        // override. Provider selection is done via the $options['provider'] key at call time.
+        // If you need config-based provider defaults, add a 'bridge.provider' key to ai-bridge.php.
         $provider = $options['provider'] ?? config('ai-bridge.bridge.provider', '');
         if (! empty($provider)) {
             $stream->setProvider($provider);
+        }
+
+        // BL-003: Propagate the broadcasting flag set by streamAndBroadcast() so that
+        // relayViaHttpApi() knows to suppress the bridge_sse_incompatible false alarm.
+        if (! empty($options['_broadcasting'])) {
+            $stream->setBroadcastingMode(true);
         }
 
         return $stream;

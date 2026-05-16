@@ -304,7 +304,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->doneCallbacks, [$usage], 'done');
 
-        $this->dispatchStreamCompleted(true, $usage);
+        $this->dispatchStreamCompleted(true, $usage, null, 'success');
 
         $this->provider->markCompleted();
     }
@@ -325,7 +325,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->errorCallbacks, [$code, $message], 'error');
 
-        $this->dispatchStreamCompleted(false, null, "{$code}: {$message}");
+        $this->dispatchStreamCompleted(false, null, "{$code}: {$message}", 'error');
 
         $this->provider->markCompleted();
     }
@@ -366,7 +366,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->cancelledCallbacks, [$reason], 'cancelled');
 
-        $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}");
+        $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}", 'cancelled');
 
         $this->provider->markCompleted();
     }
@@ -469,8 +469,11 @@ class StreamHandler
 
     /**
      * Dispatch the StreamCompleted Laravel event for logging/analytics.
+     *
+     * BL-012: The $terminatedBy parameter ('success', 'error', 'cancelled') lets
+     * event listeners distinguish cancellations from errors without fragile string parsing.
      */
-    private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null): void
+    private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null, string $terminatedBy = 'success'): void
     {
         $durationMs = $this->startedAt > 0
             ? (int) ((microtime(true) - $this->startedAt) * 1000)
@@ -490,6 +493,7 @@ class StreamHandler
                 usage: $usage,
                 error: $error,
                 durationMs: $durationMs,
+                terminatedBy: $terminatedBy,
             ));
         } catch (\Throwable $e) {
             Log::error('AI Bridge: failed to dispatch StreamCompleted event', [

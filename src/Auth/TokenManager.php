@@ -8,6 +8,7 @@ use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
 use Firebase\JWT\ExpiredException;
 use Firebase\JWT\SignatureInvalidException;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
@@ -22,6 +23,14 @@ use InvalidArgumentException;
  */
 class TokenManager
 {
+    /**
+     * Scope value that identifies internal relay tokens (PHP-FPM → bridge server).
+     *
+     * CONS-011: Defined as a constant so all callers (TokenManager, BridgeStream,
+     * BridgeWebSocketServer) can reference this string by name rather than repeating
+     * the literal 'internal_relay' in four places across three files.
+     */
+    public const INTERNAL_RELAY_SCOPE = 'internal_relay';
     /**
      * Generate a JWT connection token for the given user.
      *
@@ -132,7 +141,7 @@ class TokenManager
             // When no specific scope is required (user-facing auth), reject internal tokens
             // to prevent relay tokens from authenticating bridge WebSocket connections.
             $actualScope = $decoded->scope ?? null;
-            if ($actualScope === 'internal_relay') {
+            if ($actualScope === self::INTERNAL_RELAY_SCOPE) {
                 throw new TokenValidationException(
                     "Internal relay tokens may not be used for user-facing bridge authentication.",
                     'token_wrong_scope'
@@ -159,8 +168,17 @@ class TokenManager
     /**
      * Check if a token is valid without throwing exceptions.
      *
+     * This method guarantees it never throws — it returns false for every failure,
+     * including configuration errors (missing/short secret). This contract allows
+     * callers to do defensive checks without wrapping in try/catch.
+     *
+     * CONS-001/BL-005: The catch block covers InvalidArgumentException (thrown by
+     * ensureSecretConfigured() when the secret is absent or too short) in addition
+     * to TokenValidationException, so misconfigured deployments get a safe false
+     * rather than an unhandled exception propagating to the caller.
+     *
      * @param  string  $token  The JWT to check.
-     * @return bool  True if the token is valid, false otherwise.
+     * @return bool  True if the token is valid, false otherwise. Never throws.
      */
     public function isValid(string $token): bool
     {
@@ -169,6 +187,13 @@ class TokenManager
 
             return true;
         } catch (TokenValidationException) {
+            return false;
+        } catch (InvalidArgumentException $e) {
+            // Secret not configured or too short — treat as invalid rather than crashing.
+            Log::warning('AI Bridge: isValid() called but token secret is not properly configured', [
+                'error' => $e->getMessage(),
+            ]);
+
             return false;
         }
     }

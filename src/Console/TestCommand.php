@@ -50,8 +50,18 @@ class TestCommand extends Command
 
         $failed = false;
 
+        // CONS-012: Use tryFrom() and validate explicitly so an unrecognised --mode
+        // argument produces a clean user-facing error instead of an uncaught ValueError.
+        $resolvedMode = ProviderMode::tryFrom($mode);
+        if ($resolvedMode === null) {
+            $validModes = implode(', ', array_map(fn (ProviderMode $m) => "'{$m->value}'", ProviderMode::cases()));
+            $this->error("Unknown mode '{$mode}'. Valid modes: {$validModes}.");
+
+            return self::FAILURE;
+        }
+
         $options = [
-            'mode' => ProviderMode::from($mode),
+            'mode' => $resolvedMode,
             'system_prompt' => 'You are a helpful assistant. Keep responses brief.',
         ];
 
@@ -106,12 +116,28 @@ class TestCommand extends Command
                 $failed = true;
             });
 
+            // BL-006: Register a cancelled callback so mid-stream cancellations are
+            // correctly reported as failures rather than silently exiting with code 0.
+            $stream->onCancelled(function (string $reason) use (&$failed) {
+                $this->newLine();
+                $this->error("Stream cancelled: {$reason}");
+                $failed = true;
+            });
+
             $stream->start();
         } catch (\InvalidArgumentException $e) {
             $this->error($e->getMessage());
             $this->newLine();
 
-            if ($mode === 'byok' || $mode === 'managed') {
+            // UX-009: Show mode-specific configuration hints so developers are not
+            // misled by BYOK variables when they are actually debugging bridge mode.
+            if ($mode === 'bridge') {
+                $this->line('For bridge mode, ensure these are set in your .env:');
+                $this->line('  AI_BRIDGE_MODE=bridge');
+                $this->line('  AI_BRIDGE_TOKEN_SECRET=<32+ char secret>');
+                $this->line('  AI_BRIDGE_SERVER_PORT=8085');
+                $this->line('And make sure the bridge server is running: php artisan ai-bridge:serve');
+            } else {
                 $this->line('For BYOK/managed mode, ensure these are set in your .env:');
                 $this->line('  AI_BRIDGE_ENDPOINT=https://api.openai.com');
                 $this->line('  AI_BRIDGE_API_KEY=sk-...');

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Illuminate\Http\Request;
 use Tetrix\AiBridge\AiBridgeManager;
+use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Http\Controllers\StreamController;
 use Tetrix\AiBridge\Tests\TestCase;
 
@@ -18,9 +19,10 @@ use Tetrix\AiBridge\Tests\TestCase;
 */
 
 
-function makeStreamController(): StreamController
+function makeStreamController(string $mode = 'byok'): StreamController
 {
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::from($mode));
     $manager->shouldReceive('streamToResponse')->byDefault()->andReturn(
         new \Symfony\Component\HttpFoundation\StreamedResponse()
     );
@@ -61,6 +63,7 @@ test('prepareRequestOptions strips unsafe fields from options', function () {
     // We inspect the manager mock to verify what options were passed
     $capturedOptions = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
@@ -85,6 +88,7 @@ test('managed mode strips all client-supplied options including temperature (ARC
 
     $capturedOptions = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Managed);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
@@ -125,6 +129,7 @@ test('non-managed mode allows model and system_prompt overrides', function () {
 
     $capturedOptions = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
@@ -208,6 +213,7 @@ test('options as JSON string is parsed correctly', function () {
 
     $capturedOptions = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
@@ -234,6 +240,7 @@ test('conversation_id is generated when not provided', function () {
 
     $capturedConvId = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId) use (&$capturedConvId) {
@@ -255,6 +262,7 @@ test('auto-generated conversation_id uses UUID format not uniqid (BL-011)', func
 
     $capturedConvId = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId) use (&$capturedConvId) {
@@ -313,11 +321,118 @@ test('system_prompt exceeding max length returns 422 (SEC-012)', function () {
     expect($data['error'])->toBe('validation_error');
 });
 
+// --- BL-013: Model allowlist ---
+
+test('sse() allows model when allowlist is empty (BL-013)', function () {
+    config(['ai-bridge.mode' => 'byok']);
+    config(['ai-bridge.chat_completions.allowed_models' => []]); // empty = allow all
+
+    $capturedOptions = null;
+    $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
+    $manager->shouldReceive('streamToResponse')
+        ->once()
+        ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
+            $capturedOptions = $options;
+            return true;
+        })
+        ->andReturn(new \Symfony\Component\HttpFoundation\StreamedResponse());
+
+    $controller = new StreamController($manager);
+
+    $request = makeRequest([
+        'message' => 'Hello',
+        'model' => 'any-model-at-all',
+    ]);
+
+    $response = $controller->sse($request);
+
+    // Should NOT return a validation error
+    expect($response)->toBeInstanceOf(\Symfony\Component\HttpFoundation\StreamedResponse::class);
+    expect($capturedOptions['model'])->toBe('any-model-at-all');
+});
+
+test('sse() allows permitted model when allowlist is configured (BL-013)', function () {
+    config(['ai-bridge.mode' => 'byok']);
+    config(['ai-bridge.chat_completions.allowed_models' => ['gpt-4o', 'gpt-3.5-turbo']]);
+
+    $capturedOptions = null;
+    $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Byok);
+    $manager->shouldReceive('streamToResponse')
+        ->once()
+        ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
+            $capturedOptions = $options;
+            return true;
+        })
+        ->andReturn(new \Symfony\Component\HttpFoundation\StreamedResponse());
+
+    $controller = new StreamController($manager);
+
+    $request = makeRequest([
+        'message' => 'Hello',
+        'model' => 'gpt-4o',
+    ]);
+
+    $controller->sse($request);
+
+    expect($capturedOptions['model'])->toBe('gpt-4o');
+});
+
+test('sse() returns 422 when model is not in allowlist (BL-013)', function () {
+    config(['ai-bridge.mode' => 'byok']);
+    config(['ai-bridge.chat_completions.allowed_models' => ['gpt-4o', 'gpt-3.5-turbo']]);
+
+    $controller = makeStreamController('byok');
+
+    $request = makeRequest([
+        'message' => 'Hello',
+        'model' => 'claude-3-opus', // not in allowlist
+    ]);
+
+    $response = $controller->sse($request);
+
+    expect($response)->toBeInstanceOf(\Illuminate\Http\JsonResponse::class);
+    expect($response->getStatusCode())->toBe(422);
+
+    $data = json_decode($response->getContent(), true);
+    expect($data['error'])->toBe('validation_error');
+});
+
+test('managed mode ignores model allowlist (models are server-controlled) (BL-013)', function () {
+    config(['ai-bridge.mode' => 'managed']);
+    config(['ai-bridge.chat_completions.allowed_models' => ['gpt-4o']]);
+
+    $capturedOptions = null;
+    $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Managed);
+    $manager->shouldReceive('streamToResponse')
+        ->once()
+        ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {
+            $capturedOptions = $options;
+            return true;
+        })
+        ->andReturn(new \Symfony\Component\HttpFoundation\StreamedResponse());
+
+    $controller = new StreamController($manager);
+
+    $request = makeRequest([
+        'message' => 'Hello',
+        'model' => 'not-in-allowlist', // Managed mode ignores client model — no 422
+    ]);
+
+    $controller->sse($request);
+
+    // In managed mode, options are stripped entirely — no validation_error for model
+    expect($capturedOptions)->toBe([]);
+});
+
 test('managed mode strips all client options (ARCH-009)', function () {
     config(['ai-bridge.mode' => 'managed']);
 
     $capturedOptions = null;
     $manager = Mockery::mock(AiBridgeManager::class);
+    $manager->shouldReceive('mode')->byDefault()->andReturn(ProviderMode::Managed);
     $manager->shouldReceive('streamToResponse')
         ->once()
         ->withArgs(function ($convId, $msg, $options) use (&$capturedOptions) {

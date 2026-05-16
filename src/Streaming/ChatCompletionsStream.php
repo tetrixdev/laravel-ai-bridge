@@ -84,9 +84,16 @@ class ChatCompletionsStream implements StreamableProvider
             ];
         }
 
-        // Conversation history, if provided
+        // Conversation history, if provided.
+        // BL-014: Filter out any client-supplied messages with role='system' to prevent
+        // injection of system-role instructions that could undermine the operator's system
+        // prompt. Only 'user' and 'assistant' roles are accepted from client history.
         if (isset($this->options['messages']) && is_array($this->options['messages'])) {
-            $messages = array_merge($messages, $this->options['messages']);
+            $filtered = array_values(array_filter(
+                $this->options['messages'],
+                fn ($msg) => is_array($msg) && ($msg['role'] ?? '') !== 'system'
+            ));
+            $messages = array_merge($messages, $filtered);
         }
 
         // Current user message
@@ -368,6 +375,11 @@ class ChatCompletionsStream implements StreamableProvider
             // matching BridgeStream's behavior and the documented API contract.
             $this->streamHandler->dispatchCancelled('Stream was cancelled by the user.');
         } else {
+            // BL-007: Flush any accumulated tool calls before dispatching the error so
+            // partially-streamed tool call arguments are not silently discarded when the
+            // connection drops mid-stream. Mirrors the flush done in the [DONE] path above.
+            $this->flushToolCalls($toolCallAccumulators, $toolCallsDispatched);
+
             // Stream ended without [DONE] — likely a connection drop or upstream error.
             // Dispatch error so SSE/Reverb consumers don't hang indefinitely.
             $this->streamHandler->dispatchError(

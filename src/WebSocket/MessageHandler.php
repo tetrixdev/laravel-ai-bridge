@@ -313,10 +313,26 @@ class MessageHandler
      *
      * The bridge is relaying the AI's request to execute a tool.
      * We execute it locally and send back a tool_resolve message.
+     *
+     * BL-001/ARCH-009: Apply the same ownership check as top-level tool_call messages
+     * to prevent a bridge client from executing tools on behalf of another user's request
+     * by sending a stream-envelope tool_call targeting a request_id it does not own.
      */
     private function handleToolCallFromStream(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
+
+        // SEC: Verify the sender owns this request before executing any tool.
+        // Mirrors the check in handleToolCall() for top-level tool_call messages.
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: stream-envelope tool_call from wrong or unregistered user, discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
+
         $data = $message['data'] ?? [];
 
         return $this->executeToolCall(
@@ -395,6 +411,13 @@ class MessageHandler
                 'error' => 'Tool call received with empty tool_name — check the bridge client is sending a valid tool_name field.',
             ];
         }
+
+        // BL-004 (known limitation): Tool execution is synchronous and runs on the ReactPHP
+        // event loop thread. A slow tool (network I/O, database) blocks ALL WebSocket events
+        // for all connected users until it completes. Tool handlers registered with
+        // AiBridge::registerTool() MUST be non-blocking when the bridge server runs under
+        // ReactPHP. For async tool execution, use ReactPHP's event loop primitives or
+        // offload to a queue. This is a known architectural constraint — deferred.
 
         // Dispatch to the StreamHandler's tool call callbacks
         $handler->dispatchToolCall($toolName, $params, $callId);
@@ -558,12 +581,26 @@ class MessageHandler
     /**
      * Handle a 'cancelled' message — bridge acknowledges cancellation.
      *
-     * Dispatches an error event to the StreamHandler so consumers (SSE, Reverb)
+     * Dispatches a cancelled event to the StreamHandler so consumers (SSE, Reverb)
      * receive a terminal event and don't hang waiting for done.
+     *
+     * SEC-001/CONS-002: Apply the same ownership check as all other terminal handlers
+     * (done, error) to prevent a bridge client from cancelling another user's request.
      */
     private function handleCancelled(string $connectionId, array $message): ?array
     {
         $requestId = $message['request_id'] ?? '';
+
+        // SEC: Verify the sender owns this request before dispatching cancellation.
+        // Mirrors the check in handleDoneFromStream() and handleErrorFromStream().
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: cancelled message from wrong or unregistered user, discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
 
         Log::info('AI Bridge: request cancelled', [
             'connection_id' => $connectionId,
@@ -605,17 +642,8 @@ class MessageHandler
             && $senderUserId === $requestUserId;
     }
 
-    /**
-     * Generate a pong message to send in response to a bridge ping.
-     *
-     * @deprecated Use handlePing() instead which returns the pong automatically.
-     * @return array<string, mixed>
-     */
-    public function buildPongMessage(?int $timestamp = null): array
-    {
-        return [
-            'type' => MessageTypes::PONG,
-            'timestamp' => $timestamp ?? time(),
-        ];
-    }
+    // EFF-001: buildPongMessage() was a deprecated public method with no callers.
+    // It has been removed. Use handlePing() instead — it constructs and returns
+    // the pong message directly. If you need a pong payload in a custom integration,
+    // construct it inline: ['type' => MessageTypes::PONG, 'timestamp' => time()]
 }

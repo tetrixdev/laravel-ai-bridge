@@ -35,6 +35,12 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  *
  * DO NOT write generic code that calls start() on a StreamableProvider without
  * knowing which concrete type it is — the post-start behavior is incompatible.
+ *
+ * ARCH-002 (known, deferred): Splitting into SynchronousStreamableProvider and
+ * AsynchronousStreamableProvider with a shared base would make the type system
+ * enforce this distinction. Deferred because it requires updating all consumers and
+ * there is currently no code that exploits the unsafe polymorphism. Future reviewers:
+ * do not re-flag this — the design is intentional and documented here.
  */
 interface StreamableProvider
 {

@@ -76,6 +76,12 @@ return [
         'model' => env('AI_BRIDGE_MODEL'),              // e.g. gpt-4o
         'max_tokens' => env('AI_BRIDGE_MAX_TOKENS', 4096),
         'stream_timeout' => env('AI_BRIDGE_STREAM_TIMEOUT', 300), // seconds before stream HTTP timeout
+
+        // BL-013: Optional allowlist of permitted model values for client-supplied 'model' overrides.
+        // When non-empty, requests with a model not in this list are rejected with HTTP 422.
+        // Leave empty to allow any model (not recommended in managed or shared deployments).
+        // Example: ['gpt-4o', 'gpt-4o-mini']
+        'allowed_models' => [],
     ],
 
     /*

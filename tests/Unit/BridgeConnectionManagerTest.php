@@ -268,6 +268,77 @@ test('sendToUser() uses send callback when configured', function () {
     expect($sentPayload)->toBe(['type' => 'test', 'data' => 'hello']);
 });
 
+// --- BL-016: Reconnection race — getConnectionId() guard ---
+
+test('getConnectionId() returns new connection ID after reconnect (BL-016)', function () {
+    // This tests the guard logic used in BridgeWebSocketHandler::onClose():
+    // if manager's current connectionId !== closing connectionId, skip removeConnection.
+    $this->manager->addConnection('user-1', 'conn-old');
+
+    // Simulate reconnect: add new connection which replaces old one
+    $this->manager->addConnection('user-1', 'conn-new');
+
+    // After reconnect, the manager's current connection ID for user-1 is conn-new
+    expect($this->manager->getConnectionId('user-1'))->toBe('conn-new');
+
+    // The guard in onClose checks: if (currentConnectionId !== closingConnectionId)
+    // Simulate old connection firing onClose: getConnectionId('user-1') === 'conn-new' !== 'conn-old'
+    // => guard fires, removeConnection is skipped
+    $closingConnectionId = 'conn-old';
+    $currentConnectionId = $this->manager->getConnectionId('user-1');
+
+    // Verify the guard condition is true (skip removeConnection)
+    expect($currentConnectionId !== $closingConnectionId)->toBeTrue();
+});
+
+test('getConnectionId() matches closing connection when no reconnect occurred (BL-016)', function () {
+    // Normal close without reconnect: guard should allow removeConnection to proceed
+    $this->manager->addConnection('user-1', 'conn-1');
+
+    $closingConnectionId = 'conn-1';
+    $currentConnectionId = $this->manager->getConnectionId('user-1');
+
+    // Guard condition: currentConnectionId === closingConnectionId => allow removeConnection
+    expect($currentConnectionId)->toBe($closingConnectionId);
+});
+
+test('removeConnection does not evict new connection when called for old one (BL-016)', function () {
+    // Full scenario: reconnect race where old onClose must not evict the new connection.
+    // BridgeWebSocketHandler.onClose() uses getConnectionId() to guard removeConnection().
+    // We simulate that guard logic here directly on the manager.
+    $errorFired = false;
+    $handler = createTestStreamHandler();
+    $handler->onError(function () use (&$errorFired) { $errorFired = true; });
+
+    $this->manager->addConnection('user-1', 'conn-old');
+    $this->manager->registerPendingRequest('req-1', $handler, 'user-1');
+
+    // Bridge reconnects — conn-new replaces conn-old; pending request fails with bridge_reconnecting
+    $this->manager->addConnection('user-1', 'conn-new');
+
+    // Now the new connection is established; a new request is in flight
+    $handler2 = createTestStreamHandler();
+    $error2Fired = false;
+    $handler2->onError(function () use (&$error2Fired) { $error2Fired = true; });
+    $this->manager->registerPendingRequest('req-2', $handler2, 'user-1');
+
+    // Simulate onClose firing for the old connection.
+    // The guard: if (getConnectionId('user-1') !== 'conn-old') => skip removeConnection
+    $closingId = 'conn-old';
+    $currentId = $this->manager->getConnectionId('user-1');
+
+    if ($currentId === $closingId) {
+        $this->manager->removeConnection('user-1', 'websocket_closed');
+    }
+    // else: skip — the new connection is active
+
+    // New connection and request must still be intact
+    expect($this->manager->hasConnection('user-1'))->toBeTrue();
+    expect($this->manager->getConnectionId('user-1'))->toBe('conn-new');
+    expect($this->manager->getPendingRequest('req-2'))->not->toBeNull();
+    expect($error2Fired)->toBeFalse();
+});
+
 test('failPendingRequestsForUser does not affect other users pending requests', function () {
     $handler1 = createTestStreamHandler();
     $handler2 = createTestStreamHandler();

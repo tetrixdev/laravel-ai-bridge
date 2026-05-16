@@ -61,6 +61,16 @@ class BridgeStream implements StreamableProvider
     /** The provider name to route to on the bridge (e.g. 'claude', 'codex', 'gemini'). */
     private string $provider = '';
 
+    /**
+     * Whether the caller is using broadcasting mode (Reverb).
+     *
+     * BL-003: When true, the bridge_sse_incompatible error dispatched in relayViaHttpApi()
+     * is suppressed because the error is a no-op for broadcasting callers (their events
+     * arrive via Reverb, not SSE). When false (SSE mode), the error is dispatched so the
+     * SSE client receives a clean terminal event rather than hanging.
+     */
+    private bool $broadcastingMode = false;
+
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
         private readonly ToolRegistry $toolRegistry,
@@ -103,6 +113,20 @@ class BridgeStream implements StreamableProvider
         return $this;
     }
 
+    /**
+     * Mark this stream as using broadcasting (Reverb) mode.
+     *
+     * BL-003: When set, the bridge_sse_incompatible error fired under PHP-FPM is
+     * suppressed. Broadcasting callers do not need the SSE terminal event because
+     * events are delivered via the Reverb channel, not the SSE HTTP response.
+     */
+    public function setBroadcastingMode(bool $broadcasting): static
+    {
+        $this->broadcastingMode = $broadcasting;
+
+        return $this;
+    }
+
     public function getStreamHandler(): StreamHandler
     {
         return $this->streamHandler;
@@ -129,9 +153,17 @@ class BridgeStream implements StreamableProvider
     /**
      * Build the ai_request payload to send to the bridge.
      *
+     * CONS-003: Named buildRequestBody() consistent with ChatCompletionsStream::buildRequestBody()
+     * so both StreamableProvider implementations use the same method name for this role.
+     *
+     * ARCH-004 (drift risk): A second ai_request payload is built in
+     * BridgeWebSocketServer::apiRequest() (the PHP-FPM relay path). If you add a new
+     * field here, update that method too. Both builders must stay in sync. A shared
+     * PayloadBuilder extraction is the long-term fix — deferred until ARCH-001 refactor.
+     *
      * @return array<string, mixed>
      */
-    public function buildRequestPayload(): array
+    public function buildRequestBody(): array
     {
         $payload = [
             'type' => MessageTypes::AI_REQUEST,
@@ -193,7 +225,7 @@ class BridgeStream implements StreamableProvider
         $this->cancelled = false;
         $this->completed = false;
 
-        $payload = $this->buildRequestPayload();
+        $payload = $this->buildRequestBody();
 
         // Try direct WebSocket send first (works in long-running processes like
         // the bridge server itself, Octane, or Swoole where connections are in-memory).
@@ -258,9 +290,9 @@ class BridgeStream implements StreamableProvider
         }
 
         try {
-            // Use a short-lived token with 'scope' => 'internal_relay' to distinguish
+            // Use a short-lived token with the internal_relay scope to distinguish
             // internal relay requests from user-facing bridge connection tokens.
-            $internalToken = $this->tokenManager->generate($this->userId, ['scope' => 'internal_relay'], 60);
+            $internalToken = $this->tokenManager->generate($this->userId, ['scope' => TokenManager::INTERNAL_RELAY_SCOPE], 60);
 
             $relayBody = [
                 'request_id' => $payload['request_id'] ?? '',
@@ -320,16 +352,21 @@ class BridgeStream implements StreamableProvider
             // spec causes the browser to reconnect indefinitely when it receives an
             // empty SSE response with no [DONE] sentinel. Dispatch an error here so
             // the SSE response closes cleanly with an actionable error event.
-            // If the caller is using broadcasting (Reverb), this error is effectively
-            // a no-op because the StreamHandler is not wired to an SSE sink in that path.
+            //
+            // BL-003: Only dispatch the error when the caller is using SSE mode. In
+            // broadcasting (Reverb) mode, the StreamHandler is not wired to an SSE sink
+            // so the error is a false alarm that fires registered onError callbacks
+            // unexpectedly. setBroadcastingMode(true) suppresses this.
             Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
                 'request_id' => $payload['request_id'] ?? '',
             ]);
 
-            $this->streamHandler->dispatchError(
-                'bridge_sse_incompatible',
-                'SSE mode is not supported for bridge mode under PHP-FPM. Use broadcasting (Reverb) instead.'
-            );
+            if (! $this->broadcastingMode) {
+                $this->streamHandler->dispatchError(
+                    'bridge_sse_incompatible',
+                    'SSE mode is not supported for bridge mode under PHP-FPM. Use broadcasting (Reverb) instead.'
+                );
+            }
 
         } catch (\Exception $e) {
             Log::error('AI Bridge: failed to relay request to bridge server', [

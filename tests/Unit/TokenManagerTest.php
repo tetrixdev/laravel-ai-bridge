@@ -213,3 +213,30 @@ test('generate() throws when config TTL is zero (BL-008)', function () {
 
     $this->tokenManager->generate(1);
 })->throws(InvalidArgumentException::class, 'Token TTL must be a positive integer');
+
+// --- CONS-001/BL-005: isValid() never-throws contract ---
+
+test('isValid() returns false when token secret is empty — never throws (CONS-001/BL-005)', function () {
+    config(['ai-bridge.token.secret' => '']);
+
+    // Must return false, not throw InvalidArgumentException
+    $result = $this->tokenManager->isValid('any-token');
+
+    expect($result)->toBeFalse();
+});
+
+test('isValid() returns false when token secret is too short — never throws (CONS-001/BL-005)', function () {
+    config(['ai-bridge.token.secret' => 'short-secret']);
+
+    // Must return false, not throw InvalidArgumentException (secret < 32 bytes)
+    $result = $this->tokenManager->isValid('any-token');
+
+    expect($result)->toBeFalse();
+});
+
+test('isValid() returns false for malformed token without throwing (CONS-001/BL-005)', function () {
+    // Malformed string — not a valid JWT at all
+    $result = $this->tokenManager->isValid('not.a.valid.jwt.at.all');
+
+    expect($result)->toBeFalse();
+});

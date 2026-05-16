@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\AiBridgeManager;
+use Tetrix\AiBridge\Enums\ProviderMode;
 
 /**
  * HTTP endpoints for streaming AI responses to the browser.
@@ -115,8 +116,9 @@ class StreamController extends Controller
 
         $conversationId = $request->input('conversation_id', 'conv-' . \Illuminate\Support\Str::uuid());
 
-        $mode = config('ai-bridge.mode');
-        $isManagedMode = $mode === 'managed';
+        // CONS-005: Use ProviderMode::from() for consistent, validated mode resolution
+        // instead of a raw string comparison that silently ignores invalid values.
+        $isManagedMode = $this->manager->mode() === ProviderMode::Managed;
         $options = $this->sanitizeOptions($request);
 
         // UX-007: Detect malformed JSON in options field (set by sanitizeOptions())
@@ -145,7 +147,17 @@ class StreamController extends Controller
             }
 
             if ($request->has('model')) {
-                $options['model'] = $request->input('model');
+                $requestedModel = $request->input('model');
+                // BL-013: Validate against the configured model allowlist when non-empty.
+                // An empty allowlist means any model is permitted.
+                $allowedModels = config('ai-bridge.chat_completions.allowed_models', []);
+                if (! empty($allowedModels) && ! in_array($requestedModel, (array) $allowedModels, true)) {
+                    return response()->json([
+                        'error' => 'validation_error',
+                        'message' => 'The requested model is not permitted. Allowed models: '.implode(', ', (array) $allowedModels).'.',
+                    ], 422);
+                }
+                $options['model'] = $requestedModel;
             }
         }
 
@@ -185,7 +197,8 @@ class StreamController extends Controller
             $raw = [];
         }
 
-        if (config('ai-bridge.mode') === 'managed') {
+        // CONS-005: Use the manager's mode() for consistent validated mode resolution.
+        if ($this->manager->mode() === ProviderMode::Managed) {
             // In managed mode, the app controls AI behavior and bears the cost.
             // No client-supplied options pass through.
             return [];
