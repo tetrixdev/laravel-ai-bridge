@@ -16,7 +16,7 @@ use Tetrix\AiBridge\Contracts\SendableConnection;
  *
  * Implements SendableConnection so BridgeConnectionManager can type-hint against
  * the interface rather than the concrete class, breaking the circular namespace
- * dependency between the WebSocket and Server namespaces (ARCH-012).
+ * dependency between the WebSocket and Server namespaces.
  */
 class BridgeConnection implements SendableConnection
 {

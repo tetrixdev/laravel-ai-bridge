@@ -39,16 +39,7 @@ class StreamCompleted
         public readonly ?string $error = null,
         /** Duration of the stream in milliseconds. */
         public readonly ?int $durationMs = null,
-        /**
-         * How the stream ended: Success, Error, or Cancelled.
-         *
-         * BL-012: Provides a clean, non-fragile way to distinguish cancellations
-         * from errors in analytics listeners — no need to parse the error string prefix.
-         *
-         * CONS-009: Typed as the TerminatedBy backed enum (consistent with
-         * ProviderMode and BlockType) so invalid values are rejected at construction
-         * time and listeners can write exhaustive match() checks.
-         */
+        /** How the stream ended: Success, Error, or Cancelled. */
         public readonly TerminatedBy $terminatedBy = TerminatedBy::Success,
     ) {}
 }

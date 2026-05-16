@@ -64,10 +64,8 @@ class BridgeStream implements StreamableProvider
     /**
      * Whether the caller is using broadcasting mode (Reverb).
      *
-     * BL-003: When true, the bridge_sse_incompatible error dispatched in relayViaHttpApi()
-     * is suppressed because the error is a no-op for broadcasting callers (their events
-     * arrive via Reverb, not SSE). When false (SSE mode), the error is dispatched so the
-     * SSE client receives a clean terminal event rather than hanging.
+     * When true, the bridge_sse_incompatible error in relayViaHttpApi() is
+     * suppressed — broadcasting callers receive events via Reverb, not SSE.
      */
     private bool $broadcastingMode = false;
 
@@ -116,9 +114,8 @@ class BridgeStream implements StreamableProvider
     /**
      * Mark this stream as using broadcasting (Reverb) mode.
      *
-     * BL-003: When set, the bridge_sse_incompatible error fired under PHP-FPM is
-     * suppressed. Broadcasting callers do not need the SSE terminal event because
-     * events are delivered via the Reverb channel, not the SSE HTTP response.
+     * When set, the bridge_sse_incompatible error fired under PHP-FPM is
+     * suppressed, since broadcasting callers receive events via Reverb.
      */
     public function setBroadcastingMode(bool $broadcasting): static
     {
@@ -153,13 +150,8 @@ class BridgeStream implements StreamableProvider
     /**
      * Build the ai_request payload to send to the bridge.
      *
-     * CONS-003: Named buildRequestBody() consistent with ChatCompletionsStream::buildRequestBody()
-     * so both StreamableProvider implementations use the same method name for this role.
-     *
-     * ARCH-004 (drift risk): A second ai_request payload is built in
-     * BridgeWebSocketServer::apiRequest() (the PHP-FPM relay path). If you add a new
-     * field here, update that method too. Both builders must stay in sync. A shared
-     * PayloadBuilder extraction is the long-term fix — deferred until ARCH-001 refactor.
+     * A second ai_request payload is built in BridgeWebSocketServer::apiRequest()
+     * (the PHP-FPM relay path) — keep both builders in sync when adding fields.
      *
      * @return array<string, mixed>
      */
@@ -271,16 +263,15 @@ class BridgeStream implements StreamableProvider
      */
     private function relayViaHttpApi(array $payload): void
     {
-        // SEC-018: Allow configuring HTTPS for internal relay when the bridge server
-        // runs on a separate host or behind a TLS proxy.
+        // Operators can configure HTTPS for the internal relay when the bridge
+        // server runs on a separate host or behind a TLS proxy.
         $configuredUrl = config('ai-bridge.server.relay_url');
 
         if (! empty($configuredUrl)) {
             $url = rtrim($configuredUrl, '/') . '/api/request';
 
-            // SEC-006: An explicitly configured http:// relay URL still exposes the
-            // internal relay token in cleartext unless the host is loopback. Warn so
-            // operators on multi-host deployments switch to https://.
+            // A configured http:// relay URL exposes the internal relay token in
+            // cleartext unless the host is loopback — warn so operators switch to https://.
             $configuredHost = parse_url($configuredUrl, PHP_URL_HOST) ?: '';
             if (str_starts_with(strtolower($configuredUrl), 'http://') && ! $this->isLoopbackHost($configuredHost)) {
                 Log::warning(
@@ -299,10 +290,9 @@ class BridgeStream implements StreamableProvider
                 $host = '127.0.0.1';
             }
 
-            // SEC-006: The fallback relay URL is always plaintext http://. This is safe
-            // for loopback hosts but, on a non-loopback host, the short-lived internal
-            // relay token is transmitted in cleartext. Warn the operator so they set
-            // AI_BRIDGE_RELAY_URL to an https:// URL for multi-host deployments.
+            // The fallback relay URL is always plaintext http:// — safe for
+            // loopback hosts, but on a non-loopback host the internal relay token
+            // is sent in cleartext. Warn so operators set AI_BRIDGE_RELAY_URL.
             if (! $this->isLoopbackHost($host)) {
                 Log::warning(
                     'AI Bridge: internal relay falls back to plaintext http:// for a non-loopback bridge host. '
@@ -373,16 +363,11 @@ class BridgeStream implements StreamableProvider
                 'user_id' => $this->userId,
             ]);
 
-            // BL-010: Under PHP-FPM the SSE HTTP response body is already closing
-            // when events arrive asynchronously via the WebSocket server. The EventSource
-            // spec causes the browser to reconnect indefinitely when it receives an
-            // empty SSE response with no [DONE] sentinel. Dispatch an error here so
-            // the SSE response closes cleanly with an actionable error event.
-            //
-            // BL-003: Only dispatch the error when the caller is using SSE mode. In
-            // broadcasting (Reverb) mode, the StreamHandler is not wired to an SSE sink
-            // so the error is a false alarm that fires registered onError callbacks
-            // unexpectedly. setBroadcastingMode(true) suppresses this.
+            // Under PHP-FPM the SSE response body is already closing when events
+            // arrive asynchronously via WebSocket — without a [DONE] sentinel the
+            // browser reconnects indefinitely. Dispatch an error so the SSE
+            // response closes cleanly. Skipped in broadcasting mode, where the
+            // StreamHandler is not wired to an SSE sink.
             Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
                 'request_id' => $payload['request_id'] ?? '',
             ]);
@@ -415,9 +400,8 @@ class BridgeStream implements StreamableProvider
     /**
      * Determine whether a host refers to the local loopback interface.
      *
-     * SEC-006: Used to decide when a plaintext http:// relay path is safe.
-     * Loopback hosts never leave the machine, so cleartext transmission of
-     * the internal relay token poses no realistic interception risk.
+     * Used to decide when a plaintext http:// relay path is safe — loopback
+     * traffic never leaves the machine.
      */
     private function isLoopbackHost(string $host): bool
     {

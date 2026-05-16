@@ -116,12 +116,10 @@ class StreamController extends Controller
 
         $conversationId = $request->input('conversation_id', 'conv-' . \Illuminate\Support\Str::uuid());
 
-        // CONS-005: Use ProviderMode::from() for consistent, validated mode resolution
-        // instead of a raw string comparison that silently ignores invalid values.
         $isManagedMode = $this->manager->mode() === ProviderMode::Managed;
         $options = $this->sanitizeOptions($request);
 
-        // UX-007: Detect malformed JSON in options field (set by sanitizeOptions())
+        // Detect malformed JSON in the options field (flag set by sanitizeOptions()).
         if (isset($options['__malformed_options_json'])) {
             return response()->json([
                 'error' => 'validation_error',
@@ -134,8 +132,8 @@ class StreamController extends Controller
         if (! $isManagedMode) {
             $systemPrompt = $request->input('system_prompt', '');
             if (! empty($systemPrompt)) {
-                // SEC-012: Enforce a maximum length to prevent excessively large prompts
-                // from consuming disproportionate API tokens at the user's expense.
+                // Enforce a maximum length to prevent excessively large prompts
+                // from consuming disproportionate API tokens.
                 $maxSystemPromptLength = (int) config('ai-bridge.streaming.max_system_prompt_length', 10000);
                 if (mb_strlen($systemPrompt) > $maxSystemPromptLength) {
                     return response()->json([
@@ -146,17 +144,16 @@ class StreamController extends Controller
                 $options['system_prompt'] = $systemPrompt;
             }
 
-            // BL-013: Validate against the configured model allowlist when non-empty.
-            // An empty allowlist means any model is permitted.
+            // Validate against the configured model allowlist when non-empty;
+            // an empty allowlist means any model is permitted.
             $allowedModels = config('ai-bridge.chat_completions.allowed_models', []);
 
             if ($request->has('model')) {
                 $options['model'] = $request->input('model');
             }
 
-            // BL-003: A 'model' value may also arrive inside the options object
-            // (sanitizeOptions() whitelists 'model'). Validate that path too so the
-            // allowlist cannot be bypassed by placing the model under options.
+            // A 'model' value may also arrive inside the options object — validate
+            // that path too so the allowlist cannot be bypassed via options.
             if (! empty($allowedModels) && isset($options['model'])
                 && ! in_array($options['model'], (array) $allowedModels, true)) {
                 return response()->json([
@@ -190,9 +187,8 @@ class StreamController extends Controller
         if (is_string($raw)) {
             $decoded = json_decode($raw, true);
             if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
-                // UX-007: Malformed JSON in options field — fail fast with validation error
-                // rather than silently discarding the options. Callers can catch this
-                // by checking for a 422 response.
+                // Malformed JSON in options field — fail fast rather than
+                // silently discarding the options.
                 return ['__malformed_options_json' => true];
             }
             $raw = is_array($decoded) ? $decoded : [];
@@ -202,15 +198,14 @@ class StreamController extends Controller
             $raw = [];
         }
 
-        // CONS-005: Use the manager's mode() for consistent validated mode resolution.
         if ($this->manager->mode() === ProviderMode::Managed) {
             // In managed mode, the app controls AI behavior and bears the cost.
             // No client-supplied options pass through.
             return [];
         }
 
-        // ARCH-009: Whitelist of client-permitted option keys.
-        // Add new keys here intentionally — any key not in this list is silently dropped.
+        // Whitelist of client-permitted option keys. Any key not listed here is
+        // silently dropped.
         $allowed = ['temperature', 'max_tokens', 'model', 'messages', 'stream_options'];
 
         return array_intersect_key($raw, array_flip($allowed));

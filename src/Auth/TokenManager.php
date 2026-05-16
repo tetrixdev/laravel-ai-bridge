@@ -25,10 +25,6 @@ class TokenManager
 {
     /**
      * Scope value that identifies internal relay tokens (PHP-FPM → bridge server).
-     *
-     * CONS-011: Defined as a constant so all callers (TokenManager, BridgeStream,
-     * BridgeWebSocketServer) can reference this string by name rather than repeating
-     * the literal 'internal_relay' in four places across three files.
      */
     public const INTERNAL_RELAY_SCOPE = 'internal_relay';
     /**
@@ -59,9 +55,8 @@ class TokenManager
 
         $resolvedTtl = $ttl ?? $this->getTtl();
 
-        // BL-008: Guard against zero or negative TTL, which produces immediately-expired
-        // tokens with no error. This typically happens when AI_BRIDGE_TOKEN_TTL is set
-        // to null in .env, causing getTtl() to return 0. Fail fast with a clear message.
+        // Guard against zero or negative TTL, which would produce immediately-expired
+        // tokens with no error.
         if ($resolvedTtl <= 0) {
             throw new InvalidArgumentException(
                 'Token TTL must be a positive integer in seconds. Got: '.$resolvedTtl.'. '
@@ -77,9 +72,8 @@ class TokenManager
             'exp' => $now + $resolvedTtl,
             'jti' => Str::uuid()->toString(),
             'iss' => 'ai-bridge',
-            // SEC-008: Bind the token to this application instance via an audience
-            // claim. Without it, a token issued by one deployment would be accepted
-            // by another deployment that happens to share the same secret.
+            // Bind the token to this application instance so a token issued by
+            // one deployment is not accepted by another sharing the same secret.
             'aud' => $this->getAudience(),
         ]);
 
@@ -129,18 +123,16 @@ class TokenManager
             throw new TokenValidationException('Token has an invalid issuer.', 'token_invalid_issuer');
         }
 
-        // SEC-008: Enforce the audience claim so a token issued by one application
-        // instance cannot authenticate against another instance that shares the same
-        // secret. The expected audience defaults to config('app.url').
+        // Enforce the audience claim so a token issued by one application instance
+        // cannot authenticate against another instance sharing the same secret.
         $expectedAudience = $this->getAudience();
         if (! isset($decoded->aud) || $decoded->aud !== $expectedAudience) {
             throw new TokenValidationException('Token has an invalid audience.', 'token_invalid_audience');
         }
 
-        // SEC-002: Enforce scope when requested.
-        // Internal relay tokens have scope='internal_relay'; user-facing bridge tokens
-        // have no scope claim. Passing an expectedScope prevents cross-class token use
-        // (e.g. an intercepted relay token cannot authenticate a user WebSocket session).
+        // Enforce scope when requested. Internal relay tokens have
+        // scope='internal_relay'; user-facing bridge tokens have no scope claim.
+        // This prevents cross-class token use.
         if ($expectedScope !== null) {
             $actualScope = $decoded->scope ?? null;
             if ($actualScope !== $expectedScope) {
@@ -181,13 +173,8 @@ class TokenManager
      * Check if a token is valid without throwing exceptions.
      *
      * This method guarantees it never throws — it returns false for every failure,
-     * including configuration errors (missing/short secret). This contract allows
-     * callers to do defensive checks without wrapping in try/catch.
-     *
-     * CONS-001/BL-005: The catch block covers InvalidArgumentException (thrown by
-     * ensureSecretConfigured() when the secret is absent or too short) in addition
-     * to TokenValidationException, so misconfigured deployments get a safe false
-     * rather than an unhandled exception propagating to the caller.
+     * including configuration errors (missing/short secret), so callers can do
+     * defensive checks without wrapping in try/catch.
      *
      * @param  string  $token  The JWT to check.
      * @return bool  True if the token is valid, false otherwise. Never throws.
@@ -229,9 +216,8 @@ class TokenManager
     /**
      * Get the audience that identifies this application instance.
      *
-     * SEC-008: Defaults to config('app.url') so tokens are scoped to a single
-     * deployment. Can be overridden via ai-bridge.token.audience for setups
-     * where app.url is not a stable identifier.
+     * Defaults to config('app.url') so tokens are scoped to a single deployment.
+     * Can be overridden via ai-bridge.token.audience.
      */
     private function getAudience(): string
     {

@@ -13,15 +13,7 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * implement this interface, ensuring the consuming application gets the same
  * streaming API regardless of the underlying transport.
  *
- * IMPORTANT — ARCHITECTURAL NOTE (ARCH-001):
- * This interface intentionally conflates two behaviorally incompatible contracts
- * for start(). The two implementations are NEVER used polymorphically — callers
- * always go through AiBridgeManager, which knows the concrete type via ProviderMode.
- * Future refactoring could split this into SynchronousStreamableProvider and
- * AsynchronousStreamableProvider, but for now the distinction is enforced through
- * documentation rather than the type system.
- *
- * BLOCKING behavior of start():
+ * BLOCKING behavior of start() differs between implementations:
  *
  * - ChatCompletionsStream::start() is SYNCHRONOUS — it blocks the current
  *   thread/process while reading the HTTP SSE stream. When start() returns,
@@ -30,17 +22,11 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * - BridgeStream::start() is ASYNCHRONOUS — it sends the ai_request message
  *   over WebSocket and returns immediately. Events arrive later via the
  *   WebSocket server and are dispatched to the StreamHandler by the
- *   MessageHandler as they come in. The consuming app must handle this
- *   async flow (e.g. via event listeners or a WebSocket server loop).
+ *   MessageHandler as they come in.
  *
- * DO NOT write generic code that calls start() on a StreamableProvider without
- * knowing which concrete type it is — the post-start behavior is incompatible.
- *
- * ARCH-002 (known, deferred): Splitting into SynchronousStreamableProvider and
- * AsynchronousStreamableProvider with a shared base would make the type system
- * enforce this distinction. Deferred because it requires updating all consumers and
- * there is currently no code that exploits the unsafe polymorphism. Future reviewers:
- * do not re-flag this — the design is intentional and documented here.
+ * The two implementations are never used polymorphically — callers go through
+ * AiBridgeManager, which knows the concrete type via ProviderMode. Do not write
+ * generic code that calls start() without knowing the concrete type.
  */
 interface StreamableProvider
 {

@@ -20,21 +20,12 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * app's WebSocket server (e.g. Laravel Reverb). This class provides the
  * connection bookkeeping and message routing layer.
  *
- * ARCH-003 — PHP-FPM LIFECYCLE WARNING:
- * This class is registered as a singleton in the service container, but that does
- * NOT mean state persists across HTTP requests in PHP-FPM. PHP-FPM uses a
- * shared-nothing model: each worker gets its own process, and the singleton is
- * destroyed at the end of each request. Connection state only persists in
- * LONG-RUNNING processes:
- *   - The dedicated bridge WebSocket server (`ai-bridge:serve`)
- *   - Laravel Octane / Swoole workers
- *
- * Under PHP-FPM, hasConnection() / hasBridge() always return false because the
- * WebSocket server runs in a separate process. BridgeStream correctly accounts
- * for this by falling back to relayViaHttpApi() when no connection is found.
- * Do NOT call hasBridge() from a controller expecting in-memory state to reflect
- * the bridge server's actual connection state — use the /api/status endpoint on
- * the bridge server instead.
+ * PHP-FPM lifecycle warning: although registered as a container singleton,
+ * state does NOT persist across HTTP requests under PHP-FPM's shared-nothing
+ * model — the singleton is destroyed at the end of each request. Connection
+ * state only persists in long-running processes (the `ai-bridge:serve` server,
+ * Octane/Swoole workers). Under PHP-FPM hasConnection() always returns false;
+ * use the bridge server's /api/status endpoint instead.
  */
 class BridgeConnectionManager
 {
@@ -105,7 +96,7 @@ class BridgeConnectionManager
             'providers' => $providers,
         ];
 
-        // Maintain reverse index for O(1) lookup by connection_id (ARCH-007)
+        // Maintain reverse index for O(1) lookup by connection_id
         $this->connectionIdIndex[$connectionId] = $userId;
 
         Event::dispatch(new BridgeConnected($userId, $connectionId, time()));
@@ -147,7 +138,7 @@ class BridgeConnectionManager
      */
     public function removeConnectionByConnectionId(string $connectionId, ?string $reason = null): void
     {
-        // O(1) lookup via reverse index (ARCH-007)
+        // O(1) lookup via reverse index
         $userId = $this->connectionIdIndex[$connectionId] ?? null;
         if ($userId !== null) {
             $this->removeConnection($userId, $reason);
@@ -187,7 +178,7 @@ class BridgeConnectionManager
      * authenticated at connect time (e.g. via JWT in URL query param), and the
      * MessageHandler needs to know the user without re-authenticating.
      *
-     * O(1) via reverse index (ARCH-007).
+     * O(1) via reverse index.
      */
     public function getUserIdByConnectionId(string $connectionId): ?string
     {
@@ -247,8 +238,7 @@ class BridgeConnectionManager
 
         $connection = $connectionData['connection'] ?? null;
 
-        // Try direct send via the SendableConnection interface (ARCH-012).
-        // BridgeConnection implements this interface; custom transport objects may too.
+        // Try direct send via the SendableConnection interface.
         if ($connection instanceof SendableConnection) {
             try {
                 $connection->send(json_encode($payload));
@@ -349,12 +339,8 @@ class BridgeConnectionManager
             ? 'Bridge is reconnecting — the in-flight request was interrupted. Please resend your message.'
             : 'Bridge connection lost.';
 
-        // UX-008: In-flight requests are failed immediately when a new bridge connection
-        // replaces the old one. There is currently no grace period. To add one, you would
-        // queue the new connection registration and delay calling removeConnection() until
-        // pending requests complete (or a timeout lapses). This is left as a future
-        // enhancement; for now the error message clearly instructs the user to resend.
-
+        // In-flight requests are failed immediately when a new bridge connection
+        // replaces the old one — there is no grace period.
         foreach ($this->pendingRequests as $requestId => $handler) {
             if ($handler['user_id'] === $userId) {
                 $handler['stream_handler']->dispatchError($errorCode, $errorMessage);

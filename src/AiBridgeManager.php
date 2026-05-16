@@ -33,13 +33,6 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  *
  * The manager determines which provider to use based on configuration and
  * creates the appropriate StreamableProvider implementation.
- *
- * ARCH-001 (known, deferred): This class combines several concerns — provider factory,
- * streaming coordination, SSE formatting, tool registration delegation, and broadcast
- * wiring. Extracting these into dedicated classes (e.g. StreamOutputFormatter) would
- * improve testability and reduce coupling but is a non-trivial refactor. Deferred
- * until the package reaches a stable API and a concrete maintenance pain point drives
- * the split. Future reviewers: do not re-flag this without a concrete, low-risk plan.
  */
 class AiBridgeManager
 {
@@ -70,9 +63,8 @@ class AiBridgeManager
      */
     public function stream(string $conversationId, string $message, array $options = []): StreamHandler
     {
-        // ARCH-004: '_broadcasting' is an internal signal set only by
-        // streamAndBroadcast(). Strip it here so external callers cannot inject it
-        // through the public API and silently activate broadcast-mode suppression.
+        // '_broadcasting' is an internal signal set only by streamAndBroadcast().
+        // Strip it so external callers cannot inject it through the public API.
         unset($options['_broadcasting']);
 
         return $this->buildStream($conversationId, $message, $options);
@@ -192,10 +184,9 @@ class AiBridgeManager
 
             $this->wireCallbacks($stream, $send, $sendTerminal);
 
-            // UX-006: Emit the conversation_id as the first SSE event so the browser
-            // can use it in subsequent multi-turn messages. Without this, an auto-generated
-            // conversation_id is silently discarded, making multi-turn conversations
-            // impossible to implement correctly via the SSE endpoint.
+            // Emit the conversation_id as the first SSE event so the browser can
+            // use it in subsequent multi-turn messages — an auto-generated id
+            // would otherwise be lost.
             $send(['event' => 'conversation_id', 'data' => ['conversation_id' => $conversationId]]);
 
             $stream->start();
@@ -228,10 +219,9 @@ class AiBridgeManager
             );
         }
 
-        // BL-003: Mark the provider as broadcasting mode before start() so that
-        // relayViaHttpApi() under PHP-FPM suppresses the false bridge_sse_incompatible
-        // error. Use buildStream() (not the public stream()) so the internal
-        // '_broadcasting' signal is preserved rather than stripped (ARCH-004).
+        // Mark the provider as broadcasting mode before start() so relayViaHttpApi()
+        // under PHP-FPM suppresses the false bridge_sse_incompatible error. Use
+        // buildStream() (not stream()) so the '_broadcasting' signal is preserved.
         $options['_broadcasting'] = true;
         $stream = $this->buildStream($conversationId, $message, $options);
         $requestId = $stream->requestId;
@@ -265,17 +255,13 @@ class AiBridgeManager
     {
         $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', true);
 
-        // ARCH-011: Extract the thinking suppression check into a closure so it is
-        // defined once and referenced from all three block callbacks (start/delta/stop),
-        // preventing drift if the suppression logic needs to change.
+        // Thinking suppression check shared by all three block callbacks.
         $shouldSuppressEvent = static function (StreamEvent $event) use ($suppressThinking): bool {
             return $suppressThinking && ($event->data['block_type'] ?? '') === 'thinking';
         };
 
-        // BL-008: When thinking blocks are suppressed, re-index visible blocks starting
-        // from 0 so consumers always receive a contiguous zero-based block_index sequence.
-        // Without this, a suppressed thinking block (index 0) leaves the first text block
-        // at index 1, which can break client rendering code that expects zero-based indexing.
+        // When thinking blocks are suppressed, re-index visible blocks from 0 so
+        // consumers always receive a contiguous zero-based block_index sequence.
         $visibleBlockCounter = 0;
         // Track whether a block is currently suppressed so delta/stop share the same decision.
         $currentBlockSuppressed = false;
@@ -324,9 +310,8 @@ class AiBridgeManager
         });
 
         $stream->onDone(function (?array $usage) use ($sink, $onTerminal) {
-            // ARCH-011: Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
-            // is always called even if the sink throws, preventing SSE clients from hanging
-            // without a [DONE] terminator.
+            // Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
+            // always runs even if the sink throws, preventing SSE clients from hanging.
             try {
                 $sink(['event' => MessageTypes::DONE, 'data' => ['usage' => $usage]]);
             } finally {
@@ -429,18 +414,16 @@ class AiBridgeManager
             $userId,
         );
 
-        // Set the provider name for routing on the bridge side.
-        // CONS-010: The config key 'ai-bridge.bridge.provider' is intentionally absent from
-        // ai-bridge.php because it is not currently documented or supported as a config-based
-        // override. Provider selection is done via the $options['provider'] key at call time.
-        // If you need config-based provider defaults, add a 'bridge.provider' key to ai-bridge.php.
+        // Set the provider name for routing on the bridge side. Provider selection
+        // is done via the $options['provider'] key at call time; the
+        // 'ai-bridge.bridge.provider' config key is an undocumented fallback.
         $provider = $options['provider'] ?? config('ai-bridge.bridge.provider', '');
         if (! empty($provider)) {
             $stream->setProvider($provider);
         }
 
-        // BL-003: Propagate the broadcasting flag set by streamAndBroadcast() so that
-        // relayViaHttpApi() knows to suppress the bridge_sse_incompatible false alarm.
+        // Propagate the broadcasting flag set by streamAndBroadcast() so
+        // relayViaHttpApi() suppresses the bridge_sse_incompatible false alarm.
         if (! empty($options['_broadcasting'])) {
             $stream->setBroadcastingMode(true);
         }

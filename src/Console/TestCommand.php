@@ -50,8 +50,8 @@ class TestCommand extends Command
 
         $failed = false;
 
-        // CONS-012: Use tryFrom() and validate explicitly so an unrecognised --mode
-        // argument produces a clean user-facing error instead of an uncaught ValueError.
+        // Validate explicitly so an unrecognised --mode argument produces a clean
+        // user-facing error instead of an uncaught ValueError.
         $resolvedMode = ProviderMode::tryFrom($mode);
         if ($resolvedMode === null) {
             $validModes = implode(', ', array_map(fn (ProviderMode $m) => "'{$m->value}'", ProviderMode::cases()));
@@ -65,9 +65,7 @@ class TestCommand extends Command
             'system_prompt' => 'You are a helpful assistant. Keep responses brief.',
         ];
 
-        // Bridge mode requires a user_id (artisan commands have no auth context)
-        // CONS-007: Compare against the resolved enum value for consistency with
-        // the ProviderMode::tryFrom() validation above.
+        // Bridge mode requires a user_id (artisan commands have no auth context).
         if ($resolvedMode === ProviderMode::Bridge) {
             $options['user_id'] = $this->option('user-id') ?? '1';
         }
@@ -118,8 +116,8 @@ class TestCommand extends Command
                 $failed = true;
             });
 
-            // BL-006: Register a cancelled callback so mid-stream cancellations are
-            // correctly reported as failures rather than silently exiting with code 0.
+            // Register a cancelled callback so mid-stream cancellations are
+            // reported as failures rather than silently exiting with code 0.
             $stream->onCancelled(function (string $reason) use (&$failed) {
                 $this->newLine();
                 $this->error("Stream cancelled: {$reason}");
@@ -131,8 +129,7 @@ class TestCommand extends Command
             $this->error($e->getMessage());
             $this->newLine();
 
-            // UX-009: Show mode-specific configuration hints so developers are not
-            // misled by BYOK variables when they are actually debugging bridge mode.
+            // Show mode-specific configuration hints.
             if ($mode === 'bridge') {
                 $this->line('For bridge mode, ensure these are set in your .env:');
                 $this->line('  AI_BRIDGE_MODE=bridge');

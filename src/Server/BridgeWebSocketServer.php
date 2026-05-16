@@ -62,21 +62,8 @@ class BridgeWebSocketServer
      *
      * This method blocks — it runs the ReactPHP event loop until shutdown.
      *
-     * TODO (ARCH-010): Heartbeat watchdog is not yet implemented.
-     * PROTOCOL.md states the server must close connections that have not sent a ping
-     * within 2 × heartbeat_interval (default: 60 seconds). Without this watchdog,
-     * stale half-open connections (e.g. a silently-dropped mobile network connection)
-     * accumulate in BridgeConnectionManager and cause subsequent ai_request messages
-     * to be silently lost (sendToUser() writes to a broken socket).
-     *
-     * To implement: after setting up the socket, add a ReactPHP periodic timer:
-     *   $heartbeatInterval = config('ai-bridge.websocket.heartbeat_interval', 30);
-     *   $this->loop->addPeriodicTimer($heartbeatInterval * 2, function () use ($handler) {
-     *       // Iterate connections, check last-ping timestamp, close stale ones
-     *   });
-     * Track last-seen timestamp per BridgeConnection in BridgeConnectionManager or
-     * BridgeWebSocketHandler, update it on each received message, and call
-     * $handler->onClose($conn) for connections silent for > 2 × heartbeat_interval.
+     * TODO: Heartbeat watchdog is not yet implemented — the server should close
+     * connections that have not sent a ping within 2 × heartbeat_interval.
      *
      * @param  callable|null  $onStart  Callback invoked after the server starts listening.
      */
@@ -122,8 +109,7 @@ class BridgeWebSocketServer
         $headerLength = 0;
 
         // Store a reference to the HTTP-buffering closure so we can remove it
-        // after the WebSocket upgrade (EFF-002: prevents the stale listener from
-        // firing on every subsequent WebSocket frame, even though it exits immediately).
+        // after the WebSocket upgrade — otherwise it fires on every subsequent frame.
         $httpListener = null;
         $httpListener = function (string $data) use ($tcpConnection, $handler, &$httpBuffer, &$upgraded, &$headersComplete, &$expectedBodyLength, &$headerLength, &$httpListener) {
             // If already upgraded, data is handled by the MessageBuffer (attached below).
@@ -137,7 +123,6 @@ class BridgeWebSocketServer
 
             // SEC: Prevent unbounded buffer growth before WebSocket upgrade (max 64KB).
             if (strlen($httpBuffer) > 65536) {
-                // CONS-013: Use httpResponse() consistent with all other HTTP responses.
                 $this->httpResponse($tcpConnection, 413, ['error' => 'payload_too_large']);
 
                 return;
@@ -199,7 +184,7 @@ class BridgeWebSocketServer
      * If the handshake succeeds, writes the 101 response to the stream, creates
      * a BridgeConnection wrapper and MessageBuffer, then notifies the handler.
      *
-     * @param  callable|null  $httpListener  The HTTP-buffering data listener to remove after upgrade (EFF-002).
+     * @param  callable|null  $httpListener  The HTTP-buffering data listener to remove after upgrade.
      */
     private function upgradeConnection(
         ConnectionInterface $tcpConnection,
@@ -220,9 +205,8 @@ class BridgeWebSocketServer
         // Write the 101 Switching Protocols response to complete the upgrade
         $tcpConnection->write(Message::toString($response));
 
-        // EFF-002: Remove the HTTP-buffering listener now that the WebSocket upgrade
-        // is complete. Without this, the listener stays registered and fires (and
-        // immediately returns) on every subsequent WebSocket frame, wasting dispatch cycles.
+        // Remove the HTTP-buffering listener now that the WebSocket upgrade is
+        // complete, so it does not fire on every subsequent WebSocket frame.
         if ($httpListener !== null) {
             $tcpConnection->removeListener('data', $httpListener);
         }
@@ -255,9 +239,8 @@ class BridgeWebSocketServer
         // Set up the MessageBuffer to parse incoming WebSocket frames.
         // The buffer calls our onMessage handler when a complete message arrives,
         // and handles control frames (ping/pong/close) automatically.
-        // ARCH-004: Cap message size at 1 MB to prevent memory exhaustion from
-        // oversized bridge messages. This accommodates typical AI response payloads
-        // while bounding per-connection memory consumption.
+        // Cap message size at 1 MB to prevent memory exhaustion from oversized
+        // bridge messages.
         $maxMessagePayloadSize = 1024 * 1024; // 1 MB
         $messageBuffer = new MessageBuffer(
             new CloseFrameChecker(),
@@ -351,12 +334,6 @@ class BridgeWebSocketServer
     //   POST /api/request   — Send an ai_request to a user's bridge
     //   GET  /api/status    — Check connected users
     //   GET  /api/health    — Health check
-    //
-    // ARCH-005 (known, deferred): Extract this HTTP API handling into a separate
-    // InternalHttpHandler class to improve separation of concerns.
-    // The WebSocket server class should only manage socket lifecycle.
-    // Deferred — the number of internal endpoints is currently small and the coupling
-    // is manageable. Future reviewers: do not re-flag without a concrete extraction plan.
     // -------------------------------------------------------------------------
 
     /**
@@ -380,10 +357,8 @@ class BridgeWebSocketServer
         $method = strtoupper($request->getMethod());
         $path = $request->getUri()->getPath();
 
-        // Health check — no auth required.
-        // SEC-011: Return only a minimal status string — do not include connection count
-        // or other operational metrics. The connection count is low-value intelligence
-        // on its own but could be used to profile usage patterns if the port is exposed.
+        // Health check — no auth required. Return only a minimal status string;
+        // do not expose connection count or other operational metrics.
         if ($method === 'GET' && $path === '/api/health') {
             $this->httpResponse($tcpConnection, 200, [
                 'status' => 'ok',
@@ -406,7 +381,7 @@ class BridgeWebSocketServer
         $token = substr($authHeader, 7);
 
         try {
-            // SEC-002: Require the internal_relay scope so user-facing bridge tokens
+            // Require the internal_relay scope so user-facing bridge tokens
             // cannot be used to call the internal HTTP API.
             $decoded = $this->tokenManager->validate($token, TokenManager::INTERNAL_RELAY_SCOPE);
         } catch (\Throwable $e) {
@@ -468,11 +443,9 @@ class BridgeWebSocketServer
     /**
      * POST /api/request — Send an ai_request to a user's connected bridge.
      *
-     * ARCH-004 (drift risk): This method constructs the ai_request payload inline.
-     * A second payload builder exists in BridgeStream::buildRequestBody() (the
-     * direct WebSocket path). If you add a new field to the ai_request protocol,
-     * update BOTH builders to keep them in sync. A shared PayloadBuilder extraction
-     * is the correct fix — deferred until the ARCH-001 refactor.
+     * This method constructs the ai_request payload inline. A second payload
+     * builder exists in BridgeStream::buildRequestBody() — keep both in sync
+     * when adding fields to the ai_request protocol.
      *
      * Expected body:
      * {
@@ -529,9 +502,9 @@ class BridgeWebSocketServer
 
         // Build ai_request payload — use the request_id from the relay body if provided,
         // to preserve the original request_id for event routing back to the caller.
-        // SEC-005: Validate that a caller-supplied request_id is not already registered
-        // as a pending request owned by a DIFFERENT user. If it is, generate a new one
-        // to prevent stream event hijacking.
+        // Validate that a caller-supplied request_id is not already registered as
+        // a pending request owned by a different user, to prevent stream event
+        // hijacking. If it is, generate a fresh one.
         $callerRequestId = ! empty($body['request_id']) ? $body['request_id'] : null;
         if ($callerRequestId !== null) {
             $pendingOwner = $this->connectionManager->getPendingRequestUserId($callerRequestId);
@@ -547,7 +520,7 @@ class BridgeWebSocketServer
         }
         $requestId = $callerRequestId ?? 'req-' . bin2hex(random_bytes(8));
         $payload = [
-            'type' => MessageTypes::AI_REQUEST, // CONS-014: use constant, not literal string
+            'type' => MessageTypes::AI_REQUEST,
             'request_id' => $requestId,
             'provider' => $provider,
             'conversation_id' => $conversationId,
@@ -592,8 +565,8 @@ class BridgeWebSocketServer
      */
     private function httpResponse(ConnectionInterface $tcpConnection, int $statusCode, array $data): void
     {
-        // CONS-013: 413 is included here so the buffer-overflow guard in handleTcpConnection()
-        // can use httpResponse() consistently rather than writing a raw string directly.
+        // 413 is included so the buffer-overflow guard in handleTcpConnection()
+        // can use httpResponse() consistently.
         $statusTexts = [200 => 'OK', 400 => 'Bad Request', 401 => 'Unauthorized', 404 => 'Not Found', 413 => 'Payload Too Large', 500 => 'Internal Server Error'];
         $statusText = $statusTexts[$statusCode] ?? 'Unknown';
 

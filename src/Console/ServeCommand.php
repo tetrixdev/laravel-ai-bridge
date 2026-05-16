@@ -34,8 +34,8 @@ class ServeCommand extends Command
         MessageHandler $messageHandler,
         TokenManager $tokenManager,
     ): int {
-        // ARCH-013: Use the config default (127.0.0.1) consistently. 0.0.0.0 is an
-        // opt-in for Docker/multi-host deployments via AI_BRIDGE_SERVER_HOST in .env.
+        // Defaults to 127.0.0.1; 0.0.0.0 is opt-in for Docker/multi-host
+        // deployments via AI_BRIDGE_SERVER_HOST.
         $host = $this->option('host') ?? config('ai-bridge.server.host', '127.0.0.1');
         $port = (int) ($this->option('port') ?? config('ai-bridge.server.port', 8085));
 
@@ -88,9 +88,8 @@ class ServeCommand extends Command
         $this->line("  URL:     <fg=green>ws://{$host}:{$port}</>");
         $this->newLine();
 
-        // UX-005: Warn when the server is bound to a non-loopback address — browsers
-        // block ws:// (mixed-content) on HTTPS pages. Operators should set
-        // AI_BRIDGE_PUBLIC_URL=wss://... for production TLS deployments.
+        // Warn when bound to a non-loopback address — browsers block plaintext
+        // ws:// on HTTPS pages (mixed-content policy).
         $isPublicBind = ! in_array($host, ['127.0.0.1', 'localhost', '::1'], true);
         if ($isPublicBind && empty(config('ai-bridge.server.public_url'))) {
             $this->line('  <fg=yellow;options=bold>⚠  TLS warning:</> Binding to a public interface with ws:// (plaintext).');
@@ -99,9 +98,8 @@ class ServeCommand extends Command
             $this->newLine();
         }
 
-        // UX-005: Prefer the configured public URL when set, so operators with TLS
-        // configured are shown the correct wss:// connection command rather than the
-        // plaintext ws:// bind address.
+        // Prefer the configured public URL so operators with TLS see the correct
+        // wss:// connection command.
         $publicUrl = config('ai-bridge.server.public_url');
         $displayUrl = ! empty($publicUrl) ? $publicUrl : "ws://{$host}:{$port}";
 

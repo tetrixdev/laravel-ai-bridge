@@ -47,27 +47,24 @@ class BridgeController extends Controller
             ], 401);
         }
 
-        // SEC-008: Do not include PII (name) in the JWT — it ends up in logs.
+        // Do not include PII (name) in the JWT — it ends up in logs.
         $token = $this->tokenManager->generate($user->getAuthIdentifier());
 
         $host = config('ai-bridge.server.host', '127.0.0.1');
         $port = (int) config('ai-bridge.server.port', 8085);
 
-        // BL-011: Normalize 0.0.0.0 (listen-all bind address) to 127.0.0.1 in the
-        // returned WebSocket URL. Browsers cannot connect to 0.0.0.0 — it is a
-        // bind-all address, not a routable destination.
+        // Normalize the 0.0.0.0 bind-all address to 127.0.0.1 — browsers cannot
+        // connect to 0.0.0.0.
         if ($host === '0.0.0.0') {
             $host = '127.0.0.1';
         }
 
-        // SEC-010: Allow operators to override the public WebSocket URL for TLS deployments.
-        // The 'server.public_url' config reflects the externally-visible URL (e.g. wss://...)
-        // rather than the internal bind address. When not set, ws:// is used — this reflects
-        // the internal bind address and may need to be overridden for production TLS proxies.
+        // Operators can override the public WebSocket URL for TLS deployments
+        // (e.g. wss://...); otherwise the internal ws:// bind address is used.
         $configuredPublicUrl = config('ai-bridge.server.public_url');
 
-        // UX-005: Warn when returning a ws:// (plaintext) URL for a non-loopback host.
-        // Browsers block ws:// connections on HTTPS pages (mixed-content policy).
+        // Warn when returning a plaintext ws:// URL for a non-loopback host —
+        // browsers block ws:// connections on HTTPS pages (mixed-content policy).
         if (empty($configuredPublicUrl) && ! in_array($host, ['127.0.0.1', 'localhost', '::1'], true)) {
             Log::warning('AI Bridge: token endpoint returning a plaintext ws:// WebSocket URL for a non-loopback host. Set AI_BRIDGE_PUBLIC_URL=wss://... for production TLS deployments to avoid browser mixed-content failures.', [
                 'host' => $host,
@@ -121,16 +118,9 @@ class BridgeController extends Controller
             ], 500);
         }
 
-        // ARCH-006/UX-006/BL-010 (known limitation): Under PHP-FPM this always returns
-        // bridge_connected=false because BridgeConnectionManager holds in-memory state that
-        // is empty in every PHP-FPM worker — the WebSocket server runs in a separate process.
-        // For accurate status in PHP-FPM deployments, relay this check to the bridge server's
-        // GET /api/status endpoint (the same HTTP relay used in BridgeStream). Deferred — the
-        // status endpoint is a convenience, not a safety guard; a "note" field in the response
-        // would be the minimal fix if callers need to detect the PHP-FPM case.
-
-        // EFF-004: Use getConnection() for a single lookup — its null return already
-        // serves as the boolean check, making hasConnection() redundant here.
+        // Known limitation: under PHP-FPM this always returns bridge_connected=false
+        // because BridgeConnectionManager's in-memory state is empty in each worker —
+        // the WebSocket server runs in a separate process.
         $connectionData = $this->connectionManager->getConnection($userId);
         $connected = $connectionData !== null;
 

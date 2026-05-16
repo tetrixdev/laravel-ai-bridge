@@ -445,10 +445,9 @@ class StreamHandler
     /**
      * Dispatch a set of callbacks with the given arguments.
      *
-     * Centralizes the try/catch/Log::error pattern that was previously duplicated
-     * across all eight public dispatch methods (EFF-004). Each callback is invoked
-     * with the given $args, and any Throwable is caught and logged with the
-     * callback type name for easy identification.
+     * Centralizes the try/catch/Log::error pattern across all dispatch methods.
+     * Each callback is invoked with the given $args; any Throwable is caught and
+     * logged with the callback type name.
      *
      * @param  Closure[]  $callbacks  The array of callbacks to invoke.
      * @param  array<mixed>  $args    Arguments to pass to each callback.
@@ -471,8 +470,8 @@ class StreamHandler
     /**
      * Dispatch the StreamCompleted Laravel event for logging/analytics.
      *
-     * BL-012: The $terminatedBy parameter (TerminatedBy::Success/Error/Cancelled) lets
-     * event listeners distinguish cancellations from errors without fragile string parsing.
+     * The $terminatedBy parameter lets event listeners distinguish cancellations
+     * from errors without fragile string parsing.
      */
     private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null, TerminatedBy $terminatedBy = TerminatedBy::Success): void
     {

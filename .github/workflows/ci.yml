@@ -5,9 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # EFF-009: Release trigger intentionally runs the same test/lint jobs — no release-specific
-  # automation (e.g. Packagist webhook) is implemented yet. This trigger ensures tests pass
-  # before tagging. Add a dedicated 'release' job here when Packagist automation is added.
+  # Release trigger runs the same test/lint jobs so tests pass before tagging.
   release:
     types: [published]
 

@@ -19,19 +19,12 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
  * Laravel service provider for the AI Bridge package.
  *
  * Registers config, routes, and binds all core services as singletons.
- *
- * ARCH-003 (known, deferred): react/socket and ratchet/rfc6455 are unconditional
- * hard dependencies even for BYOK/managed deployments that never run the bridge server.
- * Making them optional would require class_exists guards in BridgeWebSocketServer and
- * ServeCommand, plus a more complex installation story for consumers. Deferred until
- * there is a concrete need (e.g. a significant footprint reduction request). Future
- * reviewers: do not re-flag this without a concrete, low-risk implementation plan.
  */
 class AiBridgeServiceProvider extends ServiceProvider
 {
     /**
-     * BL-016: Tracks whether the empty-route_middleware warning has already been
-     * logged in this process, so it fires at most once instead of per request.
+     * Tracks whether the empty-route_middleware warning has already been logged
+     * in this process, so it fires at most once instead of per request.
      */
     private static bool $emptyMiddlewareWarningLogged = false;
 
@@ -55,9 +48,8 @@ class AiBridgeServiceProvider extends ServiceProvider
             return new TokenManager();
         });
 
-        // NOTE (ARCH-003): Registered as singleton but in-memory state only persists in
-        // long-running processes (bridge server, Octane). Under PHP-FPM the singleton is
-        // per-request, so connections are always empty. See BridgeConnectionManager docblock.
+        // Registered as a singleton, but in-memory state only persists in
+        // long-running processes — see the BridgeConnectionManager docblock.
         $this->app->singleton(BridgeConnectionManager::class, function () {
             return new BridgeConnectionManager();
         });
@@ -97,9 +89,8 @@ class AiBridgeServiceProvider extends ServiceProvider
         // Register named middleware for bridge token validation
         $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
 
-        // SEC-010: Warn when route_middleware is empty — routes will be unprotected.
-        // BL-016: Fire at most once per process. boot() runs on every request under
-        // PHP-FPM, so without this guard an empty middleware list would flood logs.
+        // Warn when route_middleware is empty — routes will be unprotected.
+        // Fire at most once per process to avoid flooding logs under PHP-FPM.
         if (! self::$emptyMiddlewareWarningLogged) {
             $routeMiddleware = config('ai-bridge.route_middleware', ['auth']);
             if (empty($routeMiddleware)) {
@@ -109,11 +100,6 @@ class AiBridgeServiceProvider extends ServiceProvider
         }
 
         // Register routes.
-        // ARCH-014 (known, deferred): /token and /status are bridge-mode-specific and
-        // could be conditionally registered only when mode='bridge'. However, conditional
-        // route registration based on config values that can change post-cache is fragile,
-        // and both endpoints are protected by auth + rate-limiting so the security risk is
-        // negligible. Future reviewers: do not re-flag without a concrete, cache-safe plan.
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
 
         // Register artisan commands

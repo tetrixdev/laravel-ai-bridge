@@ -10,11 +10,9 @@ namespace Tetrix\AiBridge\Protocol;
  * These constants define the message types exchanged between the server
  * (this package) and CLI bridge clients over WebSocket.
  *
- * NOTE (CONS-006): This is intentionally a constants class rather than a
- * backed enum (unlike BlockType / ProviderMode) because the all() / bridgeOrigin() /
- * serverOrigin() grouping methods require runtime-composable arrays that backed
- * enums cannot express without extra boilerplate. The static cache below removes
- * the repeated array-construction cost that was flagged in EFF-006.
+ * This is intentionally a constants class rather than a backed enum because the
+ * all() / bridgeOrigin() / serverOrigin() grouping methods require
+ * runtime-composable arrays that backed enums cannot express cleanly.
  */
 final class MessageTypes
 {
@@ -50,13 +48,9 @@ final class MessageTypes
     /**
      * Sent by server to replay conversation history after a lost session.
      *
-     * TODO (ARCH-017): session_reset is defined in PROTOCOL.md and listed here,
-     * but the server-side implementation is NOT yet complete. No code in
-     * MessageHandler sends this message, and no reconnection scenario triggers it.
-     * Reconnected bridges currently start fresh rather than replaying history.
-     * Implement by: storing recent conversation history per userId in
-     * BridgeConnectionManager and dispatching this message in handleHello() when
-     * a reconnecting bridge is detected (userId already has a previous session).
+     * TODO: server-side implementation is not yet complete — no code sends this
+     * message, and reconnected bridges currently start fresh rather than
+     * replaying history.
      */
     public const SESSION_RESET = 'session_reset';
 
@@ -123,8 +117,8 @@ final class MessageTypes
     /**
      * All valid message types as an array, useful for validation.
      *
-     * EFF-006: Result is cached in a static property after the first call so the
-     * 20-element array is not reconstructed on every incoming WebSocket message.
+     * Result is cached in a static property so the array is not reconstructed
+     * on every incoming WebSocket message.
      *
      * @return string[]
      */

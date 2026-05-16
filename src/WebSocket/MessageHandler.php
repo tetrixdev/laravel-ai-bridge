@@ -83,12 +83,9 @@ class MessageHandler
     /**
      * Handle a 'session_reset' message from the bridge.
      *
-     * BL-007: session_reset is defined in PROTOCOL.md and accepted as a valid
-     * message type, but server-side history replay is not yet implemented
-     * (see ARCH-017 TODO on MessageTypes::SESSION_RESET). Rather than silently
-     * discarding the message, return a clear 'not_implemented' error response so
-     * bridge clients implementing the reconnection flow receive actionable
-     * feedback instead of appearing to hang.
+     * session_reset is a valid protocol message type, but server-side history
+     * replay is not yet implemented. Return a clear 'not_implemented' error
+     * rather than silently discarding the message so clients do not hang.
      *
      * @param  array<string, mixed>  $message
      * @return array<string, mixed>
@@ -124,9 +121,8 @@ class MessageHandler
     {
         $protocolVersion = $message['version'] ?? $message['protocol_version'] ?? 'unknown';
 
-        // ARCH-005: Validate protocol version compatibility.
-        // Extract the major version and reject connections with an incompatible major version.
-        // Minor version differences are allowed (additive changes are backward-compatible).
+        // Validate protocol version compatibility — reject incompatible major
+        // versions. Minor version differences are allowed (additive changes).
         $supportedMajorVersion = 0; // Current protocol is v0.1
         if ($protocolVersion !== 'unknown') {
             $versionParts = explode('.', ltrim($protocolVersion, 'v'));
@@ -315,10 +311,8 @@ class MessageHandler
             return null;
         }
 
-        // SEC-004/SEC-009: Verify the connection sending this event owns the pending request.
-        // Fail CLOSED: reject the event if the sender is unregistered (userId=null) or
-        // if the sender does not own the pending request. This prevents unregistered or
-        // partially-authenticated connections from injecting events into any request.
+        // Verify the sender owns the pending request. Fails closed: reject the
+        // event if the sender is unregistered or does not own the request.
         if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
             $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
             $requestUserId = $this->connectionManager->getPendingRequestUserId($requestId);
@@ -343,9 +337,8 @@ class MessageHandler
      * The bridge is relaying the AI's request to execute a tool.
      * We execute it locally and send back a tool_resolve message.
      *
-     * BL-001/ARCH-009: Apply the same ownership check as top-level tool_call messages
-     * to prevent a bridge client from executing tools on behalf of another user's request
-     * by sending a stream-envelope tool_call targeting a request_id it does not own.
+     * Applies the same ownership check as top-level tool_call messages so a
+     * bridge client cannot execute tools against a request it does not own.
      */
     private function handleToolCallFromStream(string $connectionId, array $message): ?array
     {
@@ -382,8 +375,8 @@ class MessageHandler
     {
         $requestId = $message['request_id'] ?? '';
 
-        // SEC-003: Apply the same ownership check as handleStreamEnvelope() to prevent
-        // a bridge client from executing tools registered for another user's request.
+        // Apply the same ownership check as handleStreamEnvelope() so a bridge
+        // client cannot execute tools registered for another user's request.
         if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
             Log::warning('AI Bridge: tool_call from wrong user (top-level), discarding', [
                 'connection_id' => $connectionId,
@@ -426,8 +419,8 @@ class MessageHandler
             ];
         }
 
-        // BL-003: Validate tool_name before dispatching to callbacks so consuming-app
-        // callbacks are never invoked with an empty tool name.
+        // Validate tool_name before dispatching so consuming-app callbacks are
+        // never invoked with an empty tool name.
         if (empty($toolName)) {
             Log::warning('AI Bridge: tool call received with empty tool_name', [
                 'request_id' => $requestId,
@@ -441,12 +434,10 @@ class MessageHandler
             ];
         }
 
-        // BL-004 (known limitation): Tool execution is synchronous and runs on the ReactPHP
-        // event loop thread. A slow tool (network I/O, database) blocks ALL WebSocket events
-        // for all connected users until it completes. Tool handlers registered with
-        // AiBridge::registerTool() MUST be non-blocking when the bridge server runs under
-        // ReactPHP. For async tool execution, use ReactPHP's event loop primitives or
-        // offload to a queue. This is a known architectural constraint — deferred.
+        // Tool execution is synchronous and runs on the ReactPHP event loop
+        // thread — a slow tool blocks all WebSocket events for every connected
+        // user. Tool handlers registered via AiBridge::registerTool() must be
+        // non-blocking when the bridge server runs under ReactPHP.
 
         // Dispatch to the StreamHandler's tool call callbacks
         $handler->dispatchToolCall($toolName, $params, $callId);
@@ -478,7 +469,7 @@ class MessageHandler
                     'result' => $result,
                 ];
             } catch (\Throwable $e) {
-                // SEC-007: Return generic message to client, log full exception server-side
+                // Return a generic message to the client, log the full exception server-side.
                 Log::error('AI Bridge: tool execution failed', [
                     'tool' => $toolName,
                     'error' => $e->getMessage(),
@@ -524,8 +515,8 @@ class MessageHandler
             return null;
         }
 
-        // BL-007/SEC-004: Apply ownership check to done events so a bridge cannot
-        // terminate another user's request by sending a spoofed done envelope.
+        // Apply ownership check so a bridge cannot terminate another user's
+        // request by sending a spoofed done envelope.
         if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
             Log::warning('AI Bridge: done event from wrong or unregistered user, discarding', [
                 'connection_id' => $connectionId,
@@ -564,8 +555,8 @@ class MessageHandler
             return null;
         }
 
-        // BL-007/SEC-004: Apply ownership check to error events so a bridge cannot
-        // terminate another user's request by sending a spoofed error envelope.
+        // Apply ownership check so a bridge cannot terminate another user's
+        // request by sending a spoofed error envelope.
         if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
             Log::warning('AI Bridge: error event from wrong or unregistered user, discarding', [
                 'connection_id' => $connectionId,
@@ -584,9 +575,8 @@ class MessageHandler
     /**
      * Handle an 'error' message from the bridge (top-level, non-streaming).
      *
-     * SEC-001: Apply the same ownership check as all other terminal handlers
-     * (done, error-from-stream, cancelled) so an authenticated bridge client
-     * cannot abort another user's in-progress request by guessing its request ID.
+     * Applies the same ownership check as the other terminal handlers so an
+     * authenticated bridge client cannot abort another user's request.
      */
     private function handleError(string $connectionId, array $message): ?array
     {
@@ -595,9 +585,7 @@ class MessageHandler
         $rawMessage = $message['data']['message'] ?? $message['message'] ?? 'Unknown error';
         $errorMessage = mb_substr(strip_tags($rawMessage), 0, 500);
 
-        // SEC-001: Verify the sender owns this request before dispatching the error.
-        // Mirrors the check in handleErrorFromStream(), handleDoneFromStream(),
-        // and handleCancelled().
+        // Verify the sender owns this request before dispatching the error.
         if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
             Log::warning('AI Bridge: error message from wrong or unregistered user, discarding', [
                 'connection_id' => $connectionId,
@@ -629,8 +617,8 @@ class MessageHandler
      * Dispatches a cancelled event to the StreamHandler so consumers (SSE, Reverb)
      * receive a terminal event and don't hang waiting for done.
      *
-     * SEC-001/CONS-002: Apply the same ownership check as all other terminal handlers
-     * (done, error) to prevent a bridge client from cancelling another user's request.
+     * Applies the same ownership check as the other terminal handlers so a
+     * bridge client cannot cancel another user's request.
      */
     private function handleCancelled(string $connectionId, array $message): ?array
     {
@@ -686,9 +674,4 @@ class MessageHandler
             && $requestUserId !== null
             && $senderUserId === $requestUserId;
     }
-
-    // EFF-001: buildPongMessage() was a deprecated public method with no callers.
-    // It has been removed. Use handlePing() instead — it constructs and returns
-    // the pong message directly. If you need a pong payload in a custom integration,
-    // construct it inline: ['type' => MessageTypes::PONG, 'timestamp' => time()]
 }
