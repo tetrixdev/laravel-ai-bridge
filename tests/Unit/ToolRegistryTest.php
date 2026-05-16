@@ -23,7 +23,7 @@ test('register() registers a tool with closure handler', function () {
     $this->registry->register(
         'roll_dice',
         'Roll a dice',
-        ['type' => 'object', 'properties' => ['sides' => ['type' => 'integer']]],
+        ['type' => 'object', 'properties' => ['sides' => ['type' => 'integer', 'description' => 'Number of sides']]],
         fn (array $params) => ['result' => random_int(1, $params['sides'] ?? 6)]
     );
 
@@ -35,7 +35,7 @@ test('registerHandler() registers a ToolHandler instance', function () {
     $handler = new class implements ToolHandler {
         public function name(): string { return 'get_weather'; }
         public function description(): string { return 'Get weather info'; }
-        public function parameters(): array { return ['type' => 'object', 'properties' => ['city' => ['type' => 'string']]]; }
+        public function parameters(): array { return ['type' => 'object', 'properties' => ['city' => ['type' => 'string', 'description' => 'City name']]]; }
         public function handle(array $params): mixed { return ['temp' => 72, 'city' => $params['city']]; }
     };
 
@@ -123,7 +123,7 @@ test('toFunctionSchemas() returns OpenAI-compatible format', function () {
     $this->registry->register(
         'search',
         'Search the web',
-        ['type' => 'object', 'properties' => ['query' => ['type' => 'string']]],
+        ['type' => 'object', 'properties' => ['query' => ['type' => 'string', 'description' => 'Search query']]],
         fn ($p) => []
     );
 
@@ -135,7 +135,7 @@ test('toFunctionSchemas() returns OpenAI-compatible format', function () {
         'function' => [
             'name' => 'search',
             'description' => 'Search the web',
-            'parameters' => ['type' => 'object', 'properties' => ['query' => ['type' => 'string']]],
+            'parameters' => ['type' => 'object', 'properties' => ['query' => ['type' => 'string', 'description' => 'Search query']]],
         ],
     ]);
 });
@@ -144,7 +144,7 @@ test('toArray() returns WebSocket format', function () {
     $this->registry->register(
         'search',
         'Search the web',
-        ['type' => 'object', 'properties' => ['query' => ['type' => 'string']]],
+        ['type' => 'object', 'properties' => ['query' => ['type' => 'string', 'description' => 'Search query']]],
         fn ($p) => []
     );
 
@@ -154,7 +154,7 @@ test('toArray() returns WebSocket format', function () {
     expect($array[0])->toBe([
         'name' => 'search',
         'description' => 'Search the web',
-        'parameters' => ['type' => 'object', 'properties' => ['query' => ['type' => 'string']]],
+        'parameters' => ['type' => 'object', 'properties' => ['query' => ['type' => 'string', 'description' => 'Search query']]],
     ]);
 });
 

@@ -558,7 +558,16 @@ function chat() {
 
 Register tools that the AI can call during a conversation. Tools work across all three modes.
 
+> **Every parameter must be described.** A tool registered with a parameter
+> that has no (or an empty) `description` is rejected with an
+> `InvalidArgumentException` at registration time. This applies to every
+> registration path below. Tool names must start with a letter and contain only
+> letters, digits, underscores, or hyphens (max 64 characters).
+
 ### Register with a Closure
+
+The `parameters` argument is a raw JSON Schema object. Each entry under
+`properties` must include a non-empty `description`.
 
 ```php
 // In a service provider's boot() method
@@ -568,8 +577,8 @@ AiBridge::registerTool(
     parameters: [
         'type' => 'object',
         'properties' => [
-            'sides' => ['type' => 'integer', 'description' => 'Number of sides'],
-            'count' => ['type' => 'integer', 'description' => 'Number of dice'],
+            'sides' => ['type' => 'integer', 'description' => 'Number of sides on each die'],
+            'count' => ['type' => 'integer', 'description' => 'Number of dice to roll'],
         ],
         'required' => ['sides'],
     ],
@@ -585,7 +594,68 @@ AiBridge::registerTool(
 );
 ```
 
-### Register with a ToolHandler Class
+A tool that takes no parameters passes an empty array (`parameters: []`).
+
+### Register with the Structured `AbstractTool` API (recommended)
+
+Extending `AbstractTool` is the recommended way to define a tool. Instead of
+hand-writing a JSON Schema, you declare each parameter as a `ToolParameter`.
+Because `ToolParameter` requires a non-empty description, it is impossible to
+define a tool with an undescribed parameter -- the schema is generated for you.
+
+```php
+use Tetrix\AiBridge\Tools\AbstractTool;
+use Tetrix\AiBridge\Tools\ToolParameter;
+
+class LookupCharacterTool extends AbstractTool
+{
+    public function name(): string
+    {
+        return 'lookup_character';
+    }
+
+    public function description(): string
+    {
+        return 'Look up a character in the database';
+    }
+
+    protected function defineParameters(): array
+    {
+        return [
+            new ToolParameter(
+                name: 'name',
+                type: 'string',
+                description: 'The full name of the character to look up',
+            ),
+            new ToolParameter(
+                name: 'realm',
+                type: 'string',
+                description: 'Which realm to search in',
+                required: false,
+                enum: ['mortal', 'fae', 'celestial'],
+            ),
+        ];
+    }
+
+    public function handle(array $params): mixed
+    {
+        return Character::where('name', $params['name'])->first()?->toArray();
+    }
+}
+
+// Register it
+AiBridge::registerToolHandler(new LookupCharacterTool());
+```
+
+`ToolParameter` accepts the JSON Schema types `string`, `integer`, `number`,
+`boolean`, `array`, and `object`. `defineParameters()` returns a list of them,
+and `AbstractTool` turns that list into the JSON Schema the API expects via the
+`final` `parameters()` method.
+
+### Register with a `ToolHandler` Class
+
+You can also implement the `ToolHandler` interface directly and build the JSON
+Schema yourself. Every property must still include a non-empty `description`.
 
 ```php
 use Tetrix\AiBridge\Contracts\ToolHandler;
@@ -598,7 +668,7 @@ class LookupCharacterTool implements ToolHandler
         return [
             'type' => 'object',
             'properties' => [
-                'name' => ['type' => 'string'],
+                'name' => ['type' => 'string', 'description' => 'The full name of the character'],
             ],
             'required' => ['name'],
         ];

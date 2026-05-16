@@ -10,6 +10,15 @@ namespace Tetrix\AiBridge\Contracts;
  * Implement this interface to define a tool the AI can call. Tools
  * registered via the ToolRegistry can use either a closure or a class
  * implementing this interface.
+ *
+ * The recommended base class is {@see \Tetrix\AiBridge\Tools\AbstractTool}: it
+ * implements parameters() for you from a list of
+ * {@see \Tetrix\AiBridge\Tools\ToolParameter} objects and guarantees every
+ * parameter is fully described.
+ *
+ * When implementing parameters() directly, every property returned MUST include
+ * a non-empty "description" string. ToolDefinition rejects parameter schemas
+ * with description-less properties at registration time.
  */
 interface ToolHandler
 {
@@ -25,6 +34,10 @@ interface ToolHandler
 
     /**
      * Get the JSON Schema describing the tool's parameters.
+     *
+     * Every property in the returned schema MUST include a non-empty
+     * "description" string. An empty array is allowed for a tool that takes no
+     * parameters.
      *
      * @return array<string, mixed>
      */
