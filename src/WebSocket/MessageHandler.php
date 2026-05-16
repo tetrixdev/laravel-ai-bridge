@@ -417,11 +417,15 @@ class MessageHandler
             return null;
         }
 
+        // The bridge client sends a top-level tool_call with `tool_call_id`,
+        // `tool_name` and `arguments` (see ai-bridge bridge.ts). Older/envelope
+        // field names (`data.*`, `call_id`, `parameters`) are accepted as
+        // fallbacks for compatibility.
         return $this->executeToolCall(
             $requestId,
-            $message['data']['tool_name'] ?? $message['tool_name'] ?? '',
-            $message['data']['parameters'] ?? $message['parameters'] ?? [],
-            $message['data']['tool_call_id'] ?? $message['data']['call_id'] ?? $message['call_id'] ?? '',
+            $message['tool_name'] ?? $message['data']['tool_name'] ?? '',
+            $message['arguments'] ?? $message['parameters'] ?? $message['data']['parameters'] ?? $message['data']['arguments'] ?? [],
+            $message['tool_call_id'] ?? $message['call_id'] ?? $message['data']['tool_call_id'] ?? $message['data']['call_id'] ?? '',
         );
     }
 
