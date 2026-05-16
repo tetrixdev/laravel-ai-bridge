@@ -34,7 +34,7 @@ class TokenManager
     /**
      * Generate a JWT connection token for the given user.
      *
-     * NOTE: $claims cannot override reserved keys (sub, iat, exp, jti, iss).
+     * NOTE: $claims cannot override reserved keys (sub, iat, exp, jti, iss, aud).
      * These are always set by the token manager to ensure security invariants.
      * An InvalidArgumentException is thrown if reserved keys are passed.
      *
@@ -49,7 +49,7 @@ class TokenManager
     {
         $this->ensureSecretConfigured();
 
-        $reservedKeys = ['sub', 'iat', 'exp', 'jti', 'iss'];
+        $reservedKeys = ['sub', 'iat', 'exp', 'jti', 'iss', 'aud'];
         $conflicts = array_intersect($reservedKeys, array_keys($claims));
         if (! empty($conflicts)) {
             throw new InvalidArgumentException(
@@ -77,6 +77,10 @@ class TokenManager
             'exp' => $now + $resolvedTtl,
             'jti' => Str::uuid()->toString(),
             'iss' => 'ai-bridge',
+            // SEC-008: Bind the token to this application instance via an audience
+            // claim. Without it, a token issued by one deployment would be accepted
+            // by another deployment that happens to share the same secret.
+            'aud' => $this->getAudience(),
         ]);
 
         return JWT::encode($payload, $this->getSecret(), 'HS256');
@@ -123,6 +127,14 @@ class TokenManager
 
         if (! isset($decoded->iss) || $decoded->iss !== 'ai-bridge') {
             throw new TokenValidationException('Token has an invalid issuer.', 'token_invalid_issuer');
+        }
+
+        // SEC-008: Enforce the audience claim so a token issued by one application
+        // instance cannot authenticate against another instance that shares the same
+        // secret. The expected audience defaults to config('app.url').
+        $expectedAudience = $this->getAudience();
+        if (! isset($decoded->aud) || $decoded->aud !== $expectedAudience) {
+            throw new TokenValidationException('Token has an invalid audience.', 'token_invalid_audience');
         }
 
         // SEC-002: Enforce scope when requested.
@@ -212,6 +224,18 @@ class TokenManager
     private function getSecret(): string
     {
         return config('ai-bridge.token.secret', '');
+    }
+
+    /**
+     * Get the audience that identifies this application instance.
+     *
+     * SEC-008: Defaults to config('app.url') so tokens are scoped to a single
+     * deployment. Can be overridden via ai-bridge.token.audience for setups
+     * where app.url is not a stable identifier.
+     */
+    private function getAudience(): string
+    {
+        return (string) (config('ai-bridge.token.audience') ?: config('app.url', 'ai-bridge'));
     }
 
     /**

@@ -11,6 +11,7 @@ use Illuminate\Support\Str;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\BlockType;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Enums\TerminatedBy;
 use Tetrix\AiBridge\Events\StreamCompleted;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
@@ -304,7 +305,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->doneCallbacks, [$usage], 'done');
 
-        $this->dispatchStreamCompleted(true, $usage, null, 'success');
+        $this->dispatchStreamCompleted(true, $usage, null, TerminatedBy::Success);
 
         $this->provider->markCompleted();
     }
@@ -325,7 +326,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->errorCallbacks, [$code, $message], 'error');
 
-        $this->dispatchStreamCompleted(false, null, "{$code}: {$message}", 'error');
+        $this->dispatchStreamCompleted(false, null, "{$code}: {$message}", TerminatedBy::Error);
 
         $this->provider->markCompleted();
     }
@@ -366,7 +367,7 @@ class StreamHandler
 
         $this->dispatchCallbacks($this->cancelledCallbacks, [$reason], 'cancelled');
 
-        $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}", 'cancelled');
+        $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}", TerminatedBy::Cancelled);
 
         $this->provider->markCompleted();
     }
@@ -470,10 +471,10 @@ class StreamHandler
     /**
      * Dispatch the StreamCompleted Laravel event for logging/analytics.
      *
-     * BL-012: The $terminatedBy parameter ('success', 'error', 'cancelled') lets
+     * BL-012: The $terminatedBy parameter (TerminatedBy::Success/Error/Cancelled) lets
      * event listeners distinguish cancellations from errors without fragile string parsing.
      */
-    private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null, string $terminatedBy = 'success'): void
+    private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null, TerminatedBy $terminatedBy = TerminatedBy::Success): void
     {
         $durationMs = $this->startedAt > 0
             ? (int) ((microtime(true) - $this->startedAt) * 1000)

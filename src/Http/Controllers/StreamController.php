@@ -146,18 +146,23 @@ class StreamController extends Controller
                 $options['system_prompt'] = $systemPrompt;
             }
 
+            // BL-013: Validate against the configured model allowlist when non-empty.
+            // An empty allowlist means any model is permitted.
+            $allowedModels = config('ai-bridge.chat_completions.allowed_models', []);
+
             if ($request->has('model')) {
-                $requestedModel = $request->input('model');
-                // BL-013: Validate against the configured model allowlist when non-empty.
-                // An empty allowlist means any model is permitted.
-                $allowedModels = config('ai-bridge.chat_completions.allowed_models', []);
-                if (! empty($allowedModels) && ! in_array($requestedModel, (array) $allowedModels, true)) {
-                    return response()->json([
-                        'error' => 'validation_error',
-                        'message' => 'The requested model is not permitted. Allowed models: '.implode(', ', (array) $allowedModels).'.',
-                    ], 422);
-                }
-                $options['model'] = $requestedModel;
+                $options['model'] = $request->input('model');
+            }
+
+            // BL-003: A 'model' value may also arrive inside the options object
+            // (sanitizeOptions() whitelists 'model'). Validate that path too so the
+            // allowlist cannot be bypassed by placing the model under options.
+            if (! empty($allowedModels) && isset($options['model'])
+                && ! in_array($options['model'], (array) $allowedModels, true)) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'The requested model is not permitted. Allowed models: '.implode(', ', (array) $allowedModels).'.',
+                ], 422);
             }
         }
 

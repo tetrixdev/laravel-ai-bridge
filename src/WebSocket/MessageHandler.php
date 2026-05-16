@@ -75,8 +75,37 @@ class MessageHandler
             MessageTypes::TOOL_CALL => $this->handleToolCall($connectionId, $message),
             MessageTypes::ERROR => $this->handleError($connectionId, $message),
             MessageTypes::CANCELLED => $this->handleCancelled($connectionId, $message),
+            MessageTypes::SESSION_RESET => $this->handleSessionReset($connectionId, $message),
             default => null,
         };
+    }
+
+    /**
+     * Handle a 'session_reset' message from the bridge.
+     *
+     * BL-007: session_reset is defined in PROTOCOL.md and accepted as a valid
+     * message type, but server-side history replay is not yet implemented
+     * (see ARCH-017 TODO on MessageTypes::SESSION_RESET). Rather than silently
+     * discarding the message, return a clear 'not_implemented' error response so
+     * bridge clients implementing the reconnection flow receive actionable
+     * feedback instead of appearing to hang.
+     *
+     * @param  array<string, mixed>  $message
+     * @return array<string, mixed>
+     */
+    private function handleSessionReset(string $connectionId, array $message): array
+    {
+        Log::info('AI Bridge: received session_reset — feature not implemented', [
+            'connection_id' => $connectionId,
+        ]);
+
+        return [
+            'type' => MessageTypes::CONNECTION_ERROR,
+            'error' => 'not_implemented',
+            'message' => 'session_reset is not yet supported by this server. '
+                .'Reconnecting bridges should start a fresh session; conversation history replay is not available.',
+            'request_id' => $message['request_id'] ?? null,
+        ];
     }
 
     /**
@@ -554,6 +583,10 @@ class MessageHandler
 
     /**
      * Handle an 'error' message from the bridge (top-level, non-streaming).
+     *
+     * SEC-001: Apply the same ownership check as all other terminal handlers
+     * (done, error-from-stream, cancelled) so an authenticated bridge client
+     * cannot abort another user's in-progress request by guessing its request ID.
      */
     private function handleError(string $connectionId, array $message): ?array
     {
@@ -561,6 +594,18 @@ class MessageHandler
         $code = $message['data']['code'] ?? $message['code'] ?? $message['error'] ?? 'unknown';
         $rawMessage = $message['data']['message'] ?? $message['message'] ?? 'Unknown error';
         $errorMessage = mb_substr(strip_tags($rawMessage), 0, 500);
+
+        // SEC-001: Verify the sender owns this request before dispatching the error.
+        // Mirrors the check in handleErrorFromStream(), handleDoneFromStream(),
+        // and handleCancelled().
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: error message from wrong or unregistered user, discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
 
         Log::error('AI Bridge: error from bridge', [
             'connection_id' => $connectionId,

@@ -66,7 +66,9 @@ class TestCommand extends Command
         ];
 
         // Bridge mode requires a user_id (artisan commands have no auth context)
-        if ($mode === 'bridge') {
+        // CONS-007: Compare against the resolved enum value for consistency with
+        // the ProviderMode::tryFrom() validation above.
+        if ($resolvedMode === ProviderMode::Bridge) {
             $options['user_id'] = $this->option('user-id') ?? '1';
         }
 

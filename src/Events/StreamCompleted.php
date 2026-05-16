@@ -7,6 +7,7 @@ namespace Tetrix\AiBridge\Events;
 use Illuminate\Foundation\Events\Dispatchable;
 use Illuminate\Queue\SerializesModels;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Enums\TerminatedBy;
 
 /**
  * Dispatched when an AI response stream completes (successfully or with error).
@@ -39,11 +40,15 @@ class StreamCompleted
         /** Duration of the stream in milliseconds. */
         public readonly ?int $durationMs = null,
         /**
-         * How the stream ended: 'success', 'error', or 'cancelled'.
+         * How the stream ended: Success, Error, or Cancelled.
          *
          * BL-012: Provides a clean, non-fragile way to distinguish cancellations
          * from errors in analytics listeners — no need to parse the error string prefix.
+         *
+         * CONS-009: Typed as the TerminatedBy backed enum (consistent with
+         * ProviderMode and BlockType) so invalid values are rejected at construction
+         * time and listeners can write exhaustive match() checks.
          */
-        public readonly string $terminatedBy = 'success',
+        public readonly TerminatedBy $terminatedBy = TerminatedBy::Success,
     ) {}
 }

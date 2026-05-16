@@ -277,6 +277,19 @@ class BridgeStream implements StreamableProvider
 
         if (! empty($configuredUrl)) {
             $url = rtrim($configuredUrl, '/') . '/api/request';
+
+            // SEC-006: An explicitly configured http:// relay URL still exposes the
+            // internal relay token in cleartext unless the host is loopback. Warn so
+            // operators on multi-host deployments switch to https://.
+            $configuredHost = parse_url($configuredUrl, PHP_URL_HOST) ?: '';
+            if (str_starts_with(strtolower($configuredUrl), 'http://') && ! $this->isLoopbackHost($configuredHost)) {
+                Log::warning(
+                    'AI Bridge: AI_BRIDGE_RELAY_URL uses plaintext http:// for a non-loopback host. '
+                    .'The internal relay token is transmitted unencrypted. Use an https:// URL when the '
+                    .'bridge server runs on a separate host.',
+                    ['host' => $configuredHost]
+                );
+            }
         } else {
             $host = config('ai-bridge.server.host', '127.0.0.1');
             $port = (int) config('ai-bridge.server.port', 8085);
@@ -284,6 +297,19 @@ class BridgeStream implements StreamableProvider
             // Use 127.0.0.1 for localhost connections (0.0.0.0 is a listen address, not connectable)
             if ($host === '0.0.0.0') {
                 $host = '127.0.0.1';
+            }
+
+            // SEC-006: The fallback relay URL is always plaintext http://. This is safe
+            // for loopback hosts but, on a non-loopback host, the short-lived internal
+            // relay token is transmitted in cleartext. Warn the operator so they set
+            // AI_BRIDGE_RELAY_URL to an https:// URL for multi-host deployments.
+            if (! $this->isLoopbackHost($host)) {
+                Log::warning(
+                    'AI Bridge: internal relay falls back to plaintext http:// for a non-loopback bridge host. '
+                    .'The internal relay token is transmitted unencrypted. Set AI_BRIDGE_RELAY_URL to an https:// '
+                    .'URL when the bridge server runs on a separate host.',
+                    ['host' => $host, 'port' => $port]
+                );
             }
 
             $url = "http://{$host}:{$port}/api/request";
@@ -384,6 +410,29 @@ class BridgeStream implements StreamableProvider
 
             $this->streamHandler->dispatchError('bridge_relay_failed', $userMessage);
         }
+    }
+
+    /**
+     * Determine whether a host refers to the local loopback interface.
+     *
+     * SEC-006: Used to decide when a plaintext http:// relay path is safe.
+     * Loopback hosts never leave the machine, so cleartext transmission of
+     * the internal relay token poses no realistic interception risk.
+     */
+    private function isLoopbackHost(string $host): bool
+    {
+        $host = strtolower(trim($host, '[]'));
+
+        if ($host === '' || $host === 'localhost' || $host === '::1') {
+            return true;
+        }
+
+        // Any address in 127.0.0.0/8 is loopback.
+        if (filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false) {
+            return str_starts_with($host, '127.');
+        }
+
+        return false;
     }
 
     public function cancel(): void

@@ -26,19 +26,6 @@ function makeSseChunk(array $data): string
     return "data: " . json_encode($data) . "\n\n";
 }
 
-function makeSseStream(array $chunks): string
-{
-    $stream = '';
-    foreach ($chunks as $chunk) {
-        if (is_string($chunk)) {
-            $stream .= "data: {$chunk}\n\n";
-        } else {
-            $stream .= makeSseChunk($chunk);
-        }
-    }
-    return $stream;
-}
-
 function createChatStream(?ToolRegistry $registry = null): ChatCompletionsStream
 {
     return new ChatCompletionsStream(

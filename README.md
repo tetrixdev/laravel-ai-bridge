@@ -73,6 +73,8 @@ AI_BRIDGE_MODEL=gpt-4o
 
 namespace App\Http\Controllers;
 
+use Illuminate\Http\Request;
+use Illuminate\Support\Str;
 use Tetrix\AiBridge\Facades\AiBridge;
 
 class ChatController extends Controller
@@ -112,10 +114,27 @@ class ChatController extends Controller
 
 <script src="/js/vendor/ai-bridge.js"></script>
 <script>
+// NOTE (UX-003): crypto.randomUUID() requires a secure context (HTTPS or localhost).
+// Over plain HTTP on a LAN IP (common for staging / internal testing) it throws a
+// TypeError and breaks the whole page. This helper falls back to a Math.random()-based
+// ID generator so conversation IDs work everywhere.
+function generateId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    // Fallback for non-secure contexts (plain HTTP). Not cryptographically strong,
+    // but sufficient for uniquely identifying a conversation in the browser.
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+    });
+}
+
 // NOTE (UX-001): Generate conversationId ONCE at page load and reuse it for all
 // messages in this conversation. Regenerating on each send() creates a fresh
 // conversation every time and the AI loses all context from previous messages.
-const conversationId = 'conv-' + crypto.randomUUID();
+const conversationId = 'conv-' + generateId();
 
 const stream = new AiBridgeStream({
     mode: 'sse',
@@ -264,6 +283,7 @@ Full reference for `config/ai-bridge.php`:
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
 | `chat_completions.model` | `AI_BRIDGE_MODEL` | `null` | Model name (e.g. `gpt-4o`) |
 | `chat_completions.max_tokens` | `AI_BRIDGE_MAX_TOKENS` | `4096` | Max response tokens |
+| `chat_completions.allowed_models` | -- | `[]` | Model allowlist. Empty array allows all models. When non-empty, requests for a model not in the list are rejected with HTTP 422 |
 | `server.host` | `AI_BRIDGE_SERVER_HOST` | `127.0.0.1` | Bridge WebSocket server bind address (set to `0.0.0.0` in Docker/multi-host setups) |
 | `server.port` | `AI_BRIDGE_SERVER_PORT` | `8085` | Bridge WebSocket server port |
 | `broadcasting.enabled` | `AI_BRIDGE_BROADCAST` | `true` | Enable Reverb broadcasting |
@@ -305,9 +325,13 @@ Content-Type: application/json
 }
 ```
 
-The response is `text/event-stream` with normalized events:
+The response is `text/event-stream` with normalized events. The first event is always
+`conversation_id`, carrying the server-generated conversation ID — capture it and send it
+back with follow-up messages to continue a multi-turn conversation:
 
 ```
+data: {"event":"conversation_id","data":{"conversation_id":"conv-123"}}
+
 data: {"event":"block_start","data":{"block_type":"text","block_index":0}}
 
 data: {"event":"block_delta","data":{"block_type":"text","block_index":0,"content":"Hello"}}
@@ -398,10 +422,18 @@ const stream = new AiBridgeStream({
     url: '/ai-bridge/stream/sse',
 });
 
+let conversationId = null;
+
 stream.send({
     message: 'I search the room',
     conversation_id: 'conv-123',
     system_prompt: 'You are a game master.',
+});
+
+// The server emits 'conversation_id' as the first event. Capture it and pass it
+// back on subsequent send() calls to keep the conversation multi-turn.
+stream.on('conversation_id', (id) => {
+    conversationId = id;
 });
 
 stream.on('text', (content) => {
@@ -441,6 +473,12 @@ stream.send({
 
 stream.on('text', (content) => { /* ... */ });
 stream.on('done', (usage) => { /* ... */ });
+
+// 'cancelled' is a terminal event — handle it alongside 'done' and 'error' so UI
+// cleanup (hiding spinners, re-enabling inputs) still runs if the stream is cancelled
+// (e.g. by the user or on a bridge reconnect). Without it the UI can stay stuck.
+stream.on('cancelled', () => { /* reset UI: hide spinner, re-enable input */ });
+stream.on('error', (code, message) => { /* ... */ });
 ```
 
 ### With Alpine.js
@@ -454,13 +492,32 @@ stream.on('done', (usage) => { /* ... */ });
 
 <script src="/js/vendor/ai-bridge.js"></script>
 <script>
+// NOTE (UX-003): crypto.randomUUID() requires a secure context (HTTPS or localhost)
+// and throws over plain HTTP on a LAN IP. This helper falls back to a Math.random()
+// based ID so conversation IDs work everywhere, including HTTP staging environments.
+function generateId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === 'x' ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+    });
+}
+
 function chat() {
     return {
         messages: '',
         input: '',
         isStreaming: false,
         stream: null,
+        conversationId: null,
         init() {
+            // NOTE (UX-001): Generate the conversation_id ONCE here and reuse it for
+            // every send() call. Regenerating it per message (e.g. with Date.now())
+            // starts a fresh conversation each time, so the AI loses all prior context.
+            this.conversationId = 'conv-' + generateId();
             this.stream = new AiBridgeStream({
                 mode: 'sse',
                 url: '/ai-bridge/stream/sse',
@@ -484,9 +541,11 @@ function chat() {
             // UX: Prevent submitting while streaming or with empty input
             if (this.isStreaming || !this.input.trim()) return;
             this.isStreaming = true;
+            // NOTE (UX-001): Reuse the conversationId generated once in init() so the
+            // AI keeps context across every message in this conversation session.
             this.stream.send({
                 message: this.input,
-                conversation_id: 'conv-' + Date.now(),
+                conversation_id: this.conversationId,
             });
             this.input = '';
         },

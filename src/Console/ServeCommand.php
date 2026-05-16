@@ -99,8 +99,14 @@ class ServeCommand extends Command
             $this->newLine();
         }
 
+        // UX-005: Prefer the configured public URL when set, so operators with TLS
+        // configured are shown the correct wss:// connection command rather than the
+        // plaintext ws:// bind address.
+        $publicUrl = config('ai-bridge.server.public_url');
+        $displayUrl = ! empty($publicUrl) ? $publicUrl : "ws://{$host}:{$port}";
+
         $this->line('  Bridge clients can connect with:');
-        $this->line("  <fg=yellow>npx @tetrixdev/ai-bridge --server=ws://{$host}:{$port} --token=<JWT></>");
+        $this->line("  <fg=yellow>npx @tetrixdev/ai-bridge --server={$displayUrl} --token=<JWT></>");
         $this->newLine();
         $this->line('  Generate a token with:');
         $this->line('  <fg=yellow>php artisan ai-bridge:token</> ');

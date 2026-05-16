@@ -45,6 +45,11 @@ return [
     'token' => [
         'secret' => env('AI_BRIDGE_TOKEN_SECRET'),
         'ttl' => env('AI_BRIDGE_TOKEN_TTL', 86400), // 24 hours in seconds
+
+        // SEC-008: Audience claim that scopes tokens to this application instance.
+        // Tokens issued for one deployment are rejected by another even if both
+        // share the same secret. Defaults to config('app.url') when left null.
+        'audience' => env('AI_BRIDGE_TOKEN_AUDIENCE'),
     ],
 
     /*

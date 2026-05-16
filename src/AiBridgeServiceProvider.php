@@ -30,6 +30,12 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
 class AiBridgeServiceProvider extends ServiceProvider
 {
     /**
+     * BL-016: Tracks whether the empty-route_middleware warning has already been
+     * logged in this process, so it fires at most once instead of per request.
+     */
+    private static bool $emptyMiddlewareWarningLogged = false;
+
+    /**
      * Register services.
      */
     public function register(): void
@@ -91,10 +97,15 @@ class AiBridgeServiceProvider extends ServiceProvider
         // Register named middleware for bridge token validation
         $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
 
-        // SEC-010: Warn when route_middleware is empty — routes will be unprotected
-        $routeMiddleware = config('ai-bridge.route_middleware', ['auth']);
-        if (empty($routeMiddleware)) {
-            Log::warning('AI Bridge: route_middleware is empty — all AI Bridge HTTP routes are unprotected. Set ai-bridge.route_middleware to ["auth"] or ["auth:sanctum"] for production.');
+        // SEC-010: Warn when route_middleware is empty — routes will be unprotected.
+        // BL-016: Fire at most once per process. boot() runs on every request under
+        // PHP-FPM, so without this guard an empty middleware list would flood logs.
+        if (! self::$emptyMiddlewareWarningLogged) {
+            $routeMiddleware = config('ai-bridge.route_middleware', ['auth']);
+            if (empty($routeMiddleware)) {
+                self::$emptyMiddlewareWarningLogged = true;
+                Log::warning('AI Bridge: route_middleware is empty — all AI Bridge HTTP routes are unprotected. Set ai-bridge.route_middleware to ["auth"] or ["auth:sanctum"] for production.');
+            }
         }
 
         // Register routes.

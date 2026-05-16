@@ -70,6 +70,24 @@ class AiBridgeManager
      */
     public function stream(string $conversationId, string $message, array $options = []): StreamHandler
     {
+        // ARCH-004: '_broadcasting' is an internal signal set only by
+        // streamAndBroadcast(). Strip it here so external callers cannot inject it
+        // through the public API and silently activate broadcast-mode suppression.
+        unset($options['_broadcasting']);
+
+        return $this->buildStream($conversationId, $message, $options);
+    }
+
+    /**
+     * Build a configured StreamHandler from the given options.
+     *
+     * Internal counterpart of stream() that does NOT strip the '_broadcasting'
+     * key, so streamAndBroadcast() can pass it through to createBridgeProvider().
+     *
+     * @param  array<string, mixed>  $options
+     */
+    private function buildStream(string $conversationId, string $message, array $options): StreamHandler
+    {
         $mode = $this->resolveMode($options);
         $provider = $this->createProvider($mode, $options);
 
@@ -212,9 +230,10 @@ class AiBridgeManager
 
         // BL-003: Mark the provider as broadcasting mode before start() so that
         // relayViaHttpApi() under PHP-FPM suppresses the false bridge_sse_incompatible
-        // error. The provider is accessible via the StreamHandler in our custom stream() call.
+        // error. Use buildStream() (not the public stream()) so the internal
+        // '_broadcasting' signal is preserved rather than stripped (ARCH-004).
         $options['_broadcasting'] = true;
-        $stream = $this->stream($conversationId, $message, $options);
+        $stream = $this->buildStream($conversationId, $message, $options);
         $requestId = $stream->requestId;
 
         $broadcast = function (array $payload) use ($channel, $requestId): void {

@@ -215,8 +215,25 @@ class BridgeWebSocketHandler
         // Clean up connection tracking before closing to prevent leaks
         if ($meta !== null) {
             $userId = $meta['user_id'];
+            $connectionId = $meta['connection_id'];
+
+            // BL-005: Guard against the reconnection race condition where the old TCP
+            // connection fires onError after a new connection has already replaced it.
+            // Mirrors the guard in onClose(): only remove from the manager if the
+            // manager's current connection_id for this user still matches the errored
+            // connection's ID. If they differ, a newer connection already took over —
+            // do not evict it.
             if ($userId !== null) {
-                $this->connectionManager->removeConnection($userId, 'websocket_error');
+                $currentConnectionId = $this->connectionManager->getConnectionId($userId);
+                if ($currentConnectionId === $connectionId) {
+                    $this->connectionManager->removeConnection($userId, 'websocket_error');
+                } else {
+                    Log::info('AI Bridge Server: stale connection errored after reconnect — skipping removeConnection', [
+                        'errored_connection_id' => $connectionId,
+                        'current_connection_id' => $currentConnectionId,
+                        'user_id' => $userId,
+                    ]);
+                }
             }
             unset($this->connections[$resourceId]);
         }
@@ -247,7 +264,18 @@ class BridgeWebSocketHandler
 
         // Fall back to query parameter
         parse_str($queryString, $queryParams);
+        $queryToken = $queryParams['token'] ?? '';
 
-        return $queryParams['token'] ?? '';
+        // SEC-009: The ?token= query parameter is a deprecated, backward-compatible
+        // path. The full JWT appears in web server / load balancer access logs,
+        // which often have broader read permissions and longer retention than
+        // application secrets. Warn so operators can migrate clients to the
+        // Authorization: Bearer header (which keeps the token out of logs).
+        if ($queryToken !== '') {
+            Log::warning('AI Bridge Server: bridge authenticated via deprecated ?token= query parameter. '
+                .'The JWT may be exposed in access logs — migrate this client to the Authorization: Bearer header.');
+        }
+
+        return $queryToken;
     }
 }

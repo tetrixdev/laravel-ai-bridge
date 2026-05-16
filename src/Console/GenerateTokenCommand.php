@@ -24,10 +24,13 @@ class GenerateTokenCommand extends Command
     public function handle(TokenManager $manager): int
     {
         $ttlOption = $this->option('ttl');
-        $ttl = $ttlOption !== null ? (int) $ttlOption : (int) config('ai-bridge.token.ttl');
+        // BL-011: When --ttl is explicitly provided, pass it through verbatim
+        // (including 0) so generate()'s guard can reject invalid values with a
+        // clear error. Only fall back to the config default when --ttl is absent.
+        $ttl = $ttlOption !== null ? (int) $ttlOption : null;
 
         try {
-            $token = $manager->generate($this->option('user-id'), [], $ttl > 0 ? $ttl : null);
+            $token = $manager->generate($this->option('user-id'), [], $ttl);
         } catch (\InvalidArgumentException $e) {
             $this->error($e->getMessage());
             $this->newLine();
@@ -38,10 +41,12 @@ class GenerateTokenCommand extends Command
 
         $port = (int) config('ai-bridge.server.port', 8085);
 
-        $effectiveTtl = $ttl > 0 ? $ttl : (int) config('ai-bridge.token.ttl', 86400);
+        $effectiveTtl = $ttl !== null ? $ttl : (int) config('ai-bridge.token.ttl', 86400);
         // UX-007: Include an absolute expiry timestamp so operators can tell users
         // when to renew without needing to calculate from raw seconds.
-        $expiresAt = now()->addSeconds($effectiveTtl)->toDateTimeString().' UTC';
+        // BL-006: Format in UTC so the timestamp actually matches the 'UTC' label,
+        // regardless of the application's configured timezone.
+        $expiresAt = now()->addSeconds($effectiveTtl)->utc()->toDateTimeString().' UTC';
         $this->info('Token generated (TTL: '.$effectiveTtl.'s, expires at '.$expiresAt.'):');
         $this->line($token);
         $this->newLine();

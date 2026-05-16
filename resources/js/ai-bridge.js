@@ -34,7 +34,9 @@ class AiBridgeStream {
         this.listeners = {};
         this._reader = null;
         this._abortController = null;
+        this._reverbSubscribed = false; // BL-001: guard against duplicate Echo subscriptions
         this._generation = 0; // Per-request generation counter to ignore stale events
+        this._inFlight = false; // BL-002: explicit in-flight flag (true between send() and a terminal event)
         // UX-004: Default raised from 60s to 120s to reduce false-positives for slow AI
         // responses (extended thinking, cold starts, queued requests). Configurable via
         // config.inactivityTimeout (seconds). For providers with extended reasoning, set
@@ -42,14 +44,21 @@ class AiBridgeStream {
         this._inactivityTimeout = (config.inactivityTimeout || 120) * 1000; // ms
         this._inactivityTimer = null;
 
-        if (this.mode === 'reverb' && this.channel && typeof window.Echo !== 'undefined') {
-            this._listenReverb();
-        }
+        // BL-001: _listenReverb() is intentionally NOT called here. It is called from
+        // _sendBroadcast() so the generation captured at subscription time matches the
+        // generation the incoming events will be checked against. Subscribing in the
+        // constructor captured generation 0, while the first send() bumped it to 1, so
+        // every event was classified as stale and silently discarded.
     }
 
     /**
      * Register an event listener.
-     * Events: text, thinking, tool_call, done, error, cancelled, block_start, block_stop, block_delta, raw
+     * Events: conversation_id, text, thinking, tool_call, done, error, cancelled, block_start, block_stop, block_delta, raw
+     *
+     * The 'conversation_id' event is emitted as the first event of an SSE response and
+     * carries the server-generated conversation ID. Capture it to send follow-up
+     * messages in the same multi-turn conversation:
+     *   stream.on('conversation_id', (id) => { conversationId = id; });
      */
     on(event, callback) {
         if (!this.listeners[event]) {
@@ -93,6 +102,7 @@ class AiBridgeStream {
         // Only emit if this generation hasn't already terminated
         if (gen === this._generation) {
             this._generation++;
+            this._inFlight = false; // BL-002
             this._emit('cancelled');
             this._emit('done', null);
         }
@@ -108,7 +118,11 @@ class AiBridgeStream {
      * never left in a permanently stuck state.
      */
     destroy() {
-        const wasInFlight = this._abortController !== null || this._generation > 0;
+        // BL-002: Use the explicit _inFlight flag instead of the generation-counter
+        // heuristic. A stream that already completed cleanly still has _generation > 0,
+        // which previously caused destroy() to re-emit 'cancelled'/'done' onto an
+        // already-finished stream. _inFlight is true only between send() and a terminal event.
+        const wasInFlight = this._inFlight;
 
         if (this._abortController) {
             this._abortController.abort();
@@ -118,6 +132,7 @@ class AiBridgeStream {
 
         // UX-003: Emit terminal events before clearing listeners so cleanup callbacks run.
         if (wasInFlight) {
+            this._inFlight = false;
             this._emit('cancelled');
             this._emit('done', null);
         }
@@ -145,6 +160,7 @@ class AiBridgeStream {
 
         // New generation — any events from the previous request are now stale
         const gen = ++this._generation;
+        this._inFlight = true; // BL-002
         this._abortController = new AbortController();
         this._resetInactivityTimer();
 
@@ -163,6 +179,7 @@ class AiBridgeStream {
             if (!response.ok) {
                 if (gen !== this._generation) return;
                 this._generation++;
+                this._inFlight = false; // BL-002
                 const errorCode = this._mapHttpStatus(response.status);
                 this._emit('error', errorCode, `HTTP ${response.status}`);
                 return;
@@ -193,6 +210,7 @@ class AiBridgeStream {
                     if (payload === '[DONE]') {
                         if (gen === this._generation) {
                             this._generation++;
+                            this._inFlight = false; // BL-002
                             this._emit('done', null);
                         }
                         return;
@@ -211,12 +229,14 @@ class AiBridgeStream {
             // Emit error so the UI knows the response may be incomplete.
             if (gen === this._generation) {
                 this._generation++;
+                this._inFlight = false; // BL-002
                 this._emit('error', 'stream_incomplete', 'Stream ended without completion signal. The response may be truncated.');
             }
         } catch (err) {
             if (err.name === 'AbortError') return;
             if (gen !== this._generation) return;
             this._generation++;
+            this._inFlight = false; // BL-002
             this._emit('error', 'network_error', err.message);
         }
     }
@@ -230,6 +250,7 @@ class AiBridgeStream {
         this._inactivityTimer = setTimeout(() => {
             if (this._generation > 0) {
                 this._generation++;
+                this._inFlight = false; // BL-002
                 this._emit('error', 'inactivity_timeout', 'No events received within the inactivity timeout period.');
             }
         }, this._inactivityTimeout);
@@ -240,6 +261,12 @@ class AiBridgeStream {
         // Increment generation for broadcast so each send creates a new "expected" generation.
         // This allows the inactivity timer to track the current request correctly.
         const gen = ++this._generation;
+        this._inFlight = true; // BL-002
+
+        // BL-001: Subscribe to the Reverb channel HERE (not in the constructor) so the
+        // generation captured at subscription time matches the events of this request.
+        // If subscribing fails (Echo missing / no channel), an error event is emitted.
+        this._listenReverb();
 
         try {
             const response = await fetch(this.broadcastUrl, {
@@ -256,6 +283,7 @@ class AiBridgeStream {
                 // UX-009: Always emit the error regardless of generation count.
                 if (gen !== this._generation) return;
                 this._generation++;
+                this._inFlight = false; // BL-002
                 const errorCode = this._mapHttpStatus(response.status);
                 this._emit('error', errorCode, `HTTP ${response.status}`);
             } else {
@@ -268,24 +296,41 @@ class AiBridgeStream {
         } catch (err) {
             if (gen !== this._generation) return;
             this._generation++;
+            this._inFlight = false; // BL-002
             this._emit('error', 'network_error', err.message);
         }
     }
 
     /** @private */
     _listenReverb() {
-        if (typeof window.Echo === 'undefined') return;
+        if (typeof window.Echo === 'undefined') {
+            // UX-004: Echo is not initialized. Without this, _listenReverb() returned
+            // silently and the UI was left frozen with no feedback. Emit an error event
+            // so developers (console) and user-facing error handlers can react.
+            this._inFlight = false;
+            this._emit(
+                'error',
+                'echo_not_initialized',
+                'Laravel Echo is not initialized. Ensure window.Echo is configured before creating AiBridgeStream in reverb mode.'
+            );
+            return;
+        }
 
-        // BL-002: Capture the generation counter AT SUBSCRIPTION TIME so events from a
-        // previous send() are correctly discarded even if they arrive after a new send().
-        // Without this capture, _handleEvent(e, this._generation) always reads the LIVE
-        // generation (always matching itself), making the stale-event guard a no-op.
-        const capturedGen = this._generation;
+        if (!this.channel) return;
+
+        // BL-001: Subscribe only once. The handler reads the generation captured for the
+        // current request (this._generation, set just before this call in _sendBroadcast)
+        // so events are matched against the request that is actually in flight. The
+        // generation is updated for each subsequent send() via _reverbCapturedGen.
+        this._reverbCapturedGen = this._generation;
+
+        if (this._reverbSubscribed) return;
+        this._reverbSubscribed = true;
 
         // Use private channel for authorization (matches server-side PrivateChannel)
         window.Echo.private(this.channel)
             .listen('.ai.stream', (e) => {
-                this._handleEvent(e, capturedGen);
+                this._handleEvent(e, this._reverbCapturedGen);
             })
             // UX-010: Handle channel authorization failures (session expiry, policy changes).
             // Without this handler, a 403 from the broadcasting auth endpoint is completely
@@ -293,6 +338,7 @@ class AiBridgeStream {
             // no indication of whether to retry.
             .error((error) => {
                 this._generation++;
+                this._inFlight = false; // BL-002
                 this._clearInactivityTimer();
                 this._emit('error', 'channel_auth_failed', 'Channel authorization failed. Please refresh the page.');
             });
@@ -307,6 +353,7 @@ class AiBridgeStream {
             // The 'const gen = ...' that appeared here was dead code — removed.
             if (this._generation > 0) {
                 this._generation++;
+                this._inFlight = false; // BL-002
                 this._emit('error', 'inactivity_timeout', 'No events received within the inactivity timeout period.');
             }
         }, this._inactivityTimeout);
@@ -378,6 +425,7 @@ class AiBridgeStream {
                 // Emit both 'cancelled' and 'done' for consistent terminal handling.
                 if (gen === this._generation) {
                     this._generation++;
+                    this._inFlight = false; // BL-002
                     this._clearInactivityTimer();
                     this._emit('cancelled');
                     this._emit('done', null);
@@ -386,6 +434,7 @@ class AiBridgeStream {
             case 'done':
                 if (gen === this._generation) {
                     this._generation++;
+                    this._inFlight = false; // BL-002
                     this._clearInactivityTimer();
                     this._emit('done', data.usage || null);
                 }
@@ -393,6 +442,7 @@ class AiBridgeStream {
             case 'error':
                 if (gen === this._generation) {
                     this._generation++;
+                    this._inFlight = false; // BL-002
                     this._clearInactivityTimer();
                     this._emit('error', data.code || 'unknown', data.message || 'Unknown error');
                 }
