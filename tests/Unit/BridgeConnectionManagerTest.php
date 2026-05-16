@@ -21,7 +21,6 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 |
 */
 
-uses(TestCase::class);
 
 function createTestStreamHandler(): StreamHandler
 {

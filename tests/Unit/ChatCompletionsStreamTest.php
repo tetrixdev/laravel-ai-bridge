@@ -20,7 +20,6 @@ use Tetrix\AiBridge\Tools\ToolRegistry;
 |
 */
 
-uses(TestCase::class);
 
 function makeSseChunk(array $data): string
 {
@@ -250,6 +249,38 @@ test('HTTP error 500 maps to api_error error code', function () {
     expect($receivedCode)->toBe('api_error');
 });
 
+test('start() strips trailing /v1 from endpoint to prevent double /v1 path (BL-005)', function () {
+    Http::fake([
+        // Correct URL should have exactly one /v1/chat/completions
+        'api.example.com/v1/chat/completions' => Http::response('Rate limit', 429),
+        // If double /v1 were present, this would match instead:
+        'api.example.com/v1/v1/chat/completions' => Http::response('Should not be hit', 200),
+    ]);
+
+    // Construct stream with a /v1-suffixed endpoint (common misconfiguration)
+    $stream = new \Tetrix\AiBridge\Streaming\ChatCompletionsStream(
+        toolRegistry: new \Tetrix\AiBridge\Tools\ToolRegistry(),
+        endpoint: 'https://api.example.com/v1',
+        apiKey: 'test-key',
+        model: 'gpt-4o',
+        maxTokens: 4096,
+    );
+    $stream->setMessage('Hello');
+    $handler = $stream->getStreamHandler();
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Byok);
+    $handler->setConversationId('conv-1');
+
+    $receivedCode = null;
+    $handler->onError(function (string $code) use (&$receivedCode) {
+        $receivedCode = $code;
+    });
+
+    $stream->start();
+
+    // Should have hit the correct /v1/chat/completions URL (mapped to 429)
+    expect($receivedCode)->toBe('rate_limited');
+});
+
 test('stream timeout uses correct config key', function () {
     config(['ai-bridge.chat_completions.stream_timeout' => 120]);
 
@@ -263,15 +294,153 @@ test('getStreamHandler() returns StreamHandler instance', function () {
     expect($stream->getStreamHandler())->toBeInstanceOf(\Tetrix\AiBridge\Streaming\StreamHandler::class);
 });
 
-test('cancel() sets cancelled flag', function () {
+test('cancel() causes dispatchCancelled (not dispatchError) when stream ends mid-flight (BL-009)', function () {
+    // Simulate a stream with a text delta — then cancel via onBlockDelta callback
+    // so the stream exits the while loop with $cancelled=true.
+    // Note: start() resets cancelled=false, so cancel() must be called during processing.
+    Http::fake([
+        'api.example.com/*' => Http::response(
+            // Two text delta chunks — no [DONE] follows; body ends here
+            makeSseChunk(['choices' => [['delta' => ['content' => 'Hello'], 'finish_reason' => null]]]) .
+            makeSseChunk(['choices' => [['delta' => ['content' => ' world'], 'finish_reason' => null]]]),
+            200,
+            ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
     $stream = createChatStream();
+    $stream->setMessage('Hello');
+    $handler = $stream->getStreamHandler();
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Byok);
+    $handler->setConversationId('conv-1');
 
-    $stream->cancel();
+    $cancelledFired = false;
+    $errorFired = false;
 
-    // The cancelled flag is private, but we can verify its effect via the stream handler
-    // When cancelled, starting the stream should result in a cancelled error
-    // This is an indirect test — the private $cancelled field suppresses processing
-    expect(true)->toBeTrue(); // cancel() should not throw
+    // Cancel during first block_delta callback — this sets $this->cancelled = true
+    // so after the while loop exits (stream body also exhausted), it dispatches dispatchCancelled.
+    $handler->onBlockDelta(function () use ($stream) {
+        $stream->cancel();
+    });
+    $handler->onCancelled(function () use (&$cancelledFired) {
+        $cancelledFired = true;
+    });
+    $handler->onError(function () use (&$errorFired) {
+        $errorFired = true;
+    });
+
+    $stream->start();
+
+    expect($cancelledFired)->toBeTrue();
+    expect($errorFired)->toBeFalse();
+});
+
+test('processStream() dispatches stream_incomplete when stream ends without [DONE] (BL-009)', function () {
+    Http::fake([
+        'api.example.com/*' => Http::response(
+            // One text delta, no [DONE]
+            makeSseChunk(['choices' => [['delta' => ['content' => 'Hello'], 'finish_reason' => null]]]),
+            200,
+            ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $stream = createChatStream();
+    $stream->setMessage('Hello');
+    $handler = $stream->getStreamHandler();
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Byok);
+    $handler->setConversationId('conv-1');
+
+    $receivedCode = null;
+
+    $handler->onError(function (string $code) use (&$receivedCode) {
+        $receivedCode = $code;
+    });
+
+    $stream->start();
+
+    expect($receivedCode)->toBe('stream_incomplete');
+});
+
+test('processStream() accumulates multi-delta tool call arguments and dispatches them (BL-009)', function () {
+    $firstDelta = makeSseChunk(['choices' => [[
+        'delta' => ['tool_calls' => [
+            ['index' => 0, 'id' => 'call-abc', 'function' => ['name' => 'search', 'arguments' => '{"q"']],
+        ]],
+        'finish_reason' => null,
+    ]]]);
+
+    $secondDelta = makeSseChunk(['choices' => [[
+        'delta' => ['tool_calls' => [
+            ['index' => 0, 'function' => ['arguments' => ': "cats"}']],
+        ]],
+        'finish_reason' => 'tool_calls',
+    ]]]);
+
+    $doneLine = "data: [DONE]\n\n";
+
+    Http::fake([
+        'api.example.com/*' => Http::response(
+            $firstDelta . $secondDelta . $doneLine,
+            200,
+            ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $stream = createChatStream();
+    $stream->setMessage('Search');
+    $handler = $stream->getStreamHandler();
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Byok);
+    $handler->setConversationId('conv-1');
+
+    $toolCallName = null;
+    $toolCallParams = null;
+    $toolCallId = null;
+
+    $handler->onToolCall(function (string $name, array $params, string $callId) use (&$toolCallName, &$toolCallParams, &$toolCallId) {
+        $toolCallName = $name;
+        $toolCallParams = $params;
+        $toolCallId = $callId;
+    });
+
+    $stream->start();
+
+    expect($toolCallName)->toBe('search');
+    expect($toolCallParams)->toBe(['q' => 'cats']);
+    expect($toolCallId)->toBe('call-abc');
+});
+
+test('processStream() dispatches done with usage from standalone usage chunk (BL-009)', function () {
+    $usageChunk = makeSseChunk([
+        'usage' => ['prompt_tokens' => 10, 'completion_tokens' => 20, 'total_tokens' => 30],
+    ]);
+
+    Http::fake([
+        'api.example.com/*' => Http::response(
+            $usageChunk,
+            200,
+            ['Content-Type' => 'text/event-stream'],
+        ),
+    ]);
+
+    $stream = createChatStream();
+    $stream->setMessage('Hello');
+    $handler = $stream->getStreamHandler();
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Byok);
+    $handler->setConversationId('conv-1');
+
+    $doneUsage = null;
+    $doneFired = false;
+
+    $handler->onDone(function (?array $usage) use (&$doneUsage, &$doneFired) {
+        $doneUsage = $usage;
+        $doneFired = true;
+    });
+
+    $stream->start();
+
+    expect($doneFired)->toBeTrue();
+    expect($doneUsage)->toBe(['prompt_tokens' => 10, 'completion_tokens' => 20, 'total_tokens' => 30]);
 });
 
 test('setConversationId() is fluent', function () {

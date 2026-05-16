@@ -13,7 +13,15 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * implement this interface, ensuring the consuming application gets the same
  * streaming API regardless of the underlying transport.
  *
- * IMPORTANT: Blocking behavior differs between implementations:
+ * IMPORTANT — ARCHITECTURAL NOTE (ARCH-001):
+ * This interface intentionally conflates two behaviorally incompatible contracts
+ * for start(). The two implementations are NEVER used polymorphically — callers
+ * always go through AiBridgeManager, which knows the concrete type via ProviderMode.
+ * Future refactoring could split this into SynchronousStreamableProvider and
+ * AsynchronousStreamableProvider, but for now the distinction is enforced through
+ * documentation rather than the type system.
+ *
+ * BLOCKING behavior of start():
  *
  * - ChatCompletionsStream::start() is SYNCHRONOUS — it blocks the current
  *   thread/process while reading the HTTP SSE stream. When start() returns,
@@ -24,6 +32,9 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  *   WebSocket server and are dispatched to the StreamHandler by the
  *   MessageHandler as they come in. The consuming app must handle this
  *   async flow (e.g. via event listeners or a WebSocket server loop).
+ *
+ * DO NOT write generic code that calls start() on a StreamableProvider without
+ * knowing which concrete type it is — the post-start behavior is incompatible.
  */
 interface StreamableProvider
 {

@@ -8,6 +8,7 @@ use Closure;
 use InvalidArgumentException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Contracts\ToolHandler;
@@ -166,6 +167,12 @@ class AiBridgeManager
 
             $this->wireCallbacks($stream, $send, $sendTerminal);
 
+            // UX-006: Emit the conversation_id as the first SSE event so the browser
+            // can use it in subsequent multi-turn messages. Without this, an auto-generated
+            // conversation_id is silently discarded, making multi-turn conversations
+            // impossible to implement correctly via the SSE endpoint.
+            $send(['event' => 'conversation_id', 'data' => ['conversation_id' => $conversationId]]);
+
             $stream->start();
         }, 200, [
             'Content-Type' => 'text/event-stream',
@@ -218,32 +225,39 @@ class AiBridgeManager
     }
 
     /**
-     * Wire all six stream callbacks to a sink callable.
+     * Wire all seven stream callbacks to a sink callable.
      *
-     * Reduces duplication between streamToResponse and streamAndBroadcast.
+     * Callbacks: onBlockStart, onBlockDelta, onBlockStop, onToolCall, onDone, onError, onCancelled.
      * The $sink receives a normalized payload array with 'event' and 'data' keys.
-     * The optional $onTerminal callback is called after done/error events (e.g. for SSE [DONE] flush).
+     * The optional $onTerminal callback is called after done/error/cancelled events (e.g. for SSE [DONE] flush).
      */
     private function wireCallbacks(StreamHandler $stream, callable $sink, ?Closure $onTerminal = null): void
     {
-        $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', false);
+        $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', true);
 
-        $stream->onBlockStart(function (StreamEvent $event) use ($sink, $suppressThinking) {
-            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+        // ARCH-011: Extract the thinking suppression check into a closure so it is
+        // defined once and referenced from all three block callbacks (start/delta/stop),
+        // preventing drift if the suppression logic needs to change.
+        $shouldSuppressEvent = static function (StreamEvent $event) use ($suppressThinking): bool {
+            return $suppressThinking && ($event->data['block_type'] ?? '') === 'thinking';
+        };
+
+        $stream->onBlockStart(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
+            if ($shouldSuppressEvent($event)) {
                 return;
             }
             $sink(['event' => $event->event, 'data' => $event->data]);
         });
 
-        $stream->onBlockDelta(function (StreamEvent $event) use ($sink, $suppressThinking) {
-            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+        $stream->onBlockDelta(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
+            if ($shouldSuppressEvent($event)) {
                 return;
             }
             $sink(['event' => $event->event, 'data' => $event->data]);
         });
 
-        $stream->onBlockStop(function (StreamEvent $event) use ($sink, $suppressThinking) {
-            if ($suppressThinking && ($event->data['block_type'] ?? '') === 'thinking') {
+        $stream->onBlockStop(function (StreamEvent $event) use ($sink, $shouldSuppressEvent) {
+            if ($shouldSuppressEvent($event)) {
                 return;
             }
             $sink(['event' => $event->event, 'data' => $event->data]);
@@ -251,7 +265,7 @@ class AiBridgeManager
 
         $stream->onToolCall(function (string $toolName, array $params, string $callId) use ($sink) {
             $sink([
-                'event' => 'tool_call',
+                'event' => MessageTypes::TOOL_CALL,
                 'data' => [
                     'tool_name' => $toolName,
                     'parameters' => $params,
@@ -262,23 +276,35 @@ class AiBridgeManager
         });
 
         $stream->onDone(function (?array $usage) use ($sink, $onTerminal) {
-            $sink(['event' => 'done', 'data' => ['usage' => $usage]]);
-            if ($onTerminal) {
-                $onTerminal();
+            // ARCH-011: Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
+            // is always called even if the sink throws, preventing SSE clients from hanging
+            // without a [DONE] terminator.
+            try {
+                $sink(['event' => MessageTypes::DONE, 'data' => ['usage' => $usage]]);
+            } finally {
+                if ($onTerminal) {
+                    $onTerminal();
+                }
             }
         });
 
         $stream->onError(function (string $code, string $errorMessage) use ($sink, $onTerminal) {
-            $sink(['event' => 'error', 'data' => ['code' => $code, 'message' => $errorMessage]]);
-            if ($onTerminal) {
-                $onTerminal();
+            try {
+                $sink(['event' => MessageTypes::ERROR, 'data' => ['code' => $code, 'message' => $errorMessage]]);
+            } finally {
+                if ($onTerminal) {
+                    $onTerminal();
+                }
             }
         });
 
         $stream->onCancelled(function (string $reason) use ($sink, $onTerminal) {
-            $sink(['event' => 'cancelled', 'data' => ['reason' => $reason]]);
-            if ($onTerminal) {
-                $onTerminal();
+            try {
+                $sink(['event' => MessageTypes::CANCELLED, 'data' => ['reason' => $reason]]);
+            } finally {
+                if ($onTerminal) {
+                    $onTerminal();
+                }
             }
         });
     }

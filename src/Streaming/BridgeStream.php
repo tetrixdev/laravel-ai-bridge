@@ -262,18 +262,32 @@ class BridgeStream implements StreamableProvider
             // internal relay requests from user-facing bridge connection tokens.
             $internalToken = $this->tokenManager->generate($this->userId, ['scope' => 'internal_relay'], 60);
 
+            $relayBody = [
+                'request_id' => $payload['request_id'] ?? '',
+                'message' => $payload['message'] ?? '',
+                'conversation_id' => $payload['conversation_id'] ?? '',
+                'options' => $payload['options'] ?? [],
+                'tools' => $payload['tools'] ?? [],
+            ];
+
+            // Only include provider when non-empty — the bridge server's apiRequest()
+            // requires this field to be non-empty if present. Omit it when not set so
+            // the bridge can fall back to its configured default.
+            if (! empty($payload['provider'])) {
+                $relayBody['provider'] = $payload['provider'];
+            }
+
+            if (isset($payload['system_prompt'])) {
+                $relayBody['system_prompt'] = $payload['system_prompt'];
+            }
+
+            if (isset($payload['messages'])) {
+                $relayBody['messages'] = $payload['messages'];
+            }
+
             $response = Http::withToken($internalToken)
                 ->timeout((int) config('ai-bridge.server.relay_timeout', 5))
-                ->post($url, [
-                    'request_id' => $payload['request_id'] ?? '',
-                    'provider' => $payload['provider'] ?? '',
-                    'message' => $payload['message'] ?? '',
-                    'conversation_id' => $payload['conversation_id'] ?? '',
-                    'system_prompt' => $payload['system_prompt'] ?? null,
-                    'options' => $payload['options'] ?? [],
-                    'messages' => $payload['messages'] ?? null,
-                    'tools' => $payload['tools'] ?? [],
-                ]);
+                ->post($url, $relayBody);
 
             if ($response->failed()) {
                 $body = $response->json();
@@ -301,11 +315,21 @@ class BridgeStream implements StreamableProvider
                 'user_id' => $this->userId,
             ]);
 
-            // Warn: if the caller is using SSE (streamToResponse), the async events
-            // won't be delivered because PHP-FPM exits after the HTTP response.
+            // BL-010: Under PHP-FPM the SSE HTTP response body is already closing
+            // when events arrive asynchronously via the WebSocket server. The EventSource
+            // spec causes the browser to reconnect indefinitely when it receives an
+            // empty SSE response with no [DONE] sentinel. Dispatch an error here so
+            // the SSE response closes cleanly with an actionable error event.
+            // If the caller is using broadcasting (Reverb), this error is effectively
+            // a no-op because the StreamHandler is not wired to an SSE sink in that path.
             Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
                 'request_id' => $payload['request_id'] ?? '',
             ]);
+
+            $this->streamHandler->dispatchError(
+                'bridge_sse_incompatible',
+                'SSE mode is not supported for bridge mode under PHP-FPM. Use broadcasting (Reverb) instead.'
+            );
 
         } catch (\Exception $e) {
             Log::error('AI Bridge: failed to relay request to bridge server', [

@@ -39,7 +39,17 @@ final class MessageTypes
     /** Sent by bridge to acknowledge receipt of an ai_request. */
     public const AI_REQUEST_ACK = 'ai_request_ack';
 
-    /** Sent by server to replay conversation history after a lost session. */
+    /**
+     * Sent by server to replay conversation history after a lost session.
+     *
+     * TODO (ARCH-017): session_reset is defined in PROTOCOL.md and listed here,
+     * but the server-side implementation is NOT yet complete. No code in
+     * MessageHandler sends this message, and no reconnection scenario triggers it.
+     * Reconnected bridges currently start fresh rather than replaying history.
+     * Implement by: storing recent conversation history per userId in
+     * BridgeConnectionManager and dispatching this message in handleHello() when
+     * a reconnecting bridge is detected (userId already has a previous session).
+     */
     public const SESSION_RESET = 'session_reset';
 
     // ── Streaming ───────────────────────────────────────────────────────

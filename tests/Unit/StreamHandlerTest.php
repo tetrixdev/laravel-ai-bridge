@@ -20,7 +20,6 @@ use Tetrix\AiBridge\Tests\TestCase;
 |
 */
 
-uses(TestCase::class);
 
 function createStreamHandler(): StreamHandler
 {

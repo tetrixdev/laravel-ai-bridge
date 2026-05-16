@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\WebSocket;
 
 use Illuminate\Support\Facades\Event;
+use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Events\BridgeConnected;
 use Tetrix\AiBridge\Events\BridgeDisconnected;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -18,6 +19,22 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
  * The actual WebSocket transport (send/receive) is handled by the consuming
  * app's WebSocket server (e.g. Laravel Reverb). This class provides the
  * connection bookkeeping and message routing layer.
+ *
+ * ARCH-003 — PHP-FPM LIFECYCLE WARNING:
+ * This class is registered as a singleton in the service container, but that does
+ * NOT mean state persists across HTTP requests in PHP-FPM. PHP-FPM uses a
+ * shared-nothing model: each worker gets its own process, and the singleton is
+ * destroyed at the end of each request. Connection state only persists in
+ * LONG-RUNNING processes:
+ *   - The dedicated bridge WebSocket server (`ai-bridge:serve`)
+ *   - Laravel Octane / Swoole workers
+ *
+ * Under PHP-FPM, hasConnection() / hasBridge() always return false because the
+ * WebSocket server runs in a separate process. BridgeStream correctly accounts
+ * for this by falling back to relayViaHttpApi() when no connection is found.
+ * Do NOT call hasBridge() from a controller expecting in-memory state to reflect
+ * the bridge server's actual connection state — use the /api/status endpoint on
+ * the bridge server instead.
  */
 class BridgeConnectionManager
 {
@@ -27,6 +44,14 @@ class BridgeConnectionManager
      * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>}>
      */
     private array $connections = [];
+
+    /**
+     * Reverse index: connection_id => user_id.
+     * Makes getUserIdByConnectionId() and removeConnectionByConnectionId() O(1).
+     *
+     * @var array<string, string>
+     */
+    private array $connectionIdIndex = [];
 
     /**
      * Map of request_id => pending request metadata.
@@ -80,6 +105,9 @@ class BridgeConnectionManager
             'providers' => $providers,
         ];
 
+        // Maintain reverse index for O(1) lookup by connection_id (ARCH-007)
+        $this->connectionIdIndex[$connectionId] = $userId;
+
         Event::dispatch(new BridgeConnected($userId, $connectionId, time()));
     }
 
@@ -103,6 +131,7 @@ class BridgeConnectionManager
         $this->failPendingRequestsForUser($userId, $reason);
 
         unset($this->connections[$userId]);
+        unset($this->connectionIdIndex[$connectionId]);
 
         Event::dispatch(new BridgeDisconnected($userId, $connectionId, $reason));
     }
@@ -118,12 +147,10 @@ class BridgeConnectionManager
      */
     public function removeConnectionByConnectionId(string $connectionId, ?string $reason = null): void
     {
-        foreach ($this->connections as $userId => $data) {
-            if ($data['connection_id'] === $connectionId) {
-                $this->removeConnection($userId, $reason);
-
-                return;
-            }
+        // O(1) lookup via reverse index (ARCH-007)
+        $userId = $this->connectionIdIndex[$connectionId] ?? null;
+        if ($userId !== null) {
+            $this->removeConnection($userId, $reason);
         }
     }
 
@@ -159,16 +186,12 @@ class BridgeConnectionManager
      * This is useful when a message arrives on a connection that was already
      * authenticated at connect time (e.g. via JWT in URL query param), and the
      * MessageHandler needs to know the user without re-authenticating.
+     *
+     * O(1) via reverse index (ARCH-007).
      */
     public function getUserIdByConnectionId(string $connectionId): ?string
     {
-        foreach ($this->connections as $userId => $data) {
-            if ($data['connection_id'] === $connectionId) {
-                return (string) $userId;
-            }
-        }
-
-        return null;
+        return $this->connectionIdIndex[$connectionId] ?? null;
     }
 
     /**
@@ -224,8 +247,9 @@ class BridgeConnectionManager
 
         $connection = $connectionData['connection'] ?? null;
 
-        // Try direct BridgeConnection first
-        if ($connection instanceof \Tetrix\AiBridge\Server\BridgeConnection) {
+        // Try direct send via the SendableConnection interface (ARCH-012).
+        // BridgeConnection implements this interface; custom transport objects may too.
+        if ($connection instanceof SendableConnection) {
             try {
                 $connection->send(json_encode($payload));
 
@@ -316,14 +340,20 @@ class BridgeConnectionManager
      * Iterates all pending requests, finds those belonging to the given user,
      * dispatches an error event to their StreamHandlers, and removes them.
      */
-    protected function failPendingRequestsForUser(string $userId, ?string $reason = null): void
+    private function failPendingRequestsForUser(string $userId, ?string $reason = null): void
     {
         // When the disconnection reason is 'replaced_by_new_connection', the bridge
         // is reconnecting — use a more specific error code so consumers can differentiate.
         $errorCode = $reason === 'replaced_by_new_connection' ? 'bridge_reconnecting' : 'bridge_disconnected';
         $errorMessage = $reason === 'replaced_by_new_connection'
-            ? 'Bridge is reconnecting. In-flight request was interrupted.'
-            : 'Bridge connection lost';
+            ? 'Bridge is reconnecting — the in-flight request was interrupted. Please resend your message.'
+            : 'Bridge connection lost.';
+
+        // UX-008: In-flight requests are failed immediately when a new bridge connection
+        // replaces the old one. There is currently no grace period. To add one, you would
+        // queue the new connection registration and delay calling removeConnection() until
+        // pending requests complete (or a timeout lapses). This is left as a future
+        // enhancement; for now the error message clearly instructs the user to resend.
 
         foreach ($this->pendingRequests as $requestId => $handler) {
             if ($handler['user_id'] === $userId) {

@@ -51,7 +51,15 @@ class BridgeController extends Controller
 
         $host = config('ai-bridge.server.host', '127.0.0.1');
         $port = (int) config('ai-bridge.server.port', 8085);
-        $websocketUrl = "ws://{$host}:{$port}";
+
+        // SEC-010: Allow operators to override the public WebSocket URL for TLS deployments.
+        // The 'server.public_url' config reflects the externally-visible URL (e.g. wss://...)
+        // rather than the internal bind address. When not set, ws:// is used — this reflects
+        // the internal bind address and may need to be overridden for production TLS proxies.
+        $configuredPublicUrl = config('ai-bridge.server.public_url');
+        $websocketUrl = ! empty($configuredPublicUrl)
+            ? rtrim($configuredPublicUrl, '/')
+            : "ws://{$host}:{$port}";
 
         return response()->json([
             'token' => $token,

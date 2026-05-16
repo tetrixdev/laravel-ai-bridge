@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
 
@@ -40,17 +41,26 @@ class BridgeWebSocketHandler
     /**
      * Called when a new WebSocket connection is opened.
      *
-     * Validates the JWT from the query string. If valid, stores the connection.
+     * Validates the JWT from the Authorization header (preferred) or query string
+     * (fallback for backward compatibility). If valid, stores the connection.
      * If invalid, closes the connection with an error.
+     *
+     * @param  string  $queryString  Raw query string from the WebSocket upgrade URL.
+     * @param  string  $authorizationHeader  Value of the Authorization header, if any.
      */
-    public function onOpen(BridgeConnection $conn, string $queryString): void
+    public function onOpen(BridgeConnection $conn, string $queryString, string $authorizationHeader = ''): void
     {
         $resourceId = $conn->resourceId;
         $connectionId = 'bridge-' . Str::uuid()->toString();
 
-        // Extract token from query string
-        parse_str($queryString, $queryParams);
-        $token = $queryParams['token'] ?? '';
+        // SEC-001: Extract token — prefer the Authorization: Bearer header to keep
+        // the JWT out of server access logs. Fall back to the ?token= query parameter
+        // for backward compatibility with older bridge clients.
+        //
+        // IMPORTANT: New clients should pass the token via the Authorization header:
+        //   Authorization: Bearer <token>
+        // Query-parameter support is maintained as a documented fallback only.
+        $token = $this->extractToken($authorizationHeader, $queryString);
 
         if (empty($token)) {
             Log::info('AI Bridge Server: connection rejected — no token', [
@@ -58,9 +68,9 @@ class BridgeWebSocketHandler
             ]);
 
             $conn->send(json_encode([
-                'type' => 'connection_error',
+                'type' => MessageTypes::CONNECTION_ERROR,
                 'error' => 'missing_token',
-                'message' => 'Connection requires a ?token= query parameter with a valid JWT.',
+                'message' => 'Connection requires an Authorization: Bearer <token> header or a ?token= query parameter.',
             ]));
 
             $conn->close();
@@ -79,7 +89,7 @@ class BridgeWebSocketHandler
             ]);
 
             $conn->send(json_encode([
-                'type' => 'connection_error',
+                'type' => MessageTypes::CONNECTION_ERROR,
                 'error' => $e->errorCode,
                 'message' => $e->getMessage(),
             ]));
@@ -203,5 +213,24 @@ class BridgeWebSocketHandler
     public function getConnectionCount(): int
     {
         return count($this->connections);
+    }
+
+    /**
+     * Extract the JWT from the connection credentials.
+     *
+     * Checks Authorization: Bearer header first (preferred — keeps token out of logs).
+     * Falls back to ?token= query parameter for backward compatibility.
+     */
+    private function extractToken(string $authorizationHeader, string $queryString): string
+    {
+        // Prefer Authorization: Bearer header
+        if (str_starts_with($authorizationHeader, 'Bearer ')) {
+            return substr($authorizationHeader, 7);
+        }
+
+        // Fall back to query parameter
+        parse_str($queryString, $queryParams);
+
+        return $queryParams['token'] ?? '';
     }
 }

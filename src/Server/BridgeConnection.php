@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Server;
 
 use React\Stream\WritableStreamInterface;
+use Tetrix\AiBridge\Contracts\SendableConnection;
 
 /**
  * Lightweight wrapper around a WebSocket connection stream.
@@ -12,8 +13,12 @@ use React\Stream\WritableStreamInterface;
  * Replaces the Ratchet ConnectionInterface with a simple value object that
  * holds the underlying React stream and provides send/close helpers. Each
  * upgraded WebSocket connection gets its own BridgeConnection instance.
+ *
+ * Implements SendableConnection so BridgeConnectionManager can type-hint against
+ * the interface rather than the concrete class, breaking the circular namespace
+ * dependency between the WebSocket and Server namespaces (ARCH-012).
  */
-class BridgeConnection
+class BridgeConnection implements SendableConnection
 {
     public function __construct(
         public readonly int $resourceId,

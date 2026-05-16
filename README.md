@@ -106,12 +106,16 @@ const stream = new AiBridgeStream({
     url: '/ai-bridge/stream/sse',
 });
 
+// SEC: Use textContent instead of innerHTML — AI-generated content is untrusted
+// and must not be inserted as raw HTML. If you need markdown rendering, use
+// a sanitizer such as DOMPurify: el.innerHTML = DOMPurify.sanitize(rendered)
 stream.on('text', (content) => {
-    document.getElementById('messages').innerHTML += content;
+    const el = document.getElementById('messages');
+    el.textContent += content;
 });
 
 stream.on('done', () => {
-    document.getElementById('messages').innerHTML += '<br><br>';
+    document.getElementById('messages').textContent += '\n\n';
     document.getElementById('send-btn').disabled = false;
     document.getElementById('input').disabled = false;
 });
@@ -133,7 +137,9 @@ function send() {
     input.disabled = true;
     document.getElementById('error').style.display = 'none';
 
-    stream.send({ message: input.value, conversation_id: 'conv-1' });
+    // UX: conversation_id must be unique per conversation — use Date.now() or a UUID.
+    // A hardcoded ID causes all conversations to share AI context across users/sessions.
+    stream.send({ message: input.value, conversation_id: 'conv-' + Date.now() });
     input.value = '';
 }
 </script>
@@ -230,10 +236,11 @@ Full reference for `config/ai-bridge.php`:
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
 | `chat_completions.model` | `AI_BRIDGE_MODEL` | `null` | Model name (e.g. `gpt-4o`) |
 | `chat_completions.max_tokens` | `AI_BRIDGE_MAX_TOKENS` | `4096` | Max response tokens |
-| `server.host` | `AI_BRIDGE_SERVER_HOST` | `0.0.0.0` | Bridge WebSocket server bind address |
+| `server.host` | `AI_BRIDGE_SERVER_HOST` | `127.0.0.1` | Bridge WebSocket server bind address (set to `0.0.0.0` in Docker/multi-host setups) |
 | `server.port` | `AI_BRIDGE_SERVER_PORT` | `8085` | Bridge WebSocket server port |
 | `broadcasting.enabled` | `AI_BRIDGE_BROADCAST` | `true` | Enable Reverb broadcasting |
 | `broadcasting.connection` | `AI_BRIDGE_BROADCAST_CONNECTION` | `reverb` | Broadcasting connection name |
+| `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE and broadcast output. Set to `false` only when intentionally displaying AI reasoning to users. |
 
 ## Streaming to Browser
 
@@ -412,8 +419,9 @@ stream.on('done', (usage) => { /* ... */ });
 
 ```html
 <div x-data="chat()" x-init="init()">
-    <div x-html="messages"></div>
-    <input x-model="input" @keydown.enter="send()">
+    <div x-text="messages"></div>
+    <input x-model="input" @keydown.enter="send()" :disabled="isStreaming">
+    <button @click="send()" :disabled="isStreaming">Send</button>
 </div>
 
 <script src="/js/vendor/ai-bridge.js"></script>
@@ -422,6 +430,7 @@ function chat() {
     return {
         messages: '',
         input: '',
+        isStreaming: false,
         stream: null,
         init() {
             this.stream = new AiBridgeStream({
@@ -432,13 +441,24 @@ function chat() {
                 this.messages += content;
             });
             this.stream.on('done', () => {
-                this.messages += '<br><br>';
+                this.messages += '\n\n';
+                this.isStreaming = false;
+            });
+            this.stream.on('cancelled', () => {
+                this.isStreaming = false;
+            });
+            this.stream.on('error', (code, message) => {
+                this.messages += `\n[Error: ${message}]\n`;
+                this.isStreaming = false;
             });
         },
         send() {
+            // UX: Prevent submitting while streaming or with empty input
+            if (this.isStreaming || !this.input.trim()) return;
+            this.isStreaming = true;
             this.stream.send({
                 message: this.input,
-                conversation_id: 'conv-1',
+                conversation_id: 'conv-' + Date.now(),
             });
             this.input = '';
         },

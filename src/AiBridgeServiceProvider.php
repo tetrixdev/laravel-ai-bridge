@@ -39,6 +39,9 @@ class AiBridgeServiceProvider extends ServiceProvider
             return new TokenManager();
         });
 
+        // NOTE (ARCH-003): Registered as singleton but in-memory state only persists in
+        // long-running processes (bridge server, Octane). Under PHP-FPM the singleton is
+        // per-request, so connections are always empty. See BridgeConnectionManager docblock.
         $this->app->singleton(BridgeConnectionManager::class, function () {
             return new BridgeConnectionManager();
         });

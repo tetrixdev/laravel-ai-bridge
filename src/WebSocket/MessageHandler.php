@@ -95,6 +95,28 @@ class MessageHandler
     {
         $protocolVersion = $message['version'] ?? $message['protocol_version'] ?? 'unknown';
 
+        // ARCH-005: Validate protocol version compatibility.
+        // Extract the major version and reject connections with an incompatible major version.
+        // Minor version differences are allowed (additive changes are backward-compatible).
+        $supportedMajorVersion = 0; // Current protocol is v0.1
+        if ($protocolVersion !== 'unknown') {
+            $versionParts = explode('.', ltrim($protocolVersion, 'v'));
+            $clientMajor = (int) ($versionParts[0] ?? 0);
+            if ($clientMajor !== $supportedMajorVersion) {
+                Log::warning('AI Bridge: protocol version mismatch', [
+                    'connection_id' => $connectionId,
+                    'client_version' => $protocolVersion,
+                    'supported_major' => $supportedMajorVersion,
+                ]);
+
+                return [
+                    'type' => MessageTypes::CONNECTION_ERROR,
+                    'error' => 'protocol_version_mismatch',
+                    'message' => "Incompatible protocol version: server supports major version {$supportedMajorVersion}, client sent {$protocolVersion}. Please update your bridge client.",
+                ];
+            }
+        }
+
         // Check if this connection was already authenticated at connect time
         // (e.g. by BridgeWebSocketServer via ?token= URL param)
         $existingUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
@@ -264,11 +286,14 @@ class MessageHandler
             return null;
         }
 
-        // SEC-009: Verify the connection sending this event owns the pending request
-        $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
-        $requestUserId = $this->connectionManager->getPendingRequestUserId($requestId);
-        if ($senderUserId !== null && $requestUserId !== null && $senderUserId !== $requestUserId) {
-            Log::warning('AI Bridge: stream event from wrong user', [
+        // SEC-004/SEC-009: Verify the connection sending this event owns the pending request.
+        // Fail CLOSED: reject the event if the sender is unregistered (userId=null) or
+        // if the sender does not own the pending request. This prevents unregistered or
+        // partially-authenticated connections from injecting events into any request.
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+            $requestUserId = $this->connectionManager->getPendingRequestUserId($requestId);
+            Log::warning('AI Bridge: stream event from wrong or unregistered user, discarding', [
                 'request_id' => $requestId,
                 'sender_user_id' => $senderUserId,
                 'request_user_id' => $requestUserId,
@@ -312,6 +337,17 @@ class MessageHandler
     {
         $requestId = $message['request_id'] ?? '';
 
+        // SEC-003: Apply the same ownership check as handleStreamEnvelope() to prevent
+        // a bridge client from executing tools registered for another user's request.
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: tool_call from wrong user (top-level), discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
+
         return $this->executeToolCall(
             $requestId,
             $message['data']['tool_name'] ?? $message['tool_name'] ?? '',
@@ -345,10 +381,8 @@ class MessageHandler
             ];
         }
 
-        // Dispatch to the StreamHandler's tool call callbacks
-        $handler->dispatchToolCall($toolName, $params, $callId);
-
-        // Check for empty tool name
+        // BL-003: Validate tool_name before dispatching to callbacks so consuming-app
+        // callbacks are never invoked with an empty tool name.
         if (empty($toolName)) {
             Log::warning('AI Bridge: tool call received with empty tool_name', [
                 'request_id' => $requestId,
@@ -361,6 +395,9 @@ class MessageHandler
                 'error' => 'Tool call received with empty tool_name — check the bridge client is sending a valid tool_name field.',
             ];
         }
+
+        // Dispatch to the StreamHandler's tool call callbacks
+        $handler->dispatchToolCall($toolName, $params, $callId);
 
         // Execute the tool if registered
         if ($this->toolRegistry->has($toolName)) {
@@ -425,16 +462,29 @@ class MessageHandler
         $usage = $data['usage'] ?? null;
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
-        if ($handler) {
-            $handler->dispatchDone($usage);
-            $this->connectionManager->removePendingRequest($requestId);
-        } else {
+        if (! $handler) {
             Log::debug('AI Bridge: done event received for unknown request (expected in PHP-FPM relay mode)', [
                 'connection_id' => $connectionId,
                 'request_id' => $requestId,
                 'usage' => $usage,
             ]);
+
+            return null;
         }
+
+        // BL-007/SEC-004: Apply ownership check to done events so a bridge cannot
+        // terminate another user's request by sending a spoofed done envelope.
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: done event from wrong or unregistered user, discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
+
+        $handler->dispatchDone($usage);
+        $this->connectionManager->removePendingRequest($requestId);
 
         return null;
     }
@@ -458,10 +508,23 @@ class MessageHandler
         ]);
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
-        if ($handler) {
-            $handler->dispatchError($code, $errorMessage);
-            $this->connectionManager->removePendingRequest($requestId);
+        if (! $handler) {
+            return null;
         }
+
+        // BL-007/SEC-004: Apply ownership check to error events so a bridge cannot
+        // terminate another user's request by sending a spoofed error envelope.
+        if (! $this->verifySenderOwnsRequest($connectionId, $requestId)) {
+            Log::warning('AI Bridge: error event from wrong or unregistered user, discarding', [
+                'connection_id' => $connectionId,
+                'request_id' => $requestId,
+            ]);
+
+            return null;
+        }
+
+        $handler->dispatchError($code, $errorMessage);
+        $this->connectionManager->removePendingRequest($requestId);
 
         return null;
     }
@@ -514,6 +577,32 @@ class MessageHandler
         }
 
         return null;
+    }
+
+    /**
+     * Verify that the connection identified by $connectionId owns the pending request.
+     *
+     * Returns true only when:
+     *  - The connection is registered in BridgeConnectionManager (userId is non-null), AND
+     *  - The pending request has a recorded owner (requestUserId is non-null), AND
+     *  - Both userIds match.
+     *
+     * Fails CLOSED: any null value (unregistered connection or unknown request owner)
+     * causes rejection rather than allowing the event through. This prevents partially-
+     * authenticated connections from injecting events into any pending request.
+     *
+     * @param  string  $connectionId  The connection sending the event.
+     * @param  string  $requestId     The request_id the event targets.
+     */
+    private function verifySenderOwnsRequest(string $connectionId, string $requestId): bool
+    {
+        $senderUserId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+        $requestUserId = $this->connectionManager->getPendingRequestUserId($requestId);
+
+        // Both must be non-null and must match
+        return $senderUserId !== null
+            && $requestUserId !== null
+            && $senderUserId === $requestUserId;
     }
 
     /**

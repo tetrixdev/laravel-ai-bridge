@@ -48,12 +48,24 @@ class TokenManager
             );
         }
 
+        $resolvedTtl = $ttl ?? $this->getTtl();
+
+        // BL-008: Guard against zero or negative TTL, which produces immediately-expired
+        // tokens with no error. This typically happens when AI_BRIDGE_TOKEN_TTL is set
+        // to null in .env, causing getTtl() to return 0. Fail fast with a clear message.
+        if ($resolvedTtl <= 0) {
+            throw new InvalidArgumentException(
+                'Token TTL must be a positive integer in seconds. Got: '.$resolvedTtl.'. '
+                .'Check that AI_BRIDGE_TOKEN_TTL is set to a positive integer in your .env file (default: 86400).'
+            );
+        }
+
         $now = time();
 
         $payload = array_merge($claims, [
             'sub' => (string) $userId,
             'iat' => $now,
-            'exp' => $now + ($ttl ?? $this->getTtl()),
+            'exp' => $now + $resolvedTtl,
             'jti' => Str::uuid()->toString(),
             'iss' => 'ai-bridge',
         ]);
@@ -71,12 +83,17 @@ class TokenManager
      * a new token.
      *
      * @param  string  $token  The JWT to validate.
+     * @param  string|null  $expectedScope  When non-null, the token's 'scope' claim must
+     *                                      match this value exactly. Pass 'internal_relay'
+     *                                      to restrict to relay-only tokens, or null to
+     *                                      accept any scope (user-facing bridge tokens have
+     *                                      no scope claim).
      * @return object  The decoded token payload.
      *
      * @throws InvalidArgumentException If the token secret is not configured.
-     * @throws TokenValidationException If the token is invalid or expired.
+     * @throws TokenValidationException If the token is invalid, expired, or has the wrong scope.
      */
-    public function validate(string $token): object
+    public function validate(string $token, ?string $expectedScope = null): object
     {
         $this->ensureSecretConfigured();
 
@@ -97,6 +114,30 @@ class TokenManager
 
         if (! isset($decoded->iss) || $decoded->iss !== 'ai-bridge') {
             throw new TokenValidationException('Token has an invalid issuer.', 'token_invalid_issuer');
+        }
+
+        // SEC-002: Enforce scope when requested.
+        // Internal relay tokens have scope='internal_relay'; user-facing bridge tokens
+        // have no scope claim. Passing an expectedScope prevents cross-class token use
+        // (e.g. an intercepted relay token cannot authenticate a user WebSocket session).
+        if ($expectedScope !== null) {
+            $actualScope = $decoded->scope ?? null;
+            if ($actualScope !== $expectedScope) {
+                throw new TokenValidationException(
+                    "Token scope mismatch: expected '{$expectedScope}', got '".($actualScope ?? 'none')."'.",
+                    'token_wrong_scope'
+                );
+            }
+        } else {
+            // When no specific scope is required (user-facing auth), reject internal tokens
+            // to prevent relay tokens from authenticating bridge WebSocket connections.
+            $actualScope = $decoded->scope ?? null;
+            if ($actualScope === 'internal_relay') {
+                throw new TokenValidationException(
+                    "Internal relay tokens may not be used for user-facing bridge authentication.",
+                    'token_wrong_scope'
+                );
+            }
         }
 
         return $decoded;

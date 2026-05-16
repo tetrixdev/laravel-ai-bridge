@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Streaming;
 
 use Closure;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
@@ -240,17 +241,7 @@ class StreamHandler
         }
 
         $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex);
-
-        foreach ($this->blockStartCallbacks as $callback) {
-            try {
-                $callback($event);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in blockStart callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->blockStartCallbacks, [$event], 'blockStart');
     }
 
     /**
@@ -265,17 +256,7 @@ class StreamHandler
         }
 
         $event = StreamEvent::blockDelta($this->requestId, $blockType, $blockIndex, $content);
-
-        foreach ($this->blockDeltaCallbacks as $callback) {
-            try {
-                $callback($event);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in blockDelta callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->blockDeltaCallbacks, [$event], 'blockDelta');
     }
 
     /**
@@ -290,17 +271,7 @@ class StreamHandler
         }
 
         $event = StreamEvent::blockStop($this->requestId, $blockType, $blockIndex);
-
-        foreach ($this->blockStopCallbacks as $callback) {
-            try {
-                $callback($event);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in blockStop callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->blockStopCallbacks, [$event], 'blockStop');
     }
 
     /**
@@ -314,17 +285,7 @@ class StreamHandler
             return;
         }
 
-        foreach ($this->toolCallCallbacks as $callback) {
-            try {
-                $callback($toolName, $params, $callId);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in toolCall callback', [
-                    'request_id' => $this->requestId,
-                    'tool' => $toolName,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->toolCallCallbacks, [$toolName, $params, $callId], 'toolCall');
     }
 
     /**
@@ -341,16 +302,7 @@ class StreamHandler
         }
         $this->terminated = true;
 
-        foreach ($this->doneCallbacks as $callback) {
-            try {
-                $callback($usage);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in done callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->doneCallbacks, [$usage], 'done');
 
         $this->dispatchStreamCompleted(true, $usage);
 
@@ -371,16 +323,7 @@ class StreamHandler
         }
         $this->terminated = true;
 
-        foreach ($this->errorCallbacks as $callback) {
-            try {
-                $callback($code, $message);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in error callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->errorCallbacks, [$code, $message], 'error');
 
         $this->dispatchStreamCompleted(false, null, "{$code}: {$message}");
 
@@ -403,16 +346,7 @@ class StreamHandler
             'tool_call_id' => $toolCallId,
         ]);
 
-        foreach ($this->toolResultCallbacks as $callback) {
-            try {
-                $callback($toolCallId, $result);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in toolResult callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->toolResultCallbacks, [$toolCallId, $result], 'toolResult');
     }
 
     /**
@@ -430,16 +364,7 @@ class StreamHandler
         }
         $this->terminated = true;
 
-        foreach ($this->cancelledCallbacks as $callback) {
-            try {
-                $callback($reason);
-            } catch (\Throwable $e) {
-                Log::error('AI Bridge: exception in cancelled callback', [
-                    'request_id' => $this->requestId,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
+        $this->dispatchCallbacks($this->cancelledCallbacks, [$reason], 'cancelled');
 
         $this->dispatchStreamCompleted(false, null, "cancelled: {$reason}");
 
@@ -460,7 +385,7 @@ class StreamHandler
             MessageTypes::TOOL_CALL => $this->dispatchToolCall(
                 $event->data['tool_name'],
                 $event->data['parameters'] ?? [],
-                $event->data['call_id'] ?? $event->data['tool_call_id'] ?? '',
+                $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
             ),
             MessageTypes::TOOL_RESULT => $this->dispatchToolResult(
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
@@ -517,6 +442,32 @@ class StreamHandler
     }
 
     /**
+     * Dispatch a set of callbacks with the given arguments.
+     *
+     * Centralizes the try/catch/Log::error pattern that was previously duplicated
+     * across all eight public dispatch methods (EFF-004). Each callback is invoked
+     * with the given $args, and any Throwable is caught and logged with the
+     * callback type name for easy identification.
+     *
+     * @param  Closure[]  $callbacks  The array of callbacks to invoke.
+     * @param  array<mixed>  $args    Arguments to pass to each callback.
+     * @param  string  $callbackType  Human-readable type name for log messages.
+     */
+    private function dispatchCallbacks(array $callbacks, array $args, string $callbackType): void
+    {
+        foreach ($callbacks as $callback) {
+            try {
+                $callback(...$args);
+            } catch (\Throwable $e) {
+                Log::error("AI Bridge: exception in {$callbackType} callback", [
+                    'request_id' => $this->requestId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+    }
+
+    /**
      * Dispatch the StreamCompleted Laravel event for logging/analytics.
      */
     private function dispatchStreamCompleted(bool $success, ?array $usage = null, ?string $error = null): void
@@ -531,7 +482,7 @@ class StreamHandler
         $mode = $this->mode ?? ProviderMode::Byok;
 
         try {
-            event(new StreamCompleted(
+            Event::dispatch(new StreamCompleted(
                 conversationId: $this->conversationId,
                 requestId: $this->requestId,
                 mode: $mode,

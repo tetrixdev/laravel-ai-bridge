@@ -17,6 +17,8 @@ jobs:
         include:
           - php: '8.2'
             laravel: '11.*'
+          - php: '8.2'
+            laravel: '12.*'
           - php: '8.3'
             laravel: '11.*'
           - php: '8.3'
@@ -54,4 +56,4 @@ jobs:
           php-version: '8.3'
 
       - name: Check PHP syntax
-        run: find src -name "*.php" -exec php -l {} \; | grep -v "No syntax errors"
+        run: find src -name "*.php" -exec php -l {} \;

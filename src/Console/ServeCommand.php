@@ -24,7 +24,7 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
 class ServeCommand extends Command
 {
     protected $signature = 'ai-bridge:serve
-        {--host= : Bind address (default: from config or 0.0.0.0)}
+        {--host= : Bind address (default: from config server.host, which defaults to 127.0.0.1)}
         {--port= : Port number (default: from config or 8085)}';
 
     protected $description = 'Start the AI Bridge WebSocket server for CLI bridge connections';
@@ -34,7 +34,9 @@ class ServeCommand extends Command
         MessageHandler $messageHandler,
         TokenManager $tokenManager,
     ): int {
-        $host = $this->option('host') ?? config('ai-bridge.server.host', '0.0.0.0');
+        // ARCH-013: Use the config default (127.0.0.1) consistently. 0.0.0.0 is an
+        // opt-in for Docker/multi-host deployments via AI_BRIDGE_SERVER_HOST in .env.
+        $host = $this->option('host') ?? config('ai-bridge.server.host', '127.0.0.1');
         $port = (int) ($this->option('port') ?? config('ai-bridge.server.port', 8085));
 
         $server = new BridgeWebSocketServer(

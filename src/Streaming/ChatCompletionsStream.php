@@ -122,7 +122,18 @@ class ChatCompletionsStream implements StreamableProvider
     {
         $this->cancelled = false;
 
-        $url = rtrim($this->endpoint, '/').'/v1/chat/completions';
+        // Strip any trailing /v1 from the endpoint to prevent double /v1/v1/... paths.
+        // A common misconfiguration is setting the endpoint to https://api.openai.com/v1
+        // instead of https://api.openai.com — we detect and correct this silently so the
+        // request still succeeds, and log a warning so the operator can fix their config.
+        $endpoint = rtrim($this->endpoint, '/');
+        if (str_ends_with($endpoint, '/v1')) {
+            Log::warning('AI Bridge: endpoint already contains /v1 suffix — stripping it to avoid double /v1/v1 path. Update AI_BRIDGE_ENDPOINT to omit the trailing /v1.', [
+                'endpoint' => $endpoint,
+            ]);
+            $endpoint = substr($endpoint, 0, -3);
+        }
+        $url = $endpoint.'/v1/chat/completions';
         $body = $this->buildRequestBody();
 
         try {
@@ -353,7 +364,9 @@ class ChatCompletionsStream implements StreamableProvider
         }
 
         if ($this->cancelled) {
-            $this->streamHandler->dispatchError('cancelled', 'Stream was cancelled by the user.');
+            // CONS-001: Use dispatchCancelled() so onCancelled callbacks fire correctly,
+            // matching BridgeStream's behavior and the documented API contract.
+            $this->streamHandler->dispatchCancelled('Stream was cancelled by the user.');
         } else {
             // Stream ended without [DONE] — likely a connection drop or upstream error.
             // Dispatch error so SSE/Reverb consumers don't hang indefinitely.

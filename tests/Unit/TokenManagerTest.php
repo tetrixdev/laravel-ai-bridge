@@ -15,7 +15,6 @@ use Tetrix\AiBridge\Tests\TestCase;
 |
 */
 
-uses(TestCase::class);
 
 beforeEach(function () {
     $this->tokenManager = app(TokenManager::class);
@@ -45,8 +44,18 @@ test('validate() decodes a valid token correctly', function () {
 });
 
 test('validate() rejects expired tokens', function () {
-    // Generate a token with -1 second TTL (already expired)
-    $token = $this->tokenManager->generate(1, [], -1);
+    // BL-008: generate() now guards against non-positive TTL, so we must forge
+    // an already-expired token directly using the Firebase JWT library.
+    $secret = config('ai-bridge.token.secret');
+    $now = time();
+    $payload = [
+        'sub' => '1',
+        'iat' => $now - 10,
+        'exp' => $now - 5, // expired 5 seconds ago
+        'jti' => 'test-jti',
+        'iss' => 'ai-bridge',
+    ];
+    $token = \Firebase\JWT\JWT::encode($payload, $secret, 'HS256');
 
     $this->tokenManager->validate($token);
 })->throws(TokenValidationException::class, 'Token has expired.');
@@ -72,7 +81,17 @@ test('isValid() returns false for an invalid token without throwing', function (
 });
 
 test('isValid() returns false for an expired token without throwing', function () {
-    $token = $this->tokenManager->generate(1, [], -1);
+    // Forge an expired token directly (see generate() BL-008 guard note above)
+    $secret = config('ai-bridge.token.secret');
+    $now = time();
+    $payload = [
+        'sub' => '1',
+        'iat' => $now - 10,
+        'exp' => $now - 5,
+        'jti' => 'test-jti',
+        'iss' => 'ai-bridge',
+    ];
+    $token = \Firebase\JWT\JWT::encode($payload, $secret, 'HS256');
 
     expect($this->tokenManager->isValid($token))->toBeFalse();
 });
@@ -133,3 +152,64 @@ test('getUserId() extracts user ID from valid token', function () {
 
     expect($this->tokenManager->getUserId($token))->toBe('user-abc');
 });
+
+// --- SEC-002: Scope validation ---
+
+test('validate() rejects internal_relay token when no expectedScope provided (SEC-002)', function () {
+    // An internal_relay token must not authenticate a user bridge connection
+    $token = $this->tokenManager->generate(1, ['scope' => 'internal_relay']);
+
+    try {
+        $this->tokenManager->validate($token);
+        $this->fail('Expected TokenValidationException');
+    } catch (\Tetrix\AiBridge\Auth\TokenValidationException $e) {
+        expect($e->errorCode)->toBe('token_wrong_scope');
+    }
+});
+
+test('validate() accepts token with internal_relay scope when expectedScope matches (SEC-002)', function () {
+    $token = $this->tokenManager->generate(1, ['scope' => 'internal_relay']);
+
+    $decoded = $this->tokenManager->validate($token, 'internal_relay');
+
+    expect($decoded->sub)->toBe('1');
+    expect($decoded->scope)->toBe('internal_relay');
+});
+
+test('validate() rejects user token when internal_relay scope required (SEC-002)', function () {
+    // A regular user token (no scope claim) must not be accepted as an internal relay token
+    $token = $this->tokenManager->generate(1);
+
+    try {
+        $this->tokenManager->validate($token, 'internal_relay');
+        $this->fail('Expected TokenValidationException');
+    } catch (\Tetrix\AiBridge\Auth\TokenValidationException $e) {
+        expect($e->errorCode)->toBe('token_wrong_scope');
+    }
+});
+
+test('validate() accepts scopeless user token when no expectedScope provided (SEC-002)', function () {
+    // Normal user-facing bridge tokens have no scope claim — this should pass
+    $token = $this->tokenManager->generate(42);
+
+    $decoded = $this->tokenManager->validate($token);
+
+    expect($decoded->sub)->toBe('42');
+    expect(isset($decoded->scope))->toBeFalse();
+});
+
+// --- BL-008: Zero TTL guard ---
+
+test('generate() throws InvalidArgumentException for zero TTL (BL-008)', function () {
+    $this->tokenManager->generate(1, [], 0);
+})->throws(InvalidArgumentException::class, 'Token TTL must be a positive integer');
+
+test('generate() throws InvalidArgumentException for negative TTL (BL-008)', function () {
+    $this->tokenManager->generate(1, [], -100);
+})->throws(InvalidArgumentException::class, 'Token TTL must be a positive integer');
+
+test('generate() throws when config TTL is zero (BL-008)', function () {
+    config(['ai-bridge.token.ttl' => 0]);
+
+    $this->tokenManager->generate(1);
+})->throws(InvalidArgumentException::class, 'Token TTL must be a positive integer');

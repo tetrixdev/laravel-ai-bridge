@@ -113,17 +113,34 @@ class StreamController extends Controller
             ], 422);
         }
 
-        $conversationId = $request->input('conversation_id', 'conv-' . uniqid());
+        $conversationId = $request->input('conversation_id', 'conv-' . \Illuminate\Support\Str::uuid());
 
         $mode = config('ai-bridge.mode');
         $isManagedMode = $mode === 'managed';
         $options = $this->sanitizeOptions($request);
+
+        // UX-007: Detect malformed JSON in options field (set by sanitizeOptions())
+        if (isset($options['__malformed_options_json'])) {
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'The options field could not be parsed as JSON. Ensure it is valid JSON.',
+            ], 422);
+        }
 
         // Only allow per-request overrides in non-managed mode.
         // In managed mode, the app controls AI behavior and cost.
         if (! $isManagedMode) {
             $systemPrompt = $request->input('system_prompt', '');
             if (! empty($systemPrompt)) {
+                // SEC-012: Enforce a maximum length to prevent excessively large prompts
+                // from consuming disproportionate API tokens at the user's expense.
+                $maxSystemPromptLength = (int) config('ai-bridge.streaming.max_system_prompt_length', 10000);
+                if (mb_strlen($systemPrompt) > $maxSystemPromptLength) {
+                    return response()->json([
+                        'error' => 'validation_error',
+                        'message' => "The system_prompt field must not exceed {$maxSystemPromptLength} characters.",
+                    ], 422);
+                }
                 $options['system_prompt'] = $systemPrompt;
             }
 
@@ -138,32 +155,46 @@ class StreamController extends Controller
     /**
      * Parse and sanitize the options from the request.
      *
-     * Strips fields that must not be controlled by the client:
-     * - endpoint, api_key: Would allow SSRF / credential override.
-     * - mode: Would allow switching provider mode.
-     * - user_id: Must come from auth, not client input.
+     * Uses a whitelist approach: only explicitly permitted keys are accepted.
+     * This is safer than a blacklist because new sensitive options added in the
+     * future are blocked by default unless the developer explicitly permits them.
      *
-     * In managed mode, also strips cost/behavior fields (model, max_tokens,
-     * system_prompt, messages) since the application controls AI behavior.
+     * Permitted client-controllable options (non-managed mode):
+     *   temperature, max_tokens, model, messages, stream_options
+     *
+     * In managed mode, the application controls AI behavior and cost, so only
+     * non-cost, non-behavior options pass through (currently none beyond the base set).
      *
      * @return array<string, mixed>
      */
     private function sanitizeOptions(Request $request): array
     {
-        $options = $request->input('options', []);
-        if (is_string($options)) {
-            $options = json_decode($options, true) ?? [];
+        $raw = $request->input('options', []);
+        if (is_string($raw)) {
+            $decoded = json_decode($raw, true);
+            if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+                // UX-007: Malformed JSON in options field — fail fast with validation error
+                // rather than silently discarding the options. Callers can catch this
+                // by checking for a 422 response.
+                return ['__malformed_options_json' => true];
+            }
+            $raw = is_array($decoded) ? $decoded : [];
         }
 
-        // Always strip security-sensitive fields
-        unset($options['endpoint'], $options['api_key'], $options['mode'], $options['user_id']);
+        if (! is_array($raw)) {
+            $raw = [];
+        }
 
-        // In managed mode, also strip fields that control cost and AI behavior.
-        // The application bears the cost, so clients must not override model, tokens, etc.
         if (config('ai-bridge.mode') === 'managed') {
-            unset($options['model'], $options['max_tokens'], $options['system_prompt'], $options['messages']);
+            // In managed mode, the app controls AI behavior and bears the cost.
+            // No client-supplied options pass through.
+            return [];
         }
 
-        return $options;
+        // ARCH-009: Whitelist of client-permitted option keys.
+        // Add new keys here intentionally — any key not in this list is silently dropped.
+        $allowed = ['temperature', 'max_tokens', 'model', 'messages', 'stream_options'];
+
+        return array_intersect_key($raw, array_flip($allowed));
     }
 }

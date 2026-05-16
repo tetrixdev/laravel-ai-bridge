@@ -99,6 +99,13 @@ return [
         // Security: When running the bridge server on a separate host, use HTTPS to
         // protect internal relay tokens in transit.
         'relay_url' => env('AI_BRIDGE_RELAY_URL'),
+
+        // SEC-010: The public-facing WebSocket URL returned in the token response.
+        // Set this when the bridge server is behind a TLS-terminating reverse proxy
+        // (e.g. nginx) so clients receive a wss:// URL instead of the internal ws:// address.
+        // If null (default), the token endpoint returns ws://{server.host}:{server.port}.
+        // Example: AI_BRIDGE_PUBLIC_URL=wss://bridge.example.com
+        'public_url' => env('AI_BRIDGE_PUBLIC_URL'),
     ],
 
     /*
@@ -125,8 +132,15 @@ return [
 
     'streaming' => [
         // When true, thinking/reasoning block events are suppressed from SSE and
-        // broadcast outputs. Useful when internal AI reasoning should not be
-        // exposed to end users.
-        'suppress_thinking_blocks' => env('AI_BRIDGE_SUPPRESS_THINKING', false),
+        // broadcast outputs. Defaults to TRUE to prevent AI chain-of-thought reasoning
+        // from being accidentally exposed to end users — set to false only when you
+        // intentionally want to display AI reasoning in your UI (e.g. a debug view).
+        // UX-005: Defaulting to false would expose AI internal monologue to all users
+        // on every model that supports extended thinking, without any developer action.
+        'suppress_thinking_blocks' => env('AI_BRIDGE_SUPPRESS_THINKING', true),
+
+        // SEC-012: Maximum length of the user-supplied system_prompt field in non-managed mode.
+        // Prevents excessively large prompts from consuming disproportionate API tokens.
+        'max_system_prompt_length' => env('AI_BRIDGE_MAX_SYSTEM_PROMPT_LENGTH', 10000),
     ],
 ];

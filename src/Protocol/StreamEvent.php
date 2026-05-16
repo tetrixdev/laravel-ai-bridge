@@ -60,13 +60,18 @@ final class StreamEvent
 
     /**
      * Create a tool_call event.
+     *
+     * The canonical key for the tool call ID is 'tool_call_id'. The legacy 'call_id'
+     * key is retained by dispatchEvent() as a read fallback for backward compatibility
+     * with externally-sourced events, but new events created by this factory always
+     * use 'tool_call_id'.
      */
     public static function toolCall(string $requestId, string $toolName, array $params, string $callId): self
     {
         return new self($requestId, MessageTypes::TOOL_CALL, [
             'tool_name' => $toolName,
             'parameters' => $params,
-            'call_id' => $callId,
+            'tool_call_id' => $callId,
         ]);
     }
 

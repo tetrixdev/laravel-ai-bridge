@@ -43,9 +43,17 @@ class ValidateBridgeToken
         try {
             $decoded = $this->tokenManager->validate($token);
         } catch (TokenValidationException $e) {
-            return response()->json([
-                'error' => $e->errorCode,
+            // SEC-009 (nitpick): Collapse all token validation failures to a single
+            // generic error code in the HTTP response to limit oracle information.
+            // The detailed error code is preserved in server-side logs for debugging.
+            \Illuminate\Support\Facades\Log::info('AI Bridge: token validation failed', [
+                'error_code' => $e->errorCode,
                 'message' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'error' => 'token_invalid',
+                'message' => 'Bridge token validation failed.',
             ], 401);
         }
 

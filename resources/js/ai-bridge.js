@@ -204,10 +204,24 @@ class AiBridgeStream {
     }
 
     /** @private */
+    _startReverbInactivityTimer() {
+        // ARCH-014: Add inactivity timer for Reverb mode, matching the SSE mode behavior.
+        // If no event arrives within the inactivity window (channel drop, server restart),
+        // emit an error so the UI can show feedback instead of waiting indefinitely.
+        this._clearInactivityTimer();
+        this._inactivityTimer = setTimeout(() => {
+            if (this._generation > 0) {
+                this._generation++;
+                this._emit('error', 'inactivity_timeout', 'No events received within the inactivity timeout period.');
+            }
+        }, this._inactivityTimeout);
+    }
+
+    /** @private */
     async _sendBroadcast(data) {
-        // Don't increment generation for broadcast — events arrive via the separate
-        // Reverb listener, not via this HTTP response. The generation was already
-        // set when the Reverb listener was attached.
+        // Increment generation for broadcast so each send creates a new "expected" generation.
+        // This allows the inactivity timer to track the current request correctly.
+        const gen = ++this._generation;
 
         try {
             const response = await fetch(this.broadcastUrl, {
@@ -221,11 +235,20 @@ class AiBridgeStream {
             });
 
             if (!response.ok) {
-                if (this._generation < 1) return;
+                // UX-009: Always emit the error regardless of generation count.
+                if (gen !== this._generation) return;
                 this._generation++;
-                this._emit('error', 'http_error', `HTTP ${response.status}`);
+                const errorCode = this._mapHttpStatus(response.status);
+                this._emit('error', errorCode, `HTTP ${response.status}`);
+            } else {
+                // POST accepted — start the inactivity timer (ARCH-014).
+                // If no Reverb events arrive within the timeout, emit an error.
+                if (gen === this._generation) {
+                    this._startReverbInactivityTimer();
+                }
             }
         } catch (err) {
+            if (gen !== this._generation) return;
             this._generation++;
             this._emit('error', 'network_error', err.message);
         }
@@ -239,6 +262,15 @@ class AiBridgeStream {
         window.Echo.private(this.channel)
             .listen('.ai.stream', (e) => {
                 this._handleEvent(e, this._generation);
+            })
+            // UX-010: Handle channel authorization failures (session expiry, policy changes).
+            // Without this handler, a 403 from the broadcasting auth endpoint is completely
+            // silent — the user submits a message and receives no response, no error, and
+            // no indication of whether to retry.
+            .error((error) => {
+                this._generation++;
+                this._clearInactivityTimer();
+                this._emit('error', 'channel_auth_failed', 'Channel authorization failed. Please refresh the page.');
             });
     }
 

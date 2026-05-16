@@ -16,7 +16,6 @@ use Tetrix\AiBridge\Tests\TestCase;
 |
 */
 
-uses(TestCase::class);
 
 test('ProviderMode enum rejects invalid mode string', function () {
     $result = ProviderMode::tryFrom('invalid_mode');
@@ -82,8 +81,18 @@ test('non-empty route_middleware does not trigger warning', function () {
 
 test('default config has sensible defaults', function () {
     expect(config('ai-bridge.mode'))->toBe('byok');
-    expect(config('ai-bridge.token.ttl'))->toBe(3600); // Set in test environment
+    // NOTE (BL-012): The test environment overrides token.ttl to 3600 in TestCase.php.
+    // The package default is 86400 (24h). This test verifies the test-env config, not
+    // the package default. The assertion reflects the TestCase override intentionally.
+    expect(config('ai-bridge.token.ttl'))->toBe(3600); // TestCase override, not the package default (86400)
     expect(config('ai-bridge.route_middleware'))->toBe(['auth']);
+});
+
+test('package config file specifies 86400 as the TTL env default', function () {
+    // Read the raw config file source to confirm the documented default is 86400.
+    // We cannot call env() here without the application, but we can grep the source.
+    $configSource = file_get_contents(__DIR__ . '/../../config/ai-bridge.php');
+    expect($configSource)->toContain("AI_BRIDGE_TOKEN_TTL', 86400");
 });
 
 test('broadcasting config defaults', function () {
