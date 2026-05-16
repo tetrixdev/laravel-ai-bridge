@@ -367,12 +367,12 @@ class BridgeStream implements StreamableProvider
             // arrive asynchronously via WebSocket — without a [DONE] sentinel the
             // browser reconnects indefinitely. Dispatch an error so the SSE
             // response closes cleanly. Skipped in broadcasting mode, where the
-            // StreamHandler is not wired to an SSE sink.
-            Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
-                'request_id' => $payload['request_id'] ?? '',
-            ]);
-
+            // serve process registers a RelayStream that broadcasts the events.
             if (! $this->broadcastingMode) {
+                Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
+                    'request_id' => $payload['request_id'] ?? '',
+                ]);
+
                 $this->streamHandler->dispatchError(
                     'bridge_sse_incompatible',
                     'SSE mode is not supported for bridge mode under PHP-FPM. Use broadcasting (Reverb) instead.'

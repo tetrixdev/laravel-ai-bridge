@@ -80,8 +80,9 @@ class StreamHandler
 
     public function __construct(
         private readonly StreamableProvider $provider,
+        ?string $requestId = null,
     ) {
-        $this->requestId = Str::uuid()->toString();
+        $this->requestId = $requestId ?? Str::uuid()->toString();
     }
 
     /**

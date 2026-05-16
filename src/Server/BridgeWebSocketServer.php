@@ -539,6 +539,12 @@ class BridgeWebSocketServer
         // Forward tools from relay body so the bridge knows which tools are available
         $payload['tools'] = $body['tools'] ?? [];
 
+        // Register the relayed request as pending so incoming tool calls and
+        // stream events from the bridge can be verified and broadcast back to
+        // the browser. Register BEFORE sending so a fast bridge reply cannot
+        // race ahead of the registration.
+        $this->messageHandler->registerRelayedRequest($requestId, $userId, (string) $conversationId);
+
         $sent = $this->connectionManager->sendToUser($userId, $payload);
 
         if (! $sent) {

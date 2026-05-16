@@ -10,6 +10,7 @@ use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\Enums\BlockType;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Streaming\RelayStream;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 
 /**
@@ -30,6 +31,36 @@ class MessageHandler
         private readonly TokenManager $tokenManager,
         private readonly ToolRegistry $toolRegistry,
     ) {}
+
+    /**
+     * Register a relayed (PHP-FPM) request as pending in the serve process.
+     *
+     * Requests issued under PHP-FPM are relayed to the bridge via the internal
+     * HTTP API; their response events arrive at this separate serve process. The
+     * PHP-FPM worker that issued the request never sees those events, so without
+     * a pending request here tool calls would be rejected (no recorded owner) and
+     * stream events would be dropped ("unknown request").
+     *
+     * This wires a RelayStream whose StreamHandler re-broadcasts every event via
+     * AiStreamEvent on "user.{userId}.conversation.{conversationId}" — the same
+     * channel convention StreamController::broadcast() uses — so the browser
+     * receives stream events and tool calls verify+execute against a real owner.
+     *
+     * Cleanup is handled by the existing done/error/cancelled handlers, which
+     * already call removePendingRequest().
+     */
+    public function registerRelayedRequest(string $requestId, string $userId, string $conversationId): void
+    {
+        $channel = "user.{$userId}.conversation.{$conversationId}";
+
+        $relay = new RelayStream($requestId, $channel, $conversationId);
+
+        $this->connectionManager->registerPendingRequest(
+            $requestId,
+            $relay->getStreamHandler(),
+            $userId,
+        );
+    }
 
     /**
      * Handle a raw incoming WebSocket message.

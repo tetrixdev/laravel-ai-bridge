@@ -390,6 +390,17 @@ test('requestId is a UUID string', function () {
     expect($handler->requestId)->toMatch('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i');
 });
 
+test('constructor honors an explicit requestId', function () {
+    $provider = Mockery::mock(StreamableProvider::class);
+    $provider->shouldReceive('start')->byDefault();
+    $provider->shouldReceive('cancel')->byDefault();
+    $provider->shouldReceive('markCompleted')->byDefault();
+
+    $handler = new StreamHandler($provider, 'req-explicit-123');
+
+    expect($handler->requestId)->toBe('req-explicit-123');
+});
+
 test('callback exceptions are caught and do not crash dispatch', function () {
     $handler = createStreamHandler();
     $secondFired = false;

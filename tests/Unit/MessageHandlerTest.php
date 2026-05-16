@@ -568,3 +568,44 @@ test('MessageTypes::isValid() accepts known types and rejects unknown (EFF-006)'
     expect(MessageTypes::isValid('not_a_real_type'))->toBeFalse();
     expect(MessageTypes::isValid(''))->toBeFalse();
 });
+
+// --- Relay path: registerRelayedRequest (PHP-FPM relay fix) ---
+
+test('registerRelayedRequest registers a pending request with the owner user', function () {
+    $this->messageHandler->registerRelayedRequest('req-relay', 'user-1', 'conv-1');
+
+    expect($this->manager->getPendingRequestUserId('req-relay'))->toBe('user-1');
+    expect($this->manager->getPendingRequest('req-relay'))->toBeInstanceOf(StreamHandler::class);
+});
+
+test('registerRelayedRequest binds the supplied request_id to the StreamHandler', function () {
+    $this->messageHandler->registerRelayedRequest('req-relay-id', 'user-1', 'conv-1');
+
+    $handler = $this->manager->getPendingRequest('req-relay-id');
+    expect($handler)->not->toBeNull();
+    expect($handler->requestId)->toBe('req-relay-id');
+});
+
+test('a tool_call for a relayed request executes a registered tool and yields tool_resolve', function () {
+    $registry = new ToolRegistry();
+    $registry->register('echo', 'Echo test', ['type' => 'object'], fn ($p) => ['echoed' => $p]);
+    $mh = makeMessageHandler($this->manager, $registry);
+
+    // Simulate the serve process accepting a relayed (PHP-FPM) request.
+    $this->manager->addConnection('user-1', 'conn-1');
+    $mh->registerRelayedRequest('req-relay-tool', 'user-1', 'conv-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::TOOL_CALL,
+        'request_id' => 'req-relay-tool',
+        'tool_name' => 'echo',
+        'parameters' => ['val' => 'hi'],
+        'call_id' => 'call-relay-1',
+    ]);
+
+    $response = $mh->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response)->toBeArray();
+    expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($response['result'])->toBe(['echoed' => ['val' => 'hi']]);
+});
