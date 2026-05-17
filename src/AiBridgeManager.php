@@ -17,6 +17,7 @@ use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Models\Message;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Streaming\ConversationRecorder;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -298,7 +299,7 @@ class AiBridgeManager
 
         $handler = $this->buildStream((string) $conversation->id, $message, $options);
 
-        $this->attachConversationPersistence($handler, $conversation);
+        ConversationRecorder::attach($handler, $conversation);
 
         return $handler;
     }
@@ -356,6 +357,7 @@ class AiBridgeManager
             . '.' . $conversation->id;
 
         $options['_broadcasting'] = true;
+        $options['_broadcast_channel'] = $channel;
         $stream = $this->streamConversation($conversation, $message, $options);
         $requestId = $stream->requestId;
 
@@ -370,111 +372,6 @@ class AiBridgeManager
         })->afterResponse();
 
         return $requestId;
-    }
-
-    /**
-     * Attach persistence callbacks that accumulate the assistant block stream
-     * and write the assistant turn when the stream terminates.
-     *
-     * Captures the RAW block stream — including thinking blocks — for faithful
-     * UI replay. This is independent of wireCallbacks() (which re-indexes and
-     * may suppress thinking for the SSE/broadcast sink).
-     */
-    private function attachConversationPersistence(StreamHandler $handler, Conversation $conversation): void
-    {
-        /** @var array<int, array<string, mixed>> $blocks */
-        $blocks = [];
-        /** @var array<string, mixed>|null $current */
-        $current = null;
-
-        $handler->onBlockStart(function (StreamEvent $event) use (&$current) {
-            $current = ['type' => $event->data['block_type'] ?? 'text', 'text' => ''];
-        });
-        $handler->onBlockDelta(function (StreamEvent $event) use (&$current) {
-            if ($current !== null) {
-                $current['text'] .= $event->data['content'] ?? '';
-            }
-        });
-        $handler->onBlockStop(function () use (&$blocks, &$current) {
-            if ($current !== null) {
-                $blocks[] = $current;
-                $current = null;
-            }
-        });
-        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
-            $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
-        });
-        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks) {
-            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
-        });
-        $handler->onDone(function (?array $usage) use (&$blocks, &$current, $conversation) {
-            if ($current !== null) {
-                $blocks[] = $current;
-                $current = null;
-            }
-            $this->persistAssistantTurn($conversation, $blocks, $usage, false);
-        });
-
-        $persistPartial = function () use (&$blocks, &$current, $conversation) {
-            if ($current !== null) {
-                $blocks[] = $current;
-                $current = null;
-            }
-            if (config('ai-bridge.persistence.persist_partial_on_error', true)
-                && $this->blocksHaveContent($blocks)) {
-                $this->persistAssistantTurn($conversation, $blocks, null, true);
-            }
-        };
-        $handler->onError(fn () => $persistPartial());
-        $handler->onCancelled(fn () => $persistPartial());
-    }
-
-    /**
-     * Persist an assistant turn from accumulated blocks.
-     *
-     * @param  array<int, array<string, mixed>>  $blocks
-     * @param  array<string, mixed>|null  $usage
-     */
-    private function persistAssistantTurn(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
-    {
-        // Flat content is the concatenation of text blocks only.
-        $text = '';
-        foreach ($blocks as $block) {
-            if (($block['type'] ?? 'text') === 'text') {
-                $text .= $block['text'] ?? '';
-            }
-        }
-
-        try {
-            $conversation->appendMessage(Message::ROLE_ASSISTANT, $text, [
-                'blocks' => $blocks,
-                'provider' => $conversation->provider,
-                'model' => $conversation->model,
-                'usage' => $usage,
-                'incomplete' => $incomplete,
-            ]);
-        } catch (\Throwable $e) {
-            Log::error('AI Bridge: failed to persist assistant turn', [
-                'conversation_id' => $conversation->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
-    }
-
-    /**
-     * Whether the accumulated blocks contain any meaningful content.
-     *
-     * @param  array<int, array<string, mixed>>  $blocks
-     */
-    private function blocksHaveContent(array $blocks): bool
-    {
-        foreach ($blocks as $block) {
-            if (($block['type'] ?? '') === 'tool_call' || ($block['text'] ?? '') !== '') {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -732,6 +629,12 @@ class AiBridgeManager
         // relayViaHttpApi() suppresses the bridge_sse_incompatible false alarm.
         if (! empty($options['_broadcasting'])) {
             $stream->setBroadcastingMode(true);
+        }
+
+        // Propagate the per-conversation broadcast channel so the serve
+        // process's RelayStream broadcasts on the channel the browser uses.
+        if (! empty($options['_broadcast_channel'])) {
+            $stream->setBroadcastChannel((string) $options['_broadcast_channel']);
         }
 
         return $stream;

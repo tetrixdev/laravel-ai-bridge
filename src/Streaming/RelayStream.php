@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 
 /**
@@ -72,6 +73,25 @@ final class RelayStream implements StreamableProvider
         $this->streamHandler->onCancelled(function (string $reason): void {
             $this->broadcast('cancelled', ['reason' => $reason]);
         });
+
+        // Bridge-mode stream events arrive in THIS (serve) process, so this is
+        // where bridge-conversation persistence must happen. When the relayed
+        // request belongs to a persisted conversation (numeric DB id), attach a
+        // recorder that writes the assistant turn on completion. The user turn
+        // was already persisted by the web process before the request relayed.
+        if ($conversationId !== '' && is_numeric($conversationId)) {
+            try {
+                $conversation = Conversation::find($conversationId);
+                if ($conversation !== null) {
+                    ConversationRecorder::attach($this->streamHandler, $conversation);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('AI Bridge: could not attach conversation recorder to relayed stream', [
+                    'conversation_id' => $conversationId,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
     }
 
     /**
