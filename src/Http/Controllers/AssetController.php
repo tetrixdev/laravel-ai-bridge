@@ -38,9 +38,11 @@ class AssetController extends Controller
             abort(404);
         }
 
-        return (new BinaryFileResponse($path))
-            ->setMaxAge(3600)
-            ->setPublic()
-            ->withHeaders(['Content-Type' => self::FILES[$file]]);
+        $response = new BinaryFileResponse($path);
+        $response->setMaxAge(3600);
+        $response->setPublic();
+        $response->headers->set('Content-Type', self::FILES[$file]);
+
+        return $response;
     }
 }
