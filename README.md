@@ -794,6 +794,36 @@ The server:
 - Tracks connections via `BridgeConnectionManager`
 - Handles graceful shutdown on SIGINT/SIGTERM
 
+### Running bridge mode — two background processes are required
+
+Bridge mode does **not** work with `php artisan serve` / PHP-FPM alone. It needs
+**two long-running processes** running alongside your web server, because the
+AI response arrives at a different process than the one handling the browser
+request (see the data-flow diagram in [Architecture](#architecture)):
+
+| Process | Command | Why it is needed |
+|---------|---------|------------------|
+| **AI Bridge server** | `php artisan ai-bridge:serve` | Accepts the WebSocket connection from the user's local `npx @tetrixdev/ai-bridge` CLI bridge. |
+| **Laravel Reverb** | `php artisan reverb:start` | Bridge-mode stream events are produced in the `ai-bridge:serve` process, not the web worker, so they are delivered to the browser by broadcasting over Reverb. |
+
+Both must run continuously — under a process manager (Supervisor), as
+dedicated containers, or via Octane in development. A typical Supervisor setup:
+
+```ini
+[program:ai-bridge-serve]
+command=php /app/artisan ai-bridge:serve --host=0.0.0.0 --port=8085
+autostart=true
+autorestart=true
+
+[program:reverb]
+command=php /app/artisan reverb:start --host=0.0.0.0 --port=8080
+autostart=true
+autorestart=true
+```
+
+**BYOK / Managed mode needs neither** — those stream over SSE directly from the
+web process, so a plain web server is enough.
+
 ## Artisan Commands
 
 | Command | Description |
