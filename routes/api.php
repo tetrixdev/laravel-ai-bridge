@@ -41,10 +41,11 @@ Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
         Route::post('/stream/broadcast', [StreamController::class, 'broadcast']);
     });
 
-    // Conversation + connection management — throttle:60,1.
-    // Access is scoped through the project-supplied conversations/connections
-    // resolvers (AiBridge::resolveConversationsUsing / resolveConnectionsUsing).
-    Route::middleware('throttle:60,1')->group(function () {
+    // Conversation + connection management — throttle:120,1 (120 requests per
+    // minute). Generous enough for a browsing UI that fetches a conversation
+    // and its messages on each click. Access is scoped through the project-
+    // supplied resolvers (AiBridge::resolveConversationsUsing / …Connections).
+    Route::middleware('throttle:120,1')->group(function () {
         Route::get('/conversations', [ConversationController::class, 'index']);
         Route::post('/conversations', [ConversationController::class, 'store']);
         Route::get('/conversations/{id}', [ConversationController::class, 'show']);
@@ -55,8 +56,10 @@ Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
         Route::delete('/connections/{id}', [ConnectionController::class, 'destroy']);
     });
 
-    // Conversation streaming — throttle:10,1 (matches the other streaming routes).
-    Route::middleware('throttle:10,1')->group(function () {
+    // Conversation streaming — throttle:30,1 (30 messages per minute). Each call
+    // sends one chat message; the AI response itself takes seconds, so this is
+    // a comfortable ceiling for an active conversation.
+    Route::middleware('throttle:30,1')->group(function () {
         Route::post('/conversations/{id}/stream', [ConversationController::class, 'stream']);
     });
 });

@@ -134,11 +134,11 @@ class AiBridgeServiceProvider extends ServiceProvider
             return;
         }
 
-        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge.conversation');
+        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
 
         try {
             \Illuminate\Support\Facades\Broadcast::channel(
-                $prefix.'.{conversationId}',
+                $prefix.'.conversation.{conversationId}',
                 function ($user, $conversationId) {
                     return app(AiBridgeManager::class)
                         ->conversationsQuery(request())

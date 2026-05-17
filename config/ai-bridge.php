@@ -181,8 +181,9 @@ return [
         // cancelled mid-response. The row is flagged incomplete=true.
         'persist_partial_on_error' => env('AI_BRIDGE_PERSIST_PARTIAL', true),
 
-        // Channel name prefix for per-conversation Reverb broadcasts. The full
-        // private channel is "{prefix}.{conversationId}".
-        'channel_prefix' => env('AI_BRIDGE_CHANNEL_PREFIX', 'ai-bridge.conversation'),
+        // Namespace prefix for per-conversation Reverb broadcast channels.
+        // The full private channel name is "{prefix}.conversation.{id}", so the
+        // default below produces "ai-bridge.conversation.42".
+        'channel_prefix' => env('AI_BRIDGE_CHANNEL_PREFIX', 'ai-bridge'),
     ],
 ];

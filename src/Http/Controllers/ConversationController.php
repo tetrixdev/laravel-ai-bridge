@@ -157,7 +157,7 @@ class ConversationController extends Controller
             return response()->json([
                 'status' => 'started',
                 'request_id' => $requestId,
-                'channel' => config('ai-bridge.persistence.channel_prefix', 'ai-bridge.conversation').'.'.$conversation->id,
+                'channel' => $conversation->broadcastChannel(),
             ]);
         }
 

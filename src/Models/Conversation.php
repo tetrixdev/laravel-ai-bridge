@@ -68,6 +68,21 @@ class Conversation extends Model
     }
 
     /**
+     * The private Reverb channel this conversation broadcasts on.
+     *
+     * Shape: "{prefix}.conversation.{id}" — the prefix comes from
+     * config('ai-bridge.persistence.channel_prefix') (default "ai-bridge").
+     * This is the single source of truth for the channel name, shared by the
+     * streaming engine, the controller, and the channel-authorization route.
+     */
+    public function broadcastChannel(): string
+    {
+        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
+
+        return $prefix.'.conversation.'.$this->id;
+    }
+
+    /**
      * Append a message to this conversation and bump its updated_at.
      *
      * @param  array<string, mixed>  $attributes  Extra columns: blocks, provider, model, usage, incomplete.

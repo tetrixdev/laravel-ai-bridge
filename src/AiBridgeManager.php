@@ -353,8 +353,7 @@ class AiBridgeManager
             );
         }
 
-        $channel = config('ai-bridge.persistence.channel_prefix', 'ai-bridge.conversation')
-            . '.' . $conversation->id;
+        $channel = $conversation->broadcastChannel();
 
         $options['_broadcasting'] = true;
         $options['_broadcast_channel'] = $channel;
