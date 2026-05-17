@@ -2,6 +2,8 @@
 
 use Illuminate\Support\Facades\Route;
 use Tetrix\AiBridge\Http\Controllers\BridgeController;
+use Tetrix\AiBridge\Http\Controllers\ConnectionController;
+use Tetrix\AiBridge\Http\Controllers\ConversationController;
 use Tetrix\AiBridge\Http\Controllers\StreamController;
 
 /*
@@ -37,5 +39,24 @@ Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
     Route::middleware('throttle:10,1')->group(function () {
         Route::post('/stream/sse', [StreamController::class, 'sse']);
         Route::post('/stream/broadcast', [StreamController::class, 'broadcast']);
+    });
+
+    // Conversation + connection management — throttle:60,1.
+    // Access is scoped through the project-supplied conversations/connections
+    // resolvers (AiBridge::resolveConversationsUsing / resolveConnectionsUsing).
+    Route::middleware('throttle:60,1')->group(function () {
+        Route::get('/conversations', [ConversationController::class, 'index']);
+        Route::post('/conversations', [ConversationController::class, 'store']);
+        Route::get('/conversations/{id}', [ConversationController::class, 'show']);
+        Route::delete('/conversations/{id}', [ConversationController::class, 'destroy']);
+
+        Route::get('/connections', [ConnectionController::class, 'index']);
+        Route::post('/connections', [ConnectionController::class, 'store']);
+        Route::delete('/connections/{id}', [ConnectionController::class, 'destroy']);
+    });
+
+    // Conversation streaming — throttle:10,1 (matches the other streaming routes).
+    Route::middleware('throttle:10,1')->group(function () {
+        Route::post('/conversations/{id}/stream', [ConversationController::class, 'stream']);
     });
 });
