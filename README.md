@@ -554,6 +554,84 @@ function chat() {
 </script>
 ```
 
+## Conversation Persistence
+
+The package persists multi-turn conversations to the database so they can be
+listed, resumed, and replayed. Persistence is always on — there is no opt-in
+flag. Three tables are created by **auto-loaded** migrations (they are *not*
+publishable — do not fork them): `ai_bridge_conversations`, `ai_bridge_messages`
+and `ai_bridge_connections`, on the application's default database connection.
+
+The tables are deliberately **not linked** to any of your tables. Your app
+associates conversations/connections with its own users or sessions via its own
+pivot tables, and tells the package which rows a request may see by registering
+two scoping resolvers (e.g. in a service provider's `boot()`):
+
+```php
+use Tetrix\AiBridge\Facades\AiBridge;
+
+AiBridge::resolveConversationsUsing(
+    fn (Request $request) => $request->user()->conversations()->getQuery()
+);
+AiBridge::resolveConnectionsUsing(
+    fn (Request $request) => $request->user()->connections()->getQuery()
+);
+```
+
+Listen for `ConversationCreated` / `ConnectionCreated` to link a newly created
+row to your owner model.
+
+### HTTP API
+
+| Method & path | Purpose |
+|---------------|---------|
+| `GET /ai-bridge/conversations` | List conversations (scoped + paginated) |
+| `POST /ai-bridge/conversations` | Create a conversation |
+| `GET /ai-bridge/conversations/{id}` | Conversation + messages + `tools_stale` flag |
+| `DELETE /ai-bridge/conversations/{id}` | Delete a conversation |
+| `POST /ai-bridge/conversations/{id}/stream` | Send a message — SSE (BYOK/Managed) or a Reverb broadcast (Bridge) |
+| `GET /ai-bridge/connections` | List connections with their advertised providers/models |
+| `POST /ai-bridge/connections` | Register a CLI bridge or BYOK connection |
+| `DELETE /ai-bridge/connections/{id}` | Delete a connection |
+
+History injection retains prior text and tool calls/results but excludes
+thinking blocks; switching provider/model/mode mid-conversation is supported.
+
+## Reference Chat UI
+
+A drop-in ChatGPT-style chat component ships with the package:
+
+```blade
+<x-ai-bridge::chat
+    api="/ai-bridge"
+    :reverb-key="config('broadcasting.connections.reverb.key')"
+    reverb-host="localhost"
+    reverb-port="8080"
+/>
+```
+
+It is a thin wrapper that renders an `<ai-bridge-chat>` **Web Component**. The
+component uses **Shadow DOM**, so it is fully isolated — it cannot conflict with
+your app's CSS framework or JavaScript (no global Tailwind, no global Alpine).
+Its pre-built bundle is served by the package; your app needs no build toolchain.
+It is entirely optional — the backend is fully usable without it.
+
+### Customizing the chat UI
+
+The component is a reference implementation — you are never locked into it.
+
+1. **Build your own UI (recommended for anything beyond light tweaks).** Every
+   piece of logic lives server-side, so a custom UI is lightweight: render JSON
+   from the HTTP API above and POST messages to the stream endpoint. Use any
+   stack — Blade, Livewire, Vue, React. The stream endpoint emits these events
+   (as SSE `data:` lines, or as Reverb `.ai.stream` events): `block_start`,
+   `block_delta` (`{block_type, content}`), `block_stop`, `tool_call`
+   (`{tool_name, parameters}`), `done` (`{usage}`), `error`, `cancelled`.
+
+2. **Fork the component.** Copy `resources/dist/ai-bridge-chat.js` from the
+   package into your app, adjust it, and point your own `<script>`/element at
+   it. It is a single self-contained file with no build step.
+
 ## Tool System
 
 Register tools that the AI can call during a conversation. Tools work across all three modes.
