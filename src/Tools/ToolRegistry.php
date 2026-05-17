@@ -159,6 +159,20 @@ class ToolRegistry
     }
 
     /**
+     * Compute a stable hash of the registered tool set.
+     *
+     * A conversation snapshots this at creation; a later mismatch means the
+     * tool set has changed (e.g. a deploy) and the UI can warn the user.
+     */
+    public function hash(): string
+    {
+        $tools = $this->toArray();
+        usort($tools, fn (array $a, array $b) => strcmp($a['name'] ?? '', $b['name'] ?? ''));
+
+        return hash('sha256', (string) json_encode($tools));
+    }
+
+    /**
      * Ensure no tool with the given name is already registered.
      *
      * @throws InvalidArgumentException
