@@ -137,6 +137,37 @@
             await this.loadConnections();
             await this.loadConversations();
             this.renderAll();
+            this.startPolling();
+        }
+
+        disconnectedCallback() {
+            if (this.pollTimer) clearInterval(this.pollTimer);
+        }
+
+        // Re-fetch connections on an interval. A CLI bridge is started manually
+        // by the user AFTER this UI has loaded, so its advertised providers/
+        // models are not available on the first fetch — polling makes them
+        // appear (in the sidebar and the new-conversation modal) once it
+        // connects, without needing a page refresh.
+        startPolling() {
+            this.connSnapshot = JSON.stringify(this.s.connections);
+            this.pollTimer = setInterval(() => this.pollConnections(), 5000);
+        }
+
+        async pollConnections() {
+            let data;
+            try {
+                data = await this.apiCall('/connections');
+            } catch (e) {
+                return; // keep existing data on a transient failure
+            }
+            const conns = data.connections || [];
+            const snapshot = JSON.stringify(conns);
+            if (snapshot !== this.connSnapshot) {
+                this.connSnapshot = snapshot;
+                this.s.connections = conns;
+                this.renderAll();
+            }
         }
 
         // ── HTTP ──────────────────────────────────────────────────────
