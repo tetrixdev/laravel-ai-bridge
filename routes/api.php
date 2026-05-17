@@ -1,10 +1,18 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
+use Tetrix\AiBridge\Http\Controllers\AssetController;
 use Tetrix\AiBridge\Http\Controllers\BridgeController;
 use Tetrix\AiBridge\Http\Controllers\ConnectionController;
 use Tetrix\AiBridge\Http\Controllers\ConversationController;
 use Tetrix\AiBridge\Http\Controllers\StreamController;
+
+// Static assets for the chat Web Component — public (no auth): the component
+// JS and the vendored pusher/echo. Kept outside the auth-gated group below.
+Route::middleware('api')->prefix('ai-bridge')->group(function () {
+    Route::get('/assets/{file}', [AssetController::class, 'show'])
+        ->where('file', '[A-Za-z0-9._-]+');
+});
 
 /*
 |--------------------------------------------------------------------------
