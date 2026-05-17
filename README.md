@@ -581,6 +581,25 @@ AiBridge::resolveConnectionsUsing(
 Listen for `ConversationCreated` / `ConnectionCreated` to link a newly created
 row to your owner model.
 
+> **If your resolver reads the session** (e.g. `$request->session()`), the AI
+> Bridge routes must run with the **full cookie + session middleware stack** —
+> not `StartSession` alone. Configure `ai-bridge.route_middleware` accordingly:
+>
+> ```php
+> 'route_middleware' => [
+>     \Illuminate\Cookie\Middleware\EncryptCookies::class,
+>     \Illuminate\Cookie\Middleware\AddQueuedCookiesToResponse::class,
+>     \Illuminate\Session\Middleware\StartSession::class,
+> ],
+> ```
+>
+> Your web pages set an **encrypted** session cookie (via the `web` group).
+> Without `EncryptCookies` on the AI Bridge routes, `StartSession` cannot
+> decrypt that cookie and starts a brand-new session on every request — so
+> session-scoped conversations and connections appear to vanish between
+> requests. Apps that scope by an authenticated user instead (`$request->user()`)
+> can use their normal auth middleware and are unaffected.
+
 ### HTTP API
 
 | Method & path | Purpose |
