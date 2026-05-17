@@ -136,6 +136,18 @@ class Conversation extends Model
             return trim($message->content);
         }
 
+        // When a turn includes tool activity, label the response text too so
+        // the model can clearly tell its user-facing answer apart from the
+        // tool exchange. A plain text-only turn stays unlabelled (no noise).
+        $hasToolBlocks = false;
+        foreach ($blocks as $block) {
+            $type = $block['type'] ?? 'text';
+            if ($type === 'tool_call' || $type === 'tool_result') {
+                $hasToolBlocks = true;
+                break;
+            }
+        }
+
         $parts = [];
 
         foreach ($blocks as $block) {
@@ -164,7 +176,7 @@ class Conversation extends Model
                 default:
                     $text = $block['text'] ?? '';
                     if (is_string($text) && $text !== '') {
-                        $parts[] = $text;
+                        $parts[] = $hasToolBlocks ? "[response: {$text}]" : $text;
                     }
                     break;
             }
