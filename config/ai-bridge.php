@@ -152,4 +152,38 @@ return [
         // Prevents excessively large prompts from consuming disproportionate API tokens.
         'max_system_prompt_length' => env('AI_BRIDGE_MAX_SYSTEM_PROMPT_LENGTH', 10000),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Conversation Persistence
+    |--------------------------------------------------------------------------
+    |
+    | The package always persists conversations and messages to the database
+    | (tables: ai_bridge_conversations, ai_bridge_messages, ai_bridge_connections),
+    | using the application's default database connection. There is no opt-out —
+    | a consuming app that does not want a conversation can simply not create one.
+    |
+    | Ownership/authorization is NOT handled here. The package tables are
+    | unlinked; the consuming app scopes access by registering query resolvers
+    | via the AiBridge facade in a service provider's boot() method:
+    |
+    |   AiBridge::resolveConversationsUsing(
+    |       fn ($request) => $mySession->conversations()->getQuery()
+    |   );
+    |   AiBridge::resolveConnectionsUsing(
+    |       fn ($request) => $mySession->connections()->getQuery()
+    |   );
+    |
+    */
+
+    'persistence' => [
+        // Persist a partial assistant message when a stream errors or is
+        // cancelled mid-response. The row is flagged incomplete=true.
+        'persist_partial_on_error' => env('AI_BRIDGE_PERSIST_PARTIAL', true),
+
+        // Namespace prefix for per-conversation Reverb broadcast channels.
+        // The full private channel name is "{prefix}.conversation.{id}", so the
+        // default below produces "ai-bridge.conversation.42".
+        'channel_prefix' => env('AI_BRIDGE_CHANNEL_PREFIX', 'ai-bridge'),
+    ],
 ];

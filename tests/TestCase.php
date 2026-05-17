@@ -39,5 +39,15 @@ abstract class TestCase extends OrchestraTestCase
         $app['config']->set('ai-bridge.route_middleware', ['auth']);
         $app['config']->set('ai-bridge.broadcasting.enabled', true);
         $app['config']->set('ai-bridge.chat_completions.stream_timeout', 300);
+
+        // In-memory SQLite for tests that exercise conversation persistence.
+        // The package migrations auto-load via loadMigrationsFrom(); DB-backed
+        // tests opt in with the RefreshDatabase trait.
+        $app['config']->set('database.default', 'testing');
+        $app['config']->set('database.connections.testing', [
+            'driver' => 'sqlite',
+            'database' => ':memory:',
+            'prefix' => '',
+        ]);
     }
 }

@@ -49,9 +49,12 @@ class MessageHandler
      * Cleanup is handled by the existing done/error/cancelled handlers, which
      * already call removePendingRequest().
      */
-    public function registerRelayedRequest(string $requestId, string $userId, string $conversationId): void
+    public function registerRelayedRequest(string $requestId, string $userId, string $conversationId, ?string $channel = null): void
     {
-        $channel = "user.{$userId}.conversation.{$conversationId}";
+        // Prefer the channel threaded through the relay body (per-conversation
+        // streaming uses "{prefix}.{conversationId}"); fall back to the legacy
+        // per-user convention when no channel was supplied.
+        $channel ??= "user.{$userId}.conversation.{$conversationId}";
 
         $relay = new RelayStream($requestId, $channel, $conversationId);
 

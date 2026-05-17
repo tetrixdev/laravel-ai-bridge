@@ -11,10 +11,8 @@
         "firebase/php-jwt": "^6.10|^7.0",
         "guzzlehttp/psr7": "^2.0",
         "react/socket": "^1.14",
-        "ratchet/rfc6455": "^0.4"
-    },
-    "suggest": {
-        "laravel/reverb": "Required for Reverb broadcasting mode (^1.0)"
+        "ratchet/rfc6455": "^0.4",
+        "laravel/reverb": "^1.0|^2.0"
     },
     "require-dev": {
         "orchestra/testbench": "^9.0|^10.0",

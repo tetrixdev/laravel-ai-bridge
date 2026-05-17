@@ -69,6 +69,15 @@ class BridgeStream implements StreamableProvider
      */
     private bool $broadcastingMode = false;
 
+    /**
+     * The Reverb channel relayed events should broadcast on.
+     *
+     * Under PHP-FPM bridge mode the serve process (not this one) does the
+     * broadcasting, so the channel is threaded through the relay body to
+     * RelayStream. Null = the serve process falls back to its default channel.
+     */
+    private ?string $broadcastChannel = null;
+
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
         private readonly ToolRegistry $toolRegistry,
@@ -120,6 +129,19 @@ class BridgeStream implements StreamableProvider
     public function setBroadcastingMode(bool $broadcasting): static
     {
         $this->broadcastingMode = $broadcasting;
+
+        return $this;
+    }
+
+    /**
+     * Set the Reverb channel relayed events should broadcast on.
+     *
+     * Threaded through the internal relay so the serve process's RelayStream
+     * broadcasts on the same channel the browser is subscribed to.
+     */
+    public function setBroadcastChannel(?string $channel): static
+    {
+        $this->broadcastChannel = $channel;
 
         return $this;
     }
@@ -331,6 +353,12 @@ class BridgeStream implements StreamableProvider
 
             if (isset($payload['messages'])) {
                 $relayBody['messages'] = $payload['messages'];
+            }
+
+            // Thread the broadcast channel so the serve process's RelayStream
+            // broadcasts relayed events on the channel the browser subscribes to.
+            if ($this->broadcastChannel !== null) {
+                $relayBody['channel'] = $this->broadcastChannel;
             }
 
             $response = Http::withToken($internalToken)

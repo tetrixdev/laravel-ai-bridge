@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge;
 
 use Closure;
 use InvalidArgumentException;
+use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Protocol\MessageTypes;
@@ -13,7 +14,10 @@ use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Models\Conversation;
+use Tetrix\AiBridge\Models\Message;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Streaming\ConversationRecorder;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
@@ -244,6 +248,131 @@ class AiBridgeManager
         return $requestId;
     }
 
+    // ── Conversation streaming ────────────────────────────────────────
+
+    /**
+     * Build a configured StreamHandler for a persisted conversation.
+     *
+     * Persists the user turn, injects prior history + the conversation's
+     * provider/model/mode/system_prompt, and attaches persistence so the
+     * assistant turn is written when the stream completes.
+     *
+     * @param  array<string, mixed>  $options  Extra options (rarely needed —
+     *   provider/model/mode/system_prompt come from the conversation).
+     */
+    public function streamConversation(Conversation $conversation, string $message, array $options = []): StreamHandler
+    {
+        $conversation->loadMissing('messages', 'connection');
+
+        // Capture prior history BEFORE persisting the new user turn.
+        $history = $conversation->historyFor();
+
+        // Persist the user turn immediately.
+        $conversation->appendMessage(Message::ROLE_USER, $message);
+
+        $mode = ProviderMode::from($conversation->mode);
+        $options['mode'] = $mode;
+        $options['messages'] = $history;
+
+        if (! empty($conversation->system_prompt)) {
+            $options['system_prompt'] = $conversation->system_prompt;
+        }
+        if (! empty($conversation->model)) {
+            $options['model'] = $conversation->model;
+        }
+
+        $connection = $conversation->connection;
+
+        if ($mode === ProviderMode::Bridge) {
+            $options['provider'] = $conversation->provider ?? '';
+            if ($connection !== null && ! empty($connection->connection_key)) {
+                $options['user_id'] = $connection->connection_key;
+            }
+        } elseif ($mode === ProviderMode::Byok && $connection !== null) {
+            if (! empty($connection->endpoint)) {
+                $options['endpoint'] = $connection->endpoint;
+            }
+            if (! empty($connection->api_key)) {
+                $options['api_key'] = $connection->api_key;
+            }
+        }
+
+        $handler = $this->buildStream((string) $conversation->id, $message, $options);
+
+        ConversationRecorder::attach($handler, $conversation);
+
+        return $handler;
+    }
+
+    /**
+     * SSE streaming for a persisted conversation (BYOK / Managed modes).
+     */
+    public function streamConversationToResponse(Conversation $conversation, string $message, array $options = []): StreamedResponse
+    {
+        return new StreamedResponse(function () use ($conversation, $message, $options) {
+            $stream = $this->streamConversation($conversation, $message, $options);
+
+            $send = function (array $payload): void {
+                echo 'data: ' . json_encode($payload) . "\n\n";
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            };
+            $sendTerminal = function (): void {
+                echo "data: [DONE]\n\n";
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            };
+
+            $this->wireCallbacks($stream, $send, $sendTerminal);
+
+            $send(['event' => 'conversation_id', 'data' => ['conversation_id' => (string) $conversation->id]]);
+
+            $stream->start();
+        }, 200, [
+            'Content-Type' => 'text/event-stream',
+            'Cache-Control' => 'no-cache',
+            'Connection' => 'keep-alive',
+            'X-Accel-Buffering' => 'no',
+        ]);
+    }
+
+    /**
+     * Reverb-broadcast streaming for a persisted conversation (Bridge mode).
+     *
+     * Broadcasts on the per-conversation private channel. Returns the request ID.
+     */
+    public function streamConversationAndBroadcast(Conversation $conversation, string $message, array $options = []): string
+    {
+        if (! config('ai-bridge.broadcasting.enabled', true)) {
+            throw new InvalidArgumentException(
+                'Broadcasting is disabled. Set AI_BRIDGE_BROADCAST=true in .env.'
+            );
+        }
+
+        $channel = $conversation->broadcastChannel();
+
+        $options['_broadcasting'] = true;
+        $options['_broadcast_channel'] = $channel;
+        $stream = $this->streamConversation($conversation, $message, $options);
+        $requestId = $stream->requestId;
+
+        $broadcast = function (array $payload) use ($channel, $requestId): void {
+            event(new AiStreamEvent($channel, $requestId, $payload['event'], $payload['data']));
+        };
+
+        $this->wireCallbacks($stream, $broadcast);
+
+        dispatch(function () use ($stream) {
+            $stream->start();
+        })->afterResponse();
+
+        return $requestId;
+    }
+
     /**
      * Wire all seven stream callbacks to a sink callable.
      *
@@ -342,6 +471,79 @@ class AiBridgeManager
         });
     }
 
+    // ── Conversation scoping resolvers ────────────────────────────────
+
+    /**
+     * Project-supplied resolver returning the query of conversations visible
+     * to the current request. The package owns no ownership concept — the
+     * consuming app registers this in a service provider's boot().
+     *
+     * @var Closure|null
+     */
+    private ?Closure $conversationsResolver = null;
+
+    /**
+     * Project-supplied resolver returning the query of connections visible
+     * to the current request.
+     *
+     * @var Closure|null
+     */
+    private ?Closure $connectionsResolver = null;
+
+    /**
+     * Register the resolver that scopes which conversations a request may see.
+     *
+     * The closure receives the current Request and returns an Eloquent
+     * Builder for {@see \Tetrix\AiBridge\Models\Conversation}.
+     */
+    public function resolveConversationsUsing(Closure $resolver): static
+    {
+        $this->conversationsResolver = $resolver;
+
+        return $this;
+    }
+
+    /**
+     * Register the resolver that scopes which connections a request may see.
+     */
+    public function resolveConnectionsUsing(Closure $resolver): static
+    {
+        $this->connectionsResolver = $resolver;
+
+        return $this;
+    }
+
+    /**
+     * Get the scoped conversations query for a request.
+     *
+     * Secure-by-default: when the consuming app has not registered a resolver,
+     * this returns an empty query so conversations are never exposed by accident.
+     */
+    public function conversationsQuery(\Illuminate\Http\Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        if ($this->conversationsResolver !== null) {
+            return ($this->conversationsResolver)($request);
+        }
+
+        \Illuminate\Support\Facades\Log::warning('AI Bridge: no conversations resolver registered — denying all access. Call AiBridge::resolveConversationsUsing() in a service provider.');
+
+        return \Tetrix\AiBridge\Models\Conversation::query()->whereRaw('1 = 0');
+    }
+
+    /**
+     * Get the scoped connections query for a request.
+     */
+    public function connectionsQuery(\Illuminate\Http\Request $request): \Illuminate\Database\Eloquent\Builder
+    {
+        if ($this->connectionsResolver !== null) {
+            return ($this->connectionsResolver)($request);
+        }
+
+        \Illuminate\Support\Facades\Log::warning('AI Bridge: no connections resolver registered — denying all access. Call AiBridge::resolveConnectionsUsing() in a service provider.');
+
+        return \Tetrix\AiBridge\Models\Connection::query()->whereRaw('1 = 0');
+    }
+
     /**
      * Get the active provider mode from config.
      *
@@ -428,6 +630,12 @@ class AiBridgeManager
             $stream->setBroadcastingMode(true);
         }
 
+        // Propagate the per-conversation broadcast channel so the serve
+        // process's RelayStream broadcasts on the channel the browser uses.
+        if (! empty($options['_broadcast_channel'])) {
+            $stream->setBroadcastChannel((string) $options['_broadcast_channel']);
+        }
+
         return $stream;
     }
 
@@ -436,11 +644,11 @@ class AiBridgeManager
      */
     private function createChatCompletionsProvider(array $options): ChatCompletionsStream
     {
-        // endpoint is always read from config — never from request options (SSRF risk).
-        // api_key can be overridden programmatically (e.g. BYOK mode where the consuming
-        // app resolves the user's key and passes it via options). The StreamController
-        // strips api_key from HTTP request input, so only server-side callers can set it.
-        $endpoint = config('ai-bridge.chat_completions.endpoint');
+        // endpoint and api_key may be overridden programmatically (e.g. per-conversation
+        // BYOK, where streamConversation() resolves them from a server-side Connection
+        // row). The StreamController strips both from HTTP request input, so only
+        // server-side callers can set them — guarding against SSRF / key injection.
+        $endpoint = $options['endpoint'] ?? config('ai-bridge.chat_completions.endpoint');
         $apiKey = $options['api_key'] ?? config('ai-bridge.chat_completions.api_key');
         $model = $options['model'] ?? config('ai-bridge.chat_completions.model');
         $maxTokens = $options['max_tokens'] ?? (int) config('ai-bridge.chat_completions.max_tokens', 4096);

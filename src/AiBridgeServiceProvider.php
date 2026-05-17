@@ -86,6 +86,15 @@ class AiBridgeServiceProvider extends ServiceProvider
             __DIR__.'/../resources/js/ai-bridge.js' => resource_path('js/vendor/ai-bridge.js'),
         ], 'ai-bridge-js');
 
+        // Reference chat UI component — usable as <x-ai-bridge::chat />.
+        // Fully optional (the backend works without it) and overridable by
+        // publishing the views. Self-contained: it loads Tailwind/Alpine/Echo
+        // from a CDN, so the host app needs no build toolchain.
+        $this->loadViewsFrom(__DIR__.'/../resources/views', 'ai-bridge');
+        $this->publishes([
+            __DIR__.'/../resources/views' => resource_path('views/vendor/ai-bridge'),
+        ], 'ai-bridge-views');
+
         // Register named middleware for bridge token validation
         $this->app['router']->aliasMiddleware('ai-bridge.token', ValidateBridgeToken::class);
 
@@ -102,6 +111,15 @@ class AiBridgeServiceProvider extends ServiceProvider
         // Register routes.
         $this->loadRoutesFrom(__DIR__.'/../routes/api.php');
 
+        // Conversation persistence migrations — merged (loaded), never published,
+        // so consuming apps cannot fork them and break future package updates.
+        $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
+
+        // Register the per-conversation broadcast channel. Authorization reuses
+        // the project's conversations resolver, so a client may only listen on
+        // a conversation it is allowed to see — no separate channels.php needed.
+        $this->registerBroadcastChannel();
+
         // Register artisan commands
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -109,6 +127,36 @@ class AiBridgeServiceProvider extends ServiceProvider
                 TestCommand::class,
                 ServeCommand::class,
             ]);
+        }
+    }
+
+    /**
+     * Register the per-conversation private broadcast channel.
+     *
+     * Authorization delegates to the project-supplied conversations resolver:
+     * a client may subscribe only to a conversation it is allowed to see.
+     * Skipped silently when broadcasting is not configured in the host app.
+     */
+    private function registerBroadcastChannel(): void
+    {
+        if (! class_exists(\Illuminate\Support\Facades\Broadcast::class)) {
+            return;
+        }
+
+        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
+
+        try {
+            \Illuminate\Support\Facades\Broadcast::channel(
+                $prefix.'.conversation.{conversationId}',
+                function ($user, $conversationId) {
+                    return app(AiBridgeManager::class)
+                        ->conversationsQuery(request())
+                        ->whereKey($conversationId)
+                        ->exists();
+                },
+            );
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: could not register broadcast channel', ['error' => $e->getMessage()]);
         }
     }
 }

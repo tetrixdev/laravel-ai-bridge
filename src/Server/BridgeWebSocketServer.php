@@ -542,8 +542,10 @@ class BridgeWebSocketServer
         // Register the relayed request as pending so incoming tool calls and
         // stream events from the bridge can be verified and broadcast back to
         // the browser. Register BEFORE sending so a fast bridge reply cannot
-        // race ahead of the registration.
-        $this->messageHandler->registerRelayedRequest($requestId, $userId, (string) $conversationId);
+        // race ahead of the registration. The optional channel (threaded from
+        // the web process) routes broadcasts to the browser's subscribed channel.
+        $relayChannel = isset($body['channel']) && is_string($body['channel']) ? $body['channel'] : null;
+        $this->messageHandler->registerRelayedRequest($requestId, $userId, (string) $conversationId, $relayChannel);
 
         $sent = $this->connectionManager->sendToUser($userId, $payload);
 
