@@ -10,6 +10,7 @@ use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Support\BridgeLog;
 
 /**
  * Serve-side counterpart of BridgeStream for relayed (PHP-FPM) requests.
@@ -104,6 +105,23 @@ final class RelayStream implements StreamableProvider
      */
     private function broadcast(string $eventName, array $data): void
     {
+        // A turn's terminal events get an info line (so a completed/failed
+        // turn is visible without verbose logging); intermediate block/tool
+        // events are debug-only to keep the relay-path log readable.
+        if (in_array($eventName, ['done', 'error', 'cancelled'], true)) {
+            BridgeLog::info('relayed stream '.$eventName, [
+                'request_id' => $this->streamHandler->requestId,
+                'channel' => $this->channel,
+                'detail' => $eventName === 'error' ? $data : null,
+            ]);
+        } else {
+            BridgeLog::verbose('broadcasting relayed stream event', [
+                'request_id' => $this->streamHandler->requestId,
+                'channel' => $this->channel,
+                'event' => $eventName,
+            ]);
+        }
+
         try {
             event(new AiStreamEvent($this->channel, $this->streamHandler->requestId, $eventName, $data));
         } catch (\Throwable $e) {

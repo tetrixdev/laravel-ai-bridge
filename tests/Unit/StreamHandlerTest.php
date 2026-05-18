@@ -259,6 +259,30 @@ test('dispatchEvent routes block_delta correctly', function () {
     expect($received->data['content'])->toBe('content');
 });
 
+test('dispatchEvent routes bridge-style block_delta with no block_type', function () {
+    // The bridge protocol sends block_type only on block_start; block_delta
+    // and block_stop carry block_index alone. The handler must still route
+    // these (regression: deltas were silently dropped when block_type missing).
+    $handler = createStreamHandler();
+    $deltas = [];
+    $stops = [];
+
+    $handler->onBlockDelta(function (StreamEvent $event) use (&$deltas) {
+        $deltas[] = $event->data['content'];
+    });
+    $handler->onBlockStop(function (StreamEvent $event) use (&$stops) {
+        $stops[] = $event->data['block_index'];
+    });
+
+    $handler->dispatchEvent(new StreamEvent('req-1', 'block_start', ['block_index' => 0, 'block_type' => 'text']));
+    $handler->dispatchEvent(new StreamEvent('req-1', 'block_delta', ['block_index' => 0, 'content' => 'Hello']));
+    $handler->dispatchEvent(new StreamEvent('req-1', 'block_delta', ['block_index' => 0, 'content' => ' world']));
+    $handler->dispatchEvent(new StreamEvent('req-1', 'block_stop', ['block_index' => 0]));
+
+    expect($deltas)->toBe(['Hello', ' world']);
+    expect($stops)->toBe([0]);
+});
+
 test('dispatchEvent routes done correctly', function () {
     $handler = createStreamHandler();
     $usage = null;

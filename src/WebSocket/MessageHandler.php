@@ -8,9 +8,12 @@ use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\Enums\BlockType;
+use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\RelayStream;
+use Tetrix\AiBridge\Streaming\StreamHandler;
+use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 
 /**
@@ -26,6 +29,15 @@ use Tetrix\AiBridge\Tools\ToolRegistry;
  */
 class MessageHandler
 {
+    /**
+     * Request IDs that have already been recovered once from a lost CLI
+     * session. A fresh re-issue (cli_session_id=null) cannot itself produce
+     * session_lost, but this guards against a recovery loop regardless.
+     *
+     * @var array<string, true>
+     */
+    private array $recoveredRequests = [];
+
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
         private readonly TokenManager $tokenManager,
@@ -109,34 +121,8 @@ class MessageHandler
             MessageTypes::TOOL_CALL => $this->handleToolCall($connectionId, $message),
             MessageTypes::ERROR => $this->handleError($connectionId, $message),
             MessageTypes::CANCELLED => $this->handleCancelled($connectionId, $message),
-            MessageTypes::SESSION_RESET => $this->handleSessionReset($connectionId, $message),
             default => null,
         };
-    }
-
-    /**
-     * Handle a 'session_reset' message from the bridge.
-     *
-     * session_reset is a valid protocol message type, but server-side history
-     * replay is not yet implemented. Return a clear 'not_implemented' error
-     * rather than silently discarding the message so clients do not hang.
-     *
-     * @param  array<string, mixed>  $message
-     * @return array<string, mixed>
-     */
-    private function handleSessionReset(string $connectionId, array $message): array
-    {
-        Log::info('AI Bridge: received session_reset — feature not implemented', [
-            'connection_id' => $connectionId,
-        ]);
-
-        return [
-            'type' => MessageTypes::CONNECTION_ERROR,
-            'error' => 'not_implemented',
-            'message' => 'session_reset is not yet supported by this server. '
-                .'Reconnecting bridges should start a fresh session; conversation history replay is not available.',
-            'request_id' => $message['request_id'] ?? null,
-        ];
     }
 
     /**
@@ -564,10 +550,51 @@ class MessageHandler
             return null;
         }
 
+        // Persist the CLI session this turn ran under, so the conversation's
+        // next turn resumes it instead of starting cold.
+        $this->persistCliSessionId($handler, $data['cli_session_id'] ?? null);
+
         $handler->dispatchDone($usage);
         $this->connectionManager->removePendingRequest($requestId);
+        unset($this->recoveredRequests[$requestId]);
 
         return null;
+    }
+
+    /**
+     * Persist the CLI session id reported by a `done` event onto its
+     * conversation, so the next turn can resume the same session.
+     *
+     * No-ops when no usable session id was produced, or when the stream is not
+     * tied to a persisted (numeric) conversation. Failures are logged, never
+     * thrown — a persistence hiccup must not break stream completion.
+     */
+    private function persistCliSessionId(StreamHandler $handler, mixed $cliSessionId): void
+    {
+        if (! is_string($cliSessionId) || $cliSessionId === '') {
+            return;
+        }
+
+        $conversationId = $handler->getConversationId();
+        if ($conversationId === '' || ! is_numeric($conversationId)) {
+            return;
+        }
+
+        try {
+            Conversation::query()
+                ->whereKey($conversationId)
+                ->update(['cli_session_id' => $cliSessionId]);
+
+            BridgeLog::verbose('persisted cli_session_id from done', [
+                'conversation_id' => $conversationId,
+                'cli_session_id' => $cliSessionId,
+            ]);
+        } catch (\Throwable $e) {
+            BridgeLog::warning('failed to persist cli_session_id', [
+                'conversation_id' => $conversationId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -580,13 +607,6 @@ class MessageHandler
         $code = $data['code'] ?? 'unknown';
         $rawMessage = $data['message'] ?? 'Unknown error';
         $errorMessage = mb_substr(strip_tags($rawMessage), 0, 500);
-
-        Log::error('AI Bridge: stream error from bridge', [
-            'connection_id' => $connectionId,
-            'request_id' => $requestId,
-            'code' => $code,
-            'message' => $errorMessage,
-        ]);
 
         $handler = $this->connectionManager->getPendingRequest($requestId);
         if (! $handler) {
@@ -604,10 +624,137 @@ class MessageHandler
             return null;
         }
 
+        // session_lost is a recoverable signal, not a real error: the bridge
+        // could not resume the CLI session the server asked for. Wipe the dead
+        // id and silently re-issue the turn as a fresh session — the browser
+        // keeps streaming on the same request_id and never sees this.
+        if ($code === 'session_lost') {
+            return $this->recoverLostSession($connectionId, $requestId, $handler, $errorMessage);
+        }
+
+        Log::error('AI Bridge: stream error from bridge', [
+            'connection_id' => $connectionId,
+            'request_id' => $requestId,
+            'code' => $code,
+            'message' => $errorMessage,
+        ]);
+
         $handler->dispatchError($code, $errorMessage);
         $this->connectionManager->removePendingRequest($requestId);
+        unset($this->recoveredRequests[$requestId]);
 
         return null;
+    }
+
+    /**
+     * Recover from a lost CLI session: wipe the stored id and re-issue the
+     * turn as a fresh session, transparently to the browser.
+     *
+     * Keeps the same request_id so the in-flight RelayStream — and the browser
+     * subscribed to its channel — simply continue with the re-issued turn. The
+     * pending request is intentionally NOT removed and no error is dispatched.
+     *
+     * Recovers a given request at most once: a fresh re-issue uses
+     * cli_session_id=null and so cannot itself yield session_lost, but if it
+     * somehow recurs the error is surfaced normally rather than looping.
+     */
+    private function recoverLostSession(
+        string $connectionId,
+        string $requestId,
+        StreamHandler $handler,
+        string $detail,
+    ): ?array {
+        if (isset($this->recoveredRequests[$requestId])) {
+            BridgeLog::warning('session_lost recurred after recovery — surfacing the error', [
+                'request_id' => $requestId,
+            ]);
+            $handler->dispatchError('session_lost', $detail);
+            $this->connectionManager->removePendingRequest($requestId);
+            unset($this->recoveredRequests[$requestId]);
+
+            return null;
+        }
+
+        $conversationId = $handler->getConversationId();
+        $conversation = is_numeric($conversationId)
+            ? Conversation::query()->with('messages')->whereKey($conversationId)->first()
+            : null;
+
+        if ($conversation === null) {
+            BridgeLog::error('session_lost recovery failed — conversation not found', [
+                'request_id' => $requestId,
+                'conversation_id' => $conversationId,
+            ]);
+            $handler->dispatchError('session_lost', $detail);
+            $this->connectionManager->removePendingRequest($requestId);
+
+            return null;
+        }
+
+        $this->recoveredRequests[$requestId] = true;
+
+        // Wipe the dead session id so this retry — and every later turn —
+        // starts fresh until the bridge reports a new one on `done`.
+        $deadSessionId = $conversation->cli_session_id;
+        $conversation->cli_session_id = null;
+        $conversation->save();
+
+        $userId = (string) $this->connectionManager->getUserIdByConnectionId($connectionId);
+        $payload = $this->buildFreshAiRequest($conversation, $requestId);
+
+        BridgeLog::info('session_lost — wiped cli_session_id, re-issuing as a fresh session', [
+            'request_id' => $requestId,
+            'conversation_id' => $conversation->id,
+            'dead_cli_session_id' => $deadSessionId,
+        ]);
+
+        $sent = $this->connectionManager->sendToUser($userId, $payload);
+
+        if (! $sent) {
+            BridgeLog::error('session_lost recovery failed — could not re-send to bridge', [
+                'request_id' => $requestId,
+                'conversation_id' => $conversation->id,
+            ]);
+            $handler->dispatchError('bridge_send_failed', 'Could not recover the lost CLI session.');
+            $this->connectionManager->removePendingRequest($requestId);
+            unset($this->recoveredRequests[$requestId]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Rebuild a fresh-session ai_request payload for a conversation.
+     *
+     * Reconstructed entirely from the persisted conversation: the latest
+     * message is the turn to answer, everything before it is prior history.
+     * cli_session_id is null (fresh start) so the bridge seeds the new CLI
+     * session from the history.
+     *
+     * @return array<string, mixed>
+     */
+    private function buildFreshAiRequest(Conversation $conversation, string $requestId): array
+    {
+        $history = $conversation->historyFor();
+        $current = array_pop($history); // the latest (user) turn to respond to
+
+        $payload = [
+            'type' => MessageTypes::AI_REQUEST,
+            'request_id' => $requestId,
+            'conversation_id' => (string) $conversation->id,
+            'provider' => (string) ($conversation->provider ?? ''),
+            'message' => is_array($current) ? (string) ($current['content'] ?? '') : '',
+            'cli_session_id' => null,
+            'history' => array_values($history),
+            'tools' => $this->toolRegistry->toArray(),
+            'options' => ! empty($conversation->model) ? ['model' => $conversation->model] : [],
+        ];
+
+        if (! empty($conversation->system_prompt)) {
+            $payload['system_prompt'] = $conversation->system_prompt;
+        }
+
+        return $payload;
     }
 
     /**
@@ -644,6 +791,7 @@ class MessageHandler
         if ($handler) {
             $handler->dispatchError($code, $errorMessage);
             $this->connectionManager->removePendingRequest($requestId);
+            unset($this->recoveredRequests[$requestId]);
         }
 
         return null;
@@ -682,6 +830,7 @@ class MessageHandler
         if ($handler) {
             $handler->dispatchCancelled('Request was cancelled.');
             $this->connectionManager->removePendingRequest($requestId);
+            unset($this->recoveredRequests[$requestId]);
         }
 
         return null;

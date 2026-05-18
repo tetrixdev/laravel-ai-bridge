@@ -101,6 +101,12 @@ class ConversationController extends Controller
         return response()->json([
             'conversation' => $conversation,
             'messages' => $conversation->messages,
+            // The broadcast channel for this conversation's stream events. The
+            // chat UI subscribes to it as soon as a conversation is opened —
+            // before any message is sent — so a fast terminal event (e.g. an
+            // immediate error) cannot be broadcast before the browser is
+            // listening. Reverb does not replay missed events.
+            'channel' => $conversation->broadcastChannel(),
             // Soft signal: the registered tool set changed since this
             // conversation was created.
             'tools_stale' => $conversation->tools_hash !== null

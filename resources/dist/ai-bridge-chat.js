@@ -51,7 +51,8 @@
     .placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: #9ca3af; }
     .header { display: flex; align-items: center; justify-content: space-between;
         border-bottom: 1px solid #e5e7eb; padding: 10px 16px; }
-    .header .name { font-size: 14px; font-weight: 500; }
+    .header .name { font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 2px;
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .badge { background: #f3f4f6; color: #4b5563; border-radius: 999px; padding: 2px 8px; font-size: 11px; margin-left: 6px; }
     .stale { background: #fffbeb; color: #92400e; border-bottom: 1px solid #fde68a; padding: 6px 16px; font-size: 11px; }
     .messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
@@ -88,15 +89,59 @@
     button.dashed { width: 100%; border: 1px dashed #d1d5db; background: none; border-radius: 8px;
         padding: 6px; font-size: 11px; color: #4b5563; cursor: pointer; margin-top: 8px; }
     .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.4); display: flex;
-        align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+        align-items: center; justify-content: center; padding: 16px; z-index: 50;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        color: #111827; font-size: 14px; }
     .modal { background: #fff; border-radius: 12px; padding: 20px; width: 100%; max-width: 420px; }
     .modal h3 { margin: 0 0 12px; font-size: 16px; }
     .modal label { display: block; font-size: 12px; font-weight: 500; color: #4b5563; margin-bottom: 4px; }
     .modal select, .modal input, .modal textarea { width: 100%; margin-bottom: 12px; }
     .modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .hint { font-size: 12px; color: #4b5563; margin: 0 0 10px; }
     .cmd { background: #111827; color: #f3f4f6; border-radius: 8px; padding: 12px;
-        font-size: 11px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+        font-size: 13px; line-height: 1.5; overflow-x: auto; white-space: pre-wrap;
+        word-break: break-all; cursor: pointer; user-select: all;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .cmd:hover { background: #1f2937; }
+    .cmd-hint { font-size: 11px; color: #6b7280; margin-top: 6px; }
+    .cmd-hint.ok { color: #047857; font-weight: 500; }
     .hidden { display: none !important; }
+
+    /* Hamburger toggle for the sidebar drawer — hidden on desktop, where the
+       sidebar is always visible; revealed by the mobile media query below. */
+    .burger { display: none; align-items: center; justify-content: center;
+        background: none; border: 0; cursor: pointer; font-size: 18px; line-height: 1;
+        color: #4b5563; padding: 4px 8px; margin-right: 2px; }
+    .burger:hover { color: #111827; }
+    /* Backdrop behind the open drawer — only ever visible on mobile. */
+    .sidebar-backdrop { display: none; }
+
+    /* ── Mobile / narrow screens ──────────────────────────────────────
+       The 280px sidebar would eat most of a phone screen, so below 640px it
+       becomes an off-canvas drawer: hidden by default, slid in over the chat
+       by the .burger toggle (see togglesidebar), dismissed by the backdrop. */
+    @media (max-width: 640px) {
+        .root { position: relative; min-height: 0; height: 82vh; }
+        .sidebar {
+            position: absolute; top: 0; left: 0; bottom: 0;
+            width: 84%; max-width: 320px; z-index: 40;
+            transform: translateX(-100%); transition: transform .22s ease;
+            box-shadow: 2px 0 18px rgba(0,0,0,.18);
+        }
+        .root.sidebar-open .sidebar { transform: translateX(0); }
+        .sidebar-backdrop {
+            display: block; position: absolute; inset: 0; z-index: 30;
+            background: rgba(0,0,0,.4); opacity: 0; pointer-events: none;
+            transition: opacity .22s ease;
+        }
+        .root.sidebar-open .sidebar-backdrop { opacity: 1; pointer-events: auto; }
+        .burger { display: inline-flex; }
+        .header { padding: 10px 12px; }
+        .messages { padding: 12px; }
+        .msg .stack { max-width: 92%; }
+        .composer { padding: 8px; }
+        .composer input { min-width: 0; }
+    }
     `;
 
     class AiBridgeChat extends HTMLElement {
@@ -117,8 +162,10 @@
             this.s = {
                 conversations: [], connections: [], activeId: null, conv: null,
                 messages: [], toolsStale: false, setupOpen: false,
-                modal: null, bridgeCommand: null, streaming: false, error: null,
-                pulse: false, form: {},
+                modal: null, bridgeCommand: null, cmdCopied: false,
+                streaming: false, error: null, pulse: false, form: {},
+                // Mobile only: whether the off-canvas sidebar drawer is open.
+                sidebarOpen: false,
             };
 
             this.root = this.attachShadow({ mode: 'open' });
@@ -137,24 +184,81 @@
             await this.loadConnections();
             await this.loadConversations();
             this.renderAll();
-            this.startPolling();
+            // Live connection updates are pushed over Reverb (see
+            // subscribeConnections). Two cheap safety nets cover a status
+            // event that never arrives — Reverb not configured, the tab
+            // asleep, or a dropped broadcast: a refresh on tab re-focus, and
+            // a slow (60s) fallback poll. Both are no-ops when nothing
+            // meaningful changed (see refreshConnections / _connSnapshot).
+            this.connSnapshot = this._connSnapshot(this.s.connections);
+            this.subscribeConnections();
+            this._onVisible = () => {
+                if (document.visibilityState === 'visible') this.refreshConnections();
+            };
+            document.addEventListener('visibilitychange', this._onVisible);
+            this._fallbackTimer = setInterval(() => this.refreshConnections(), 60000);
         }
 
         disconnectedCallback() {
-            if (this.pollTimer) clearInterval(this.pollTimer);
+            if (this._onVisible) {
+                document.removeEventListener('visibilitychange', this._onVisible);
+                this._onVisible = null;
+            }
+            if (this._fallbackTimer) {
+                clearInterval(this._fallbackTimer);
+                this._fallbackTimer = null;
+            }
+            if (this.echo && this._connChannels) {
+                Object.keys(this._connChannels).forEach((ch) => {
+                    try { this.echo.leave(ch); } catch (e) {}
+                });
+            }
+            this._connChannels = {};
+            this.clearWatchdog();
+            if (this.echo && this._streamChannel) {
+                try { this.echo.leave(this._streamChannel); } catch (e) {}
+                this._streamChannel = null;
+            }
         }
 
-        // Re-fetch connections on an interval. A CLI bridge is started manually
-        // by the user AFTER this UI has loaded, so its advertised providers/
-        // models are not available on the first fetch — polling makes them
-        // appear (in the sidebar and the new-conversation modal) once it
-        // connects, without needing a page refresh.
-        startPolling() {
-            this.connSnapshot = JSON.stringify(this.s.connections);
-            this.pollTimer = setInterval(() => this.pollConnections(), 5000);
+        // ── live connection updates (push, with a slow poll fallback) ──
+        // A CLI bridge is started manually by the user AFTER this UI loads, so
+        // its providers/models are unknown on the first fetch. The bridge
+        // server broadcasts a "connection.status" event when one connects or
+        // drops; subscribeConnections() listens for it and refreshes. The 60s
+        // fallback poll in init() only covers a missed/undeliverable event.
+        async subscribeConnections() {
+            let echo;
+            try { echo = await this.getEcho(); } catch (e) { echo = null; }
+            if (!echo) return; // no Reverb configured — list updates on refocus
+            this._connChannels = this._connChannels || {};
+            const wanted = {};
+            this.s.connections.forEach((c) => { if (c.channel) wanted[c.channel] = true; });
+            // Drop channels for connections that no longer exist.
+            Object.keys(this._connChannels).forEach((ch) => {
+                if (!wanted[ch]) { try { echo.leave(ch); } catch (e) {} delete this._connChannels[ch]; }
+            });
+            // Subscribe to channels we are not yet listening on.
+            Object.keys(wanted).forEach((ch) => {
+                if (this._connChannels[ch]) return;
+                this._connChannels[ch] = true;
+                echo.private(ch).listen('.connection.status', () => this.refreshConnections());
+            });
         }
 
-        async pollConnections() {
+        // Snapshot of only the *meaningful* connection fields. The /connections
+        // payload also carries last_connected_at, which the server refreshes on
+        // every call — including it would make every snapshot differ and force
+        // a needless re-render. Compare on identity + capabilities only.
+        _connSnapshot(conns) {
+            return JSON.stringify((conns || []).map((c) => ({
+                id: c.id, type: c.type, name: c.name, providers: c.providers,
+            })));
+        }
+
+        // Re-fetch connections, re-rendering only if something meaningful
+        // changed. Triggered by a status push or by a tab re-focus.
+        async refreshConnections() {
             let data;
             try {
                 data = await this.apiCall('/connections');
@@ -162,12 +266,13 @@
                 return; // keep existing data on a transient failure
             }
             const conns = data.connections || [];
-            const snapshot = JSON.stringify(conns);
+            const snapshot = this._connSnapshot(conns);
             if (snapshot !== this.connSnapshot) {
                 this.connSnapshot = snapshot;
                 this.s.connections = conns;
                 this.renderAll();
             }
+            this.subscribeConnections(); // pick up channels for new connections
         }
 
         // ── HTTP ──────────────────────────────────────────────────────
@@ -198,9 +303,57 @@
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
         renderAll() {
+            const live = this._captureInputs();
+            const rootClass = 'root' + (this.s.sidebarOpen ? ' sidebar-open' : '');
+            // .sidebar-backdrop sits under the drawer; it is display:none on
+            // desktop and only catches taps (to close the drawer) on mobile.
             this.container.innerHTML =
-                `<div class="root">${this.sidebarHtml()}${this.mainHtml()}</div>${this.modalHtml()}`;
+                `<div class="${rootClass}">${this.sidebarHtml()}${this.mainHtml()}` +
+                `<div class="sidebar-backdrop" data-act="togglesidebar"></div></div>` +
+                `${this.modalHtml()}`;
+            this._restoreInputs(live);
             this.scrollDown();
+        }
+
+        // Capture in-progress text input before a re-render so an unrelated
+        // re-render (notably the periodic connection poll) never wipes what the
+        // user is typing, nor steals focus / caret position from them.
+        _captureInputs() {
+            const values = {};
+            const active = this.root.activeElement;
+            let focusKey = null, selStart = null, selEnd = null;
+            this.root.querySelectorAll('input, textarea').forEach((el) => {
+                const key = el.dataset.field || el.name;
+                if (!key) return;
+                values[key] = el.value;
+                if (el === active) {
+                    focusKey = key;
+                    try { selStart = el.selectionStart; selEnd = el.selectionEnd; } catch (e) {}
+                }
+            });
+            return { values, focusKey, selStart, selEnd };
+        }
+
+        // Restore values + focus + caret captured by _captureInputs(). Fields
+        // that no longer exist (e.g. the modal closed) are simply skipped.
+        _restoreInputs(live) {
+            if (!live) return;
+            this.root.querySelectorAll('input, textarea').forEach((el) => {
+                const key = el.dataset.field || el.name;
+                if (key && Object.prototype.hasOwnProperty.call(live.values, key)) {
+                    el.value = live.values[key];
+                }
+            });
+            if (live.focusKey) {
+                const el = this.root.querySelector(
+                    '[data-field="' + live.focusKey + '"], [name="' + live.focusKey + '"]');
+                if (el) {
+                    el.focus();
+                    if (live.selStart != null) {
+                        try { el.setSelectionRange(live.selStart, live.selEnd); } catch (e) {}
+                    }
+                }
+            }
         }
 
         sidebarHtml() {
@@ -233,13 +386,22 @@
         }
 
         mainHtml() {
-            if (!this.s.conv) return `<div class="main"><div class="placeholder">Select or start a conversation.</div></div>`;
+            // Hamburger that opens the sidebar drawer. Rendered in every state
+            // (incl. the empty placeholder) so a mobile user can always reach
+            // the conversation list; CSS hides it on desktop.
+            const burger = `<button class="burger" data-act="togglesidebar" aria-label="Show conversations" title="Conversations">☰</button>`;
+            if (!this.s.conv) {
+                return `<div class="main">
+                    <div class="header"><div class="name">${burger}Conversations</div><div></div></div>
+                    <div class="placeholder">Select or start a conversation.</div>
+                </div>`;
+            }
             const c = this.s.conv;
             const msgs = this.s.messages.map((m, mi) => this.msgHtml(m, mi)).join('');
             return `
             <div class="main">
                 <div class="header">
-                    <div class="name">${this.esc(c.title || 'Conversation #' + c.id)}</div>
+                    <div class="name">${burger}${this.esc(c.title || 'Conversation #' + c.id)}</div>
                     <div><span class="badge">${this.esc(c.provider || c.mode)}</span>${c.model ? `<span class="badge">${this.esc(c.model)}</span>` : ''}</div>
                 </div>
                 ${this.s.toolsStale ? '<div class="stale">This conversation runs on an older tool set — start a new conversation for the freshest tools.</div>' : ''}
@@ -296,8 +458,10 @@
                         <button class="primary" data-act="createchat" ${this.s.form.connectionId && this.s.form.provider ? '' : 'disabled'}>Create</button></div>`;
             } else if (this.s.modal === 'bridge') {
                 body = this.s.bridgeCommand
-                    ? `<h3>Add a CLI bridge</h3><p style="font-size:12px;color:#4b5563">Run this where your Codex / Claude / Gemini CLI is installed:</p>
-                       <div class="cmd">${this.esc(this.s.bridgeCommand)}</div>
+                    ? `<h3>Add a CLI bridge</h3>
+                       <p class="hint">Run this where your Codex / Claude / Gemini CLI is installed:</p>
+                       <div class="cmd" data-act="copycmd" title="Click to copy">${this.esc(this.s.bridgeCommand)}</div>
+                       <div class="cmd-hint ${this.s.cmdCopied ? 'ok' : ''}">${this.s.cmdCopied ? '✓ Copied to clipboard' : 'Click the command to copy it'}</div>
                        <div class="actions" style="margin-top:12px"><button class="primary" data-act="closemodal">Done</button></div>`
                     : `<h3>Add a CLI bridge</h3><label>Name (optional)</label><input data-field="name" value="${this.esc(this.s.form.name || '')}">
                        <div class="actions"><button class="ghost" data-act="closemodal">Cancel</button>
@@ -320,12 +484,14 @@
             const act = t.dataset.act;
             const id = t.dataset.id;
             if (act === 'open') this.openConversation(Number(id));
+            else if (act === 'togglesidebar') { this.s.sidebarOpen = !this.s.sidebarOpen; this.renderAll(); }
             else if (act === 'del') { e.stopPropagation(); this.deleteConversation(Number(id)); }
             else if (act === 'newchat') this.openModal('chat');
             else if (act === 'togglesetup') { this.s.setupOpen = !this.s.setupOpen; this.renderAll(); }
-            else if (act === 'addbridge') { this.s.form = {}; this.s.bridgeCommand = null; this.openModal('bridge'); }
+            else if (act === 'addbridge') { this.s.form = {}; this.s.bridgeCommand = null; this.s.cmdCopied = false; this.openModal('bridge'); }
             else if (act === 'addbyok') { this.s.form = {}; this.openModal('byok'); }
             else if (act === 'closemodal' || act === 'overlay') { if (act === 'overlay' && e.target !== t) return; this.s.modal = null; this.renderAll(); }
+            else if (act === 'copycmd') this.copyCommand();
             else if (act === 'createchat') this.createConversation();
             else if (act === 'createbridge') this.createBridge();
             else if (act === 'createbyok') this.createByok();
@@ -344,10 +510,31 @@
                     else this.refreshModalButtons();
                 });
             });
+            // Enter inside a modal text field submits the modal's primary
+            // action — modals are not <form>s, so the browser won't do it.
+            this.root.querySelectorAll('.modal input').forEach((el) => {
+                el.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    this.submitModal();
+                });
+            });
             const form = this.root.querySelector('[data-act="sendform"]');
             if (form) form.addEventListener('submit', (e) => { e.preventDefault(); this.send(form.draft.value); });
         }
         refreshModalButtons() { /* lightweight: re-render modal only */ this.renderAll(); }
+
+        // Commit any not-yet-blurred field values, then trigger the modal's
+        // primary action. Backs Enter-to-submit, since a `keydown` does not
+        // fire the `change` event that normally syncs fields into s.form.
+        submitModal() {
+            this.root.querySelectorAll('.modal [data-field]').forEach((el) => {
+                this.s.form[el.dataset.field] = el.value;
+            });
+            this.renderAll();
+            const btn = this.root.querySelector('.modal button.primary');
+            if (btn && !btn.disabled) btn.click();
+        }
 
         openModal(kind) { this.s.modal = kind; this.renderAll(); }
         selectedConnection() {
@@ -357,10 +544,13 @@
         // ── conversations ─────────────────────────────────────────────
         async openConversation(id) {
             this.s.activeId = id; this.s.error = null;
+            this.s.sidebarOpen = false; // close the mobile drawer once a chat is picked
+            let channel = null;
             try {
                 const d = await this.apiCall('/conversations/' + id);
                 this.s.conv = d.conversation;
                 this.s.toolsStale = !!d.tools_stale;
+                channel = d.channel || null;
                 this.s.messages = (d.messages || []).map((m) => ({
                     role: m.role,
                     blocks: (Array.isArray(m.blocks) && m.blocks.length)
@@ -369,6 +559,11 @@
                 }));
             } catch (e) { this.s.error = e.message; }
             this.renderAll();
+            // Subscribe to the conversation's stream channel NOW, on open —
+            // not when a message is sent. A fast terminal event (e.g. an
+            // immediate error) would otherwise be broadcast before the browser
+            // finished subscribing, and Reverb does not replay missed events.
+            if (channel) this.subscribeConversation(channel);
         }
         async deleteConversation(id) {
             await this.apiCall('/conversations/' + id, { method: 'DELETE' });
@@ -395,12 +590,49 @@
             } catch (e) { this.s.error = e.message; this.renderAll(); }
         }
         async createBridge() {
-            const d = await this.apiCall('/connections', {
-                method: 'POST', body: JSON.stringify({ type: 'bridge', name: this.s.form.name || null }),
-            });
-            this.s.bridgeCommand = d.command;
-            await this.loadConnections();
+            try {
+                const d = await this.apiCall('/connections', {
+                    method: 'POST', body: JSON.stringify({ type: 'bridge', name: this.s.form.name || null }),
+                });
+                this.s.bridgeCommand = d.command;
+                this.s.cmdCopied = false;
+                await this.loadConnections();
+                this.subscribeConnections(); // listen for the new bridge coming online
+            } catch (e) { this.s.error = e.message; this.s.modal = null; }
             this.renderAll();
+        }
+
+        // Copy the bridge command to the clipboard. Uses the async Clipboard
+        // API where available, with an execCommand fallback for non-HTTPS
+        // origins; brief "Copied" feedback is driven by the cmdCopied flag.
+        async copyCommand() {
+            const text = this.s.bridgeCommand || '';
+            let ok = false;
+            try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(text);
+                    ok = true;
+                }
+            } catch (e) { ok = false; }
+            if (!ok) {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+                ta.remove();
+            }
+            this.s.cmdCopied = ok;
+            this.renderAll();
+            if (ok) {
+                clearTimeout(this._cmdCopiedTimer);
+                this._cmdCopiedTimer = setTimeout(() => {
+                    this.s.cmdCopied = false;
+                    if (this.s.modal === 'bridge' && this.s.bridgeCommand) this.renderAll();
+                }, 2000);
+            }
         }
         async createByok() {
             await this.apiCall('/connections', {
@@ -424,6 +656,11 @@
             this.s.streaming = true;
             this.s.pulse = true;
             this.renderAll();
+            // Backstop: if nothing is heard back at all (a hung POST, a lost
+            // broadcast, Reverb misconfigured) the UI must not sit on
+            // "Thinking" forever. armWatchdog() ends the turn with an error;
+            // every received event resets it (see handleEvent).
+            this.armWatchdog();
 
             try {
                 const res = await fetch(this.api + '/conversations/' + this.s.activeId + '/stream', {
@@ -435,11 +672,35 @@
                 if (ct.includes('application/json')) {
                     const d = await res.json();
                     if (d.error) throw new Error(d.message || d.error);
-                    await this.listenReverb(d.channel);
+                    // Bridge mode: events arrive over Reverb. The channel was
+                    // already subscribed on conversation open; re-subscribing
+                    // here is idempotent and covers an older open path.
+                    const ok = await this.subscribeConversation(d.channel);
+                    if (!ok) { this.s.error = 'Reverb is not configured for this app.'; this.finish(); }
                 } else {
                     await this.readSse(res);
                 }
             } catch (e) { this.s.error = e.message; this.finish(); }
+        }
+
+        // ── watchdog: never let the UI hang on "Thinking" ─────────────
+        // A turn can stall with no terminal event — a dropped Reverb
+        // broadcast, an event broadcast before the browser subscribed, a
+        // misconfigured broadcaster. The watchdog ends such a turn: it shows
+        // an error and reloads the conversation (the assistant reply may have
+        // been persisted server-side even though its events never arrived).
+        armWatchdog() {
+            this.clearWatchdog();
+            this._watchdog = setTimeout(() => {
+                if (!this.s.streaming) return;
+                this.s.error = 'No response received — the turn timed out. '
+                    + 'The bridge or its connection may be down. '
+                    + 'Re-open the conversation to refresh it.';
+                this.finish();
+            }, 45000);
+        }
+        clearWatchdog() {
+            if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
         }
 
         async readSse(res) {
@@ -463,18 +724,45 @@
             this.finish();
         }
 
-        async listenReverb(channel) {
-            if (!this.reverb.key) { this.s.error = 'Reverb is not configured for this app.'; this.finish(); return; }
-            if (!this.echo) {
-                const Echo = await this.loadEcho();
-                this.echo = new Echo({
-                    broadcaster: 'reverb', key: this.reverb.key,
-                    wsHost: this.reverb.host, wsPort: Number(this.reverb.port), wssPort: Number(this.reverb.port),
-                    forceTLS: this.reverb.scheme === 'https', enabledTransports: ['ws', 'wss'],
-                    authEndpoint: '/broadcasting/auth',
-                });
+        // Lazily create the one shared Echo instance, reused by both the
+        // connection-status channels and the per-conversation stream channel.
+        // Resolves to null when Reverb is not configured for this app.
+        async getEcho() {
+            if (this.echo) return this.echo;
+            if (!this.reverb.key) return null;
+            if (!this._echoPromise) {
+                this._echoPromise = (async () => {
+                    const Echo = await this.loadEcho();
+                    this.echo = new Echo({
+                        broadcaster: 'reverb', key: this.reverb.key,
+                        wsHost: this.reverb.host, wsPort: Number(this.reverb.port), wssPort: Number(this.reverb.port),
+                        forceTLS: this.reverb.scheme === 'https', enabledTransports: ['ws', 'wss'],
+                        // Package-owned auth route — authorizes via the project's
+                        // resolvers, so it works without Laravel authentication.
+                        authEndpoint: this.api + '/broadcasting/auth',
+                    });
+                    return this.echo;
+                })();
             }
-            this.echo.private(channel).listen('.ai.stream', (e) => this.handleEvent(e));
+            return this._echoPromise;
+        }
+
+        // Subscribe to a conversation's stream channel for `.ai.stream` events.
+        // Idempotent: subscribing the already-subscribed channel is a no-op, so
+        // it is safe to call both on conversation open and again on send.
+        // Resolves to false when Reverb is not configured for this app.
+        async subscribeConversation(channel) {
+            if (!channel) return false;
+            const echo = await this.getEcho().catch(() => null);
+            if (!echo) return false;
+            if (this._streamChannel === channel) return true;
+            // Leave the previous conversation's channel before joining a new one.
+            if (this._streamChannel) {
+                try { echo.leave(this._streamChannel); } catch (e) {}
+            }
+            this._streamChannel = channel;
+            echo.private(channel).listen('.ai.stream', (e) => this.handleEvent(e));
+            return true;
         }
 
         /** Load vendored pusher + echo without touching the host's globals. */
@@ -483,8 +771,11 @@
             const hostPusher = window.Pusher, hostEcho = window.Echo;
             await this.loadScript(this.assets + '/pusher.min.js');
             await this.loadScript(this.assets + '/echo.iife.js');
-            this._EchoClass = window.Echo;
-            this._PusherClass = window.Pusher;
+            // The IIFE/UMD bundles expose a module namespace ({ default: Class })
+            // on the global, not the class itself — unwrap `.default` so
+            // `new Echo(...)` doesn't throw "Echo is not a constructor".
+            this._EchoClass = (window.Echo && window.Echo.default) || window.Echo;
+            this._PusherClass = (window.Pusher && window.Pusher.default) || window.Pusher;
             window.Pusher = this._PusherClass; // echo needs Pusher global at construct time
             // restore the host's references after capturing ours
             this._restoreGlobals = () => { window.Pusher = hostPusher; window.Echo = hostEcho; };
@@ -499,6 +790,8 @@
         }
 
         handleEvent(evt) {
+            // Any event means the turn is alive — push the watchdog back.
+            if (this.s.streaming) this.armWatchdog();
             const d = evt.data || {};
             switch (evt.event) {
                 case 'block_start':
@@ -522,6 +815,7 @@
             this.renderAll();
         }
         finish() {
+            this.clearWatchdog();
             this.s.streaming = false; this.s.pulse = false; this.current = null;
             this.loadConversations().then(() => this.renderAll());
             this.renderAll();

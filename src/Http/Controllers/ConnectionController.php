@@ -35,11 +35,20 @@ class ConnectionController extends Controller
     {
         $connections = $this->manager->connectionsQuery($request)->get();
 
-        $payload = $connections->map(function (Connection $connection) {
+        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
+
+        $payload = $connections->map(function (Connection $connection) use ($prefix) {
             $data = $connection->only(['id', 'type', 'name', 'last_connected_at']);
             $data['providers'] = $connection->isBridge()
                 ? $this->bridgeProviders($connection)
                 : $this->byokProviders($connection);
+
+            // The private channel that pushes this bridge's connect/disconnect
+            // status — the chat UI subscribes to it instead of polling. Only
+            // bridge connections have a CLI process whose presence can change.
+            if ($connection->isBridge()) {
+                $data['channel'] = $prefix.'.connection.'.$connection->id;
+            }
 
             return $data;
         });
@@ -85,10 +94,33 @@ class ConnectionController extends Controller
             $wsUrl = $this->websocketUrl();
             $response['token'] = $token;
             $response['websocket_url'] = $wsUrl;
-            $response['command'] = "npx @tetrixdev/ai-bridge@latest --server {$wsUrl} --token {$token}";
+            $response['command'] = $this->bridgeCommand($wsUrl, $token);
         }
 
         return response()->json($response, 201);
+    }
+
+    /**
+     * Build the command shown to the user for starting their CLI bridge.
+     *
+     * Defaults to the published npm package via npx. For local development of
+     * the bridge CLI itself, set ai-bridge.cli.local_path
+     * (AI_BRIDGE_CLI_LOCAL_PATH) to an ai-bridge repo checkout: when
+     * APP_ENV=local the command instead runs that checkout's build directly,
+     * so CLI changes can be tested without an npm publish. The checkout must be
+     * built first (`npm run build`).
+     */
+    private function bridgeCommand(string $wsUrl, string $token): string
+    {
+        $localPath = config('ai-bridge.cli.local_path');
+
+        if (app()->environment('local') && is_string($localPath) && $localPath !== '') {
+            $cli = rtrim($localPath, '/').'/dist/cli.js';
+
+            return "node {$cli} --server {$wsUrl} --token {$token}";
+        }
+
+        return "npx @tetrixdev/ai-bridge@latest --server {$wsUrl} --token {$token}";
     }
 
     /**

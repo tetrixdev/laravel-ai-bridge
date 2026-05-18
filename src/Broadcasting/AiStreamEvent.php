@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Broadcasting;
 
+use Illuminate\Broadcasting\InteractsWithBroadcasting;
 use Illuminate\Broadcasting\PrivateChannel;
 use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
 
@@ -23,6 +24,8 @@ use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
  */
 class AiStreamEvent implements ShouldBroadcastNow
 {
+    use InteractsWithBroadcasting;
+
     /**
      * @param  string  $channelName  The channel name WITHOUT the "private-" prefix
      *                               (e.g. "user.1.conversation.456"). PrivateChannel
@@ -36,7 +39,14 @@ class AiStreamEvent implements ShouldBroadcastNow
         public readonly string $requestId,
         public readonly string $event,
         public readonly array $data,
-    ) {}
+    ) {
+        // Pin the broadcast to AI Bridge's own connection (default "reverb").
+        // Laravel's BroadcastEvent only honours broadcastConnections() from the
+        // InteractsWithBroadcasting trait — a plain broadcastConnection() method
+        // is never consulted, so the event must call broadcastVia() explicitly
+        // or it falls back to the host app's (possibly unset) default.
+        $this->broadcastVia(config('ai-bridge.broadcasting.connection'));
+    }
 
     /**
      * Get the channel the event should broadcast on.
@@ -68,15 +78,5 @@ class AiStreamEvent implements ShouldBroadcastNow
             'event' => $this->event,
             'data' => $this->data,
         ];
-    }
-
-    /**
-     * Get the broadcast connection name.
-     */
-    public function broadcastConnection(): ?string
-    {
-        $connection = config('ai-bridge.broadcasting.connection');
-
-        return is_string($connection) ? $connection : null;
     }
 }

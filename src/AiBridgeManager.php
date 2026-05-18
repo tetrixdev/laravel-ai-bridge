@@ -21,6 +21,7 @@ use Tetrix\AiBridge\Streaming\ConversationRecorder;
 use Tetrix\AiBridge\Streaming\BridgeStream;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
+use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 
@@ -236,14 +237,11 @@ class AiBridgeManager
 
         $this->wireCallbacks($stream, $broadcast);
 
-        // For BYOK/managed modes (ChatCompletionsStream), start() blocks until the
-        // HTTP stream completes. Use afterResponse() to run the stream after the
-        // HTTP response (with the request_id/channel) has been sent to the client.
-        // For bridge mode, start() is already non-blocking, but afterResponse()
-        // is safe to use there too.
-        dispatch(function () use ($stream) {
-            $stream->start();
-        })->afterResponse();
+        // For BYOK/managed modes (ChatCompletionsStream), start() blocks until
+        // the HTTP stream completes; run it after the response (carrying the
+        // request_id/channel) has been sent. For bridge mode start() is already
+        // non-blocking, but deferring it is safe there too.
+        $this->startAfterResponse($stream, $requestId, $channel);
 
         return $requestId;
     }
@@ -285,6 +283,16 @@ class AiBridgeManager
 
         if ($mode === ProviderMode::Bridge) {
             $options['provider'] = $conversation->provider ?? '';
+            // The CLI session the bridge should resume for this conversation.
+            // Null on the first turn (or after a lost session was wiped) — the
+            // bridge then starts fresh and reports the new id back on `done`,
+            // which the serve process persists. The server owns this mapping;
+            // see BridgeStream::buildRequestBody() for how it shapes the
+            // request (history is sent only when this is null).
+            $options['cli_session_id'] = $conversation->cli_session_id;
+            if ($connection !== null && ! empty($connection->connection_key)) {
+                $options['user_id'] = $connection->connection_key;
+            }
             if ($connection !== null && ! empty($connection->connection_key)) {
                 $options['user_id'] = $connection->connection_key;
             }
@@ -366,11 +374,61 @@ class AiBridgeManager
 
         $this->wireCallbacks($stream, $broadcast);
 
-        dispatch(function () use ($stream) {
-            $stream->start();
-        })->afterResponse();
+        BridgeLog::info('relaying conversation message to bridge', [
+            'conversation_id' => $conversation->id,
+            'request_id' => $requestId,
+            'channel' => $channel,
+        ]);
+
+        $this->startAfterResponse($stream, $requestId, $channel);
 
         return $requestId;
+    }
+
+    /**
+     * Run a wired stream's start() after the HTTP response has been sent.
+     *
+     * Registered as a terminating callback — NOT dispatched via
+     * dispatch()->afterResponse(). By this point $stream is a StreamHandler
+     * with stream callbacks (Closures) wired into it; afterResponse() routes
+     * the job through the sync queue, which serializes it and throws
+     * "Serialization of 'Closure' is not allowed". That failure is silent to
+     * the browser, so the chat UI hangs on "Thinking" forever. Terminating
+     * callbacks are invoked directly and never serialized.
+     *
+     * Any failure is logged and re-broadcast as a stream `error` event, so a
+     * broken turn ends the UI's "Thinking" state instead of hanging, and is
+     * loud in the logs.
+     */
+    private function startAfterResponse(StreamHandler $stream, string $requestId, string $channel): void
+    {
+        app()->terminating(function () use ($stream, $requestId, $channel): void {
+            try {
+                BridgeLog::verbose('starting deferred stream', [
+                    'request_id' => $requestId,
+                    'channel' => $channel,
+                ]);
+
+                $stream->start();
+            } catch (\Throwable $e) {
+                BridgeLog::error('deferred stream start failed', [
+                    'request_id' => $requestId,
+                    'channel' => $channel,
+                    'error' => $e->getMessage(),
+                ]);
+
+                // Surface the failure to the browser so the UI leaves the
+                // "Thinking" state instead of hanging indefinitely.
+                try {
+                    event(new AiStreamEvent($channel, $requestId, 'error', [
+                        'code' => 'stream_start_failed',
+                        'message' => 'The request could not be started.',
+                    ]));
+                } catch (\Throwable) {
+                    // Broadcasting unavailable — the logged error is the record.
+                }
+            }
+        });
     }
 
     /**

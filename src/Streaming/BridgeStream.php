@@ -10,6 +10,7 @@ use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
+use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 
@@ -208,8 +209,17 @@ class BridgeStream implements StreamableProvider
             $payload['options'] = $requestOptions;
         }
 
-        if (isset($this->options['messages'])) {
-            $payload['messages'] = $this->options['messages'];
+        // The CLI session the bridge should resume (null = start fresh). The
+        // server owns this mapping; it is always sent so the bridge need not
+        // guess whether a conversation is new.
+        $cliSessionId = $this->options['cli_session_id'] ?? null;
+        $payload['cli_session_id'] = $cliSessionId;
+
+        // Prior history is sent ONLY when starting a fresh session — a resumed
+        // CLI session already holds its own context, so re-sending history
+        // there would be wasted bytes (and the bridge ignores it).
+        if ($cliSessionId === null && isset($this->options['messages'])) {
+            $payload['history'] = $this->options['messages'];
         }
 
         // Include registered tools so the bridge knows what's available
@@ -351,8 +361,12 @@ class BridgeStream implements StreamableProvider
                 $relayBody['system_prompt'] = $payload['system_prompt'];
             }
 
-            if (isset($payload['messages'])) {
-                $relayBody['messages'] = $payload['messages'];
+            // The CLI session to resume (null = fresh). Always forwarded.
+            $relayBody['cli_session_id'] = $payload['cli_session_id'] ?? null;
+
+            // Prior history — present only for a fresh session (see buildRequestBody()).
+            if (isset($payload['history'])) {
+                $relayBody['history'] = $payload['history'];
             }
 
             // Thread the broadcast channel so the serve process's RelayStream
@@ -360,6 +374,15 @@ class BridgeStream implements StreamableProvider
             if ($this->broadcastChannel !== null) {
                 $relayBody['channel'] = $this->broadcastChannel;
             }
+
+            BridgeLog::verbose('relay request payload', [
+                'request_id' => $relayBody['request_id'],
+                'url' => $url,
+                'provider' => $relayBody['provider'] ?? null,
+                'message' => $relayBody['message'],
+                'options' => $relayBody['options'],
+                'tools_count' => count($relayBody['tools']),
+            ]);
 
             $response = Http::withToken($internalToken)
                 ->timeout((int) config('ai-bridge.server.relay_timeout', 5))
@@ -369,7 +392,7 @@ class BridgeStream implements StreamableProvider
                 $body = $response->json();
                 $error = $body['error'] ?? 'unknown';
 
-                Log::error('AI Bridge: bridge server returned error', [
+                BridgeLog::error('bridge server returned error', [
                     'request_id' => $payload['request_id'] ?? '',
                     'status' => $response->status(),
                     'error' => $error,
@@ -386,9 +409,11 @@ class BridgeStream implements StreamableProvider
 
             // Request was accepted by the bridge server. Events will arrive
             // asynchronously via WebSocket → MessageHandler → broadcasting.
-            Log::info('AI Bridge: relayed request via HTTP API (events arrive via broadcasting)', [
+            BridgeLog::info('relayed request to bridge server (events arrive via broadcasting)', [
                 'request_id' => $payload['request_id'] ?? '',
                 'user_id' => $this->userId,
+                'url' => $url,
+                'conversation_id' => $payload['conversation_id'] ?? '',
             ]);
 
             // Under PHP-FPM the SSE response body is already closing when events
@@ -408,7 +433,7 @@ class BridgeStream implements StreamableProvider
             }
 
         } catch (\Exception $e) {
-            Log::error('AI Bridge: failed to relay request to bridge server', [
+            BridgeLog::error('failed to relay request to bridge server', [
                 'request_id' => $payload['request_id'] ?? '',
                 'url' => $url,
                 'error' => $e->getMessage(),
