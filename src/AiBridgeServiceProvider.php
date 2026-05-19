@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge;
 
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
@@ -120,6 +121,10 @@ class AiBridgeServiceProvider extends ServiceProvider
         // a conversation it is allowed to see — no separate channels.php needed.
         $this->registerBroadcastChannel();
 
+        // Relay bridge connect/disconnect events to the browser over Reverb so
+        // the chat UI reflects live connections without polling.
+        $this->registerConnectionStatusBroadcasting();
+
         // Register artisan commands
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -155,8 +160,40 @@ class AiBridgeServiceProvider extends ServiceProvider
                         ->exists();
                 },
             );
+
+            // Per-connection channel — carries bridge connect/disconnect pushes.
+            // Authorized via the project's connections resolver.
+            \Illuminate\Support\Facades\Broadcast::channel(
+                $prefix.'.connection.{connectionId}',
+                function ($user, $connectionId) {
+                    return app(AiBridgeManager::class)
+                        ->connectionsQuery(request())
+                        ->whereKey($connectionId)
+                        ->exists();
+                },
+            );
         } catch (\Throwable $e) {
             Log::warning('AI Bridge: could not register broadcast channel', ['error' => $e->getMessage()]);
         }
+    }
+
+    /**
+     * Wire bridge connect/disconnect events to the connection-status broadcast.
+     *
+     * The BridgeConnected / BridgeDisconnected events fire inside the
+     * long-running bridge server (ai-bridge:serve); this listener turns each
+     * into a ConnectionStatusEvent so the chat UI updates without polling.
+     */
+    private function registerConnectionStatusBroadcasting(): void
+    {
+        Event::listen(
+            \Tetrix\AiBridge\Events\BridgeConnected::class,
+            [\Tetrix\AiBridge\Listeners\BroadcastConnectionStatus::class, 'handleConnected'],
+        );
+
+        Event::listen(
+            \Tetrix\AiBridge\Events\BridgeDisconnected::class,
+            [\Tetrix\AiBridge\Listeners\BroadcastConnectionStatus::class, 'handleDisconnected'],
+        );
     }
 }

@@ -89,7 +89,7 @@ The bridge implements exponential backoff reconnection:
 | 4       | 8s       |
 | 5+      | 15s (cap)|
 
-On reconnect, the bridge sends a new `hello` message. The server re-associates the connection with the user. Active session mappings (conversation_id to cli_session_id) are preserved in the bridge's local state and survive reconnects.
+On reconnect, the bridge sends a new `hello` message. The server re-associates the connection with the user. The bridge holds no session state of its own — the server owns the `conversation_id → cli_session_id` mapping (see [Conversation Continuity](#conversation-continuity)), so a bridge restart loses nothing.
 
 ---
 
@@ -212,6 +212,11 @@ When the server needs an AI response (triggered by a user message in the browser
   "provider": "claude",
   "message": "The goblin chieftain steps forward, raising a gnarled staff...",
   "system_prompt": "You are a D&D Dungeon Master...",
+  "cli_session_id": null,
+  "history": [
+    {"role": "user", "content": "I enter the cave"},
+    {"role": "assistant", "content": "The cave mouth yawns before you..."}
+  ],
   "options": {
     "max_tokens": 4096,
     "temperature": 0.8
@@ -221,29 +226,33 @@ When the server needs an AI response (triggered by a user message in the browser
 
 **`request_id`**: Unique identifier for this request. All streaming events reference it.
 
-**`conversation_id`**: The server's conversation identifier. The bridge maps this to a local CLI session ID for continuity (see [Conversation Continuity](#conversation-continuity)).
+**`conversation_id`**: The server's conversation identifier.
 
 **`provider`**: Which CLI to use. Must match one of the available providers from the handshake. If the requested provider is unavailable, the bridge responds with an error.
 
-**`message`**: The new user message to send. This is NOT the full conversation history — the bridge uses session resume to maintain context (see [Conversation Continuity](#conversation-continuity)).
+**`message`**: The new user message to send.
 
-**`system_prompt`**: The system prompt. Sent on the first request for a conversation. On subsequent requests (session resume), this field is omitted — the CLI retains it from the original session.
+**`system_prompt`**: The system prompt. May be `null`.
+
+**`cli_session_id`**: The CLI session to resume, or `null` to start a fresh session. **The server owns this mapping** (persisted per conversation) and is the single source of truth — the bridge keeps no session map of its own. See [Conversation Continuity](#conversation-continuity).
+
+**`history`**: Prior conversation turns (`{role, content}`). Included only when `cli_session_id` is `null`, so a fresh CLI session can be seeded with context. Omitted when resuming — the resumed session already holds its history.
 
 **`options`**: Provider-agnostic generation options. The bridge maps these to CLI-specific flags where supported.
 
 ### Bridge → Server: `ai_request_ack`
 
-The bridge acknowledges receipt before starting the CLI process:
+The bridge acknowledges receipt before starting the CLI process, echoing the session it was asked to use:
 
 ```json
 {
   "type": "ai_request_ack",
   "request_id": "req_abc123",
-  "cli_session_id": "session_def456"
+  "cli_session_id": null
 }
 ```
 
-**`cli_session_id`**: The local CLI session ID being used (either new or resumed). Informational — the server doesn't need to store this.
+**`cli_session_id`**: The `cli_session_id` from the `ai_request` (the session being resumed, or `null` for a fresh start). Informational. The *resulting* session id — the one created or continued — is reported later on the `done` event.
 
 ---
 
@@ -251,90 +260,59 @@ The bridge acknowledges receipt before starting the CLI process:
 
 ### The Problem
 
-Web apps maintain conversation history as a list of messages. CLI tools maintain their own session state internally. We need to bridge these two models without duplicating context or losing history.
+Web apps maintain conversation history as a list of messages. CLI tools maintain their own session state internally. We bridge these two models without duplicating context or losing history.
 
-### The Solution: Session-Based Resume
+### The Solution: server-owned session resume
 
-None of the supported CLIs accept a raw messages array. All use session-based resume:
+Each CLI maintains its own resumable session:
 
 | Provider | Resume Command |
 |----------|---------------|
 | Codex    | `codex exec resume <SESSION_ID> "prompt"` |
-| Claude   | `claude -p --session-id <UUID> "prompt"` |
+| Claude   | `claude -p --resume <UUID> "prompt"` |
 | Gemini   | `gemini -p "prompt" --resume <UUID>` |
+
+The **server** owns the `conversation_id → cli_session_id` mapping (persisted in its database). The bridge is stateless about sessions: it does exactly what each `ai_request` tells it.
 
 ### How It Works
 
-1. **First message** in a conversation: Bridge starts a new CLI session with the system prompt and user message. The CLI creates a local session and returns a session ID.
+1. **First message** (`cli_session_id: null`): the bridge starts a fresh CLI session with the system prompt and user message; `history` (if any) is folded in as context. The CLI creates a session.
 
-2. **Bridge stores mapping**: `conversation_id → cli_session_id` in local state (in-memory map, persisted to `~/.ai-bridge/sessions.json`).
+2. **Bridge reports the session id**: the resulting `cli_session_id` is returned to the server on the `done` event. The server persists it on the conversation.
 
-3. **Subsequent messages**: Server sends only the new user message (not full history). Bridge looks up the `cli_session_id` for the `conversation_id` and resumes the session.
+3. **Subsequent messages**: the server sends the new user message with the stored `cli_session_id` (and no `history` — the session holds it). The bridge resumes that CLI session.
 
-4. **Prompt caching**: Works automatically — the CLI's session resume uses its native context caching.
+4. **Prompt caching**: works automatically — session resume uses each CLI's native context caching.
 
-5. **Session not found**: If the bridge can't find a local session (e.g., after machine restart, cleared cache), it responds with a `session_expired` error. The server can then either:
-   - Send a `session_reset` with the full conversation history for replay
-   - Start a fresh conversation
+5. **Lost session** — see below.
 
 ### Session Lifecycle
 
 ```
 Server                          Bridge                          CLI
   │                               │                              │
-  │──ai_request (conv_1, msg)───>│                              │
+  │─ai_request(conv_1,msg,sess:null,history)─>│                  │
   │                               │──new session + msg─────────>│
-  │                               │<─session_id + response──────│
-  │                               │  store: conv_1 → session_1  │
-  │<──streaming events───────────│                              │
+  │                               │<─session_1 + response───────│
+  │<─streaming events + done(cli_session_id: session_1)─────────│
+  │  persist: conv_1 → session_1  │                              │
   │                               │                              │
-  │──ai_request (conv_1, msg2)──>│                              │
-  │                               │  lookup: conv_1 → session_1 │
+  │─ai_request(conv_1,msg2,sess:session_1)──>│                   │
   │                               │──resume session_1 + msg2───>│
-  │                               │<─response───────────────────│
-  │<──streaming events───────────│                              │
+  │<─streaming events + done(cli_session_id: session_1)─────────│
 ```
 
-### Server → Bridge: `session_reset`
+### Lost session recovery (`session_lost`)
 
-When the bridge reports a lost session, the server can replay history:
+If the server sends a `cli_session_id` the bridge's CLI cannot resume (the session expired, the cache was cleared, or it was created on another machine), the bridge emits a stream `error` event with code **`session_lost`** and does **not** send `done`.
 
-```json
-{
-  "type": "session_reset",
-  "request_id": "req_abc123",
-  "conversation_id": "conv_xyz789",
-  "provider": "claude",
-  "system_prompt": "You are a D&D Dungeon Master...",
-  "history": [
-    {"role": "user", "content": "I enter the cave"},
-    {"role": "assistant", "content": "The cave mouth yawns before you..."},
-    {"role": "user", "content": "I light my torch"}
-  ],
-  "options": {
-    "max_tokens": 4096
-  }
-}
-```
+`session_lost` is recoverable, not fatal. The server:
 
-On `session_reset`, the bridge starts a **new** CLI session and feeds the history as a structured prompt preamble (formatted as a conversation transcript), followed by the last user message. This is a lossy recovery — prompt caching benefits are lost, but the conversation continues.
+1. Wipes the dead `cli_session_id` from the conversation.
+2. Silently re-issues the **same** `request_id` as a fresh request (`cli_session_id: null`, full `history` included).
+3. The browser keeps streaming on the same request — it never sees the lost session.
 
-### Session Persistence
-
-The bridge persists session mappings to `~/.ai-bridge/sessions.json`:
-
-```json
-{
-  "conv_xyz789": {
-    "provider": "claude",
-    "cli_session_id": "session_def456",
-    "created_at": "2026-05-14T10:30:00Z",
-    "last_used_at": "2026-05-14T11:45:00Z"
-  }
-}
-```
-
-Sessions are pruned after 7 days of inactivity.
+The re-issued turn produces its own `done` carrying a new `cli_session_id`, which the server persists. Recovery is attempted once per turn; a second failure surfaces as a normal error.
 
 ---
 
@@ -474,12 +452,15 @@ Signals the end of the AI response. No more events for this `request_id`.
     "usage": {
       "input_tokens": 1250,
       "output_tokens": 380
-    }
+    },
+    "cli_session_id": "session_def456"
   }
 }
 ```
 
 `usage` is optional — not all CLIs report token counts.
+
+`cli_session_id` is the CLI session this turn ran under — the id created on a fresh start, or the id resumed. The server persists it on the conversation so the next turn can resume. Absent/`null` when no session id was produced.
 
 #### `error`
 
@@ -496,6 +477,11 @@ An error occurred during generation.
   }
 }
 ```
+
+Notable `code` values:
+
+- **`session_lost`** — the request asked to resume a `cli_session_id` the CLI could not find. Recoverable: the server wipes the stored session and silently re-issues the turn fresh (see [Lost session recovery](#lost-session-recovery-session_lost)). No `done` follows a `session_lost`.
+- **`provider_error`** — a generic CLI/provider failure. Terminal; surfaced to the user.
 
 ### Example: Full Response Flow
 
@@ -642,7 +628,7 @@ The server also tracks heartbeats. If no `ping` is received for 2x the heartbeat
 | `invalid_token` | Connection token invalid or expired | User generates a new token in web UI |
 | `provider_unavailable` | Requested CLI not installed on bridge | Server falls back or notifies user |
 | `provider_error` | CLI exited with non-zero code | Retry or notify user |
-| `session_expired` | CLI session not found locally | Server sends `session_reset` or starts fresh |
+| `session_lost` | A resume of the requested `cli_session_id` failed (session expired/cleared/created elsewhere) | Recoverable: server wipes the stored session and silently re-issues the turn fresh with history. No `done` follows |
 | `timeout` | Request exceeded `request_timeout` | Server notifies user, can retry |
 | `bridge_disconnected` | WebSocket connection lost | Auto-reconnect with backoff |
 | `tool_error` | Tool execution failed | CLI handles gracefully in response |
@@ -657,13 +643,13 @@ For request-level errors (not streaming):
 {
   "type": "error",
   "request_id": "req_abc123",
-  "code": "session_expired",
-  "message": "No local session found for conversation conv_xyz789",
-  "recoverable": true
+  "code": "provider_unavailable",
+  "message": "Provider \"codex\" is not available on this bridge.",
+  "fatal": true
 }
 ```
 
-**`recoverable`**: Hint to the server whether this error can be recovered from (e.g., `session_expired` is recoverable via `session_reset`, `provider_unavailable` is not).
+**`fatal`**: Hint to the server whether this error is fatal (`true`) or recoverable (`false`). A `provider_unavailable` error is fatal — no recovery is possible without operator action.
 
 ---
 
@@ -781,7 +767,6 @@ The bridge maps all of these to the unified `block_start` / `block_delta` / `blo
 | `welcome` | After receiving `hello` |
 | `pong` | After receiving `ping` |
 | `ai_request` | New AI request for a conversation |
-| `session_reset` | Replay conversation after lost session |
 | `tool_resolve` | Returning tool execution result |
 | `tool_error` | Tool execution failed |
 

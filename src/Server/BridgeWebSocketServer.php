@@ -532,8 +532,14 @@ class BridgeWebSocketServer
             $payload['system_prompt'] = $body['system_prompt'];
         }
 
-        if (isset($body['messages'])) {
-            $payload['messages'] = $body['messages'];
+        // The CLI session the bridge should resume (null = start fresh). The
+        // server owns this mapping — always forwarded so the bridge need not
+        // guess whether the conversation is new.
+        $payload['cli_session_id'] = $body['cli_session_id'] ?? null;
+
+        // Prior history — present only when starting a fresh session.
+        if (isset($body['history'])) {
+            $payload['history'] = $body['history'];
         }
 
         // Forward tools from relay body so the bridge knows which tools are available

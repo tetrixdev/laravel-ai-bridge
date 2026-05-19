@@ -62,6 +62,17 @@ class StreamHandler
     private bool $cancelled = false;
 
     /**
+     * Block type for each open block, keyed by block_index.
+     *
+     * Per PROTOCOL.md only `block_start` carries `block_type`; `block_delta`
+     * and `block_stop` identify their block by `block_index` alone. We record
+     * each block's type from its block_start so deltas/stops can be resolved.
+     *
+     * @var array<int, BlockType>
+     */
+    private array $blockTypes = [];
+
+    /**
      * Whether a terminal event (done or error) has already been dispatched.
      * Prevents double-dispatch if both done and error fire.
      */
@@ -188,6 +199,7 @@ class StreamHandler
     {
         $this->cancelled = false;
         $this->terminated = false;
+        $this->blockTypes = [];
         $this->startedAt = microtime(true);
         $this->provider->start();
     }
@@ -217,6 +229,17 @@ class StreamHandler
     public function setConversationId(string $conversationId): void
     {
         $this->conversationId = $conversationId;
+    }
+
+    /**
+     * Get the conversation ID this stream belongs to ('' if unset).
+     *
+     * Used server-side to persist the CLI session id from a `done` event and
+     * to rebuild the request when recovering a lost session.
+     */
+    public function getConversationId(): string
+    {
+        return $this->conversationId;
     }
 
     /**
@@ -416,31 +439,51 @@ class StreamHandler
 
             return;
         }
-        $this->dispatchBlockStart($blockType, $event->data['block_index']);
+        $blockIndex = (int) ($event->data['block_index'] ?? 0);
+        $this->blockTypes[$blockIndex] = $blockType;
+        $this->dispatchBlockStart($blockType, $blockIndex);
     }
 
     /**
-     * Validate block_type and dispatch block_delta from a raw StreamEvent.
+     * Dispatch block_delta from a raw StreamEvent.
+     *
+     * block_delta events carry only `block_index` + `content` (PROTOCOL.md),
+     * so the type is resolved from the matching block_start via resolveBlockType().
      */
     private function dispatchBlockDeltaFromEvent(StreamEvent $event): void
     {
-        $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
-        if ($blockType === null) {
-            return; // Silently skip — warning already logged on block_start
-        }
-        $this->dispatchBlockDelta($blockType, $event->data['block_index'], $event->data['content'] ?? '');
+        $blockIndex = (int) ($event->data['block_index'] ?? 0);
+        $this->dispatchBlockDelta(
+            $this->resolveBlockType($event, $blockIndex),
+            $blockIndex,
+            $event->data['content'] ?? '',
+        );
     }
 
     /**
-     * Validate block_type and dispatch block_stop from a raw StreamEvent.
+     * Dispatch block_stop from a raw StreamEvent.
+     *
+     * Like block_delta, block_stop carries only `block_index` — the type is
+     * resolved from the matching block_start.
      */
     private function dispatchBlockStopFromEvent(StreamEvent $event): void
     {
-        $blockType = BlockType::tryFrom($event->data['block_type'] ?? '');
-        if ($blockType === null) {
-            return; // Silently skip — warning already logged on block_start
-        }
-        $this->dispatchBlockStop($blockType, $event->data['block_index']);
+        $blockIndex = (int) ($event->data['block_index'] ?? 0);
+        $this->dispatchBlockStop($this->resolveBlockType($event, $blockIndex), $blockIndex);
+    }
+
+    /**
+     * Resolve the block type for a block_delta / block_stop event.
+     *
+     * An explicit `block_type` on the event wins (legacy / BYOK providers that
+     * include it); otherwise fall back to the type recorded from this block's
+     * block_start, then to Text as a last resort.
+     */
+    private function resolveBlockType(StreamEvent $event, int $blockIndex): BlockType
+    {
+        return BlockType::tryFrom($event->data['block_type'] ?? '')
+            ?? $this->blockTypes[$blockIndex]
+            ?? BlockType::Text;
     }
 
     /**

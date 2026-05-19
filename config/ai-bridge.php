@@ -137,6 +137,53 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Logging
+    |--------------------------------------------------------------------------
+    |
+    | The package logs the bridge relay path (a message being relayed to a CLI
+    | bridge, stream events broadcast back, terminal done/error). This is the
+    | first place to look when the chat UI hangs on "Thinking".
+    |
+    | - 'channel': the log channel these messages go to. Leave null to use the
+    |   host app's default channel. Point it at a dedicated channel (e.g. a
+    |   daily channel with its own retention) to keep bridge logs separate.
+    |   If the named channel is not defined, the package falls back to the
+    |   default channel rather than throwing.
+    | - 'verbose': when true, also log per-event detail (every stream event,
+    |   relayed payloads) at debug level. Useful in development; noisy in
+    |   production.
+    |
+    */
+
+    'logging' => [
+        'channel' => env('AI_BRIDGE_LOG_CHANNEL'),
+        'verbose' => env('AI_BRIDGE_LOG_VERBOSE', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | CLI Bridge Command
+    |--------------------------------------------------------------------------
+    |
+    | The "Add a CLI bridge" flow hands the user a command to start their local
+    | bridge. By default this is `npx @tetrixdev/ai-bridge@latest`, which runs
+    | the published npm package.
+    |
+    | For local development of the bridge CLI itself, set 'local_path' to the
+    | absolute path of an ai-bridge repo checkout (on the machine that will run
+    | the command). When APP_ENV=local AND this is set, the generated command
+    | runs that checkout's build directly — `node <path>/dist/cli.js` — so CLI
+    | changes can be tested without publishing to npm. Build the checkout first
+    | (`npm run build`, or `npm run dev` to rebuild on change).
+    |
+    */
+
+    'cli' => [
+        'local_path' => env('AI_BRIDGE_CLI_LOCAL_PATH'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Streaming Options
     |--------------------------------------------------------------------------
     */

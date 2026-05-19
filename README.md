@@ -288,7 +288,31 @@ Full reference for `config/ai-bridge.php`:
 | `server.port` | `AI_BRIDGE_SERVER_PORT` | `8085` | Bridge WebSocket server port |
 | `broadcasting.enabled` | `AI_BRIDGE_BROADCAST` | `true` | Enable Reverb broadcasting |
 | `broadcasting.connection` | `AI_BRIDGE_BROADCAST_CONNECTION` | `reverb` | Broadcasting connection name |
+| `logging.channel` | `AI_BRIDGE_LOG_CHANNEL` | `null` | Log channel for the bridge relay path. `null` uses the app's default channel; point it at a dedicated channel (e.g. a `daily` channel with its own retention) to keep bridge logs separate. Falls back to the default channel if the named one is undefined. |
+| `logging.verbose` | `AI_BRIDGE_LOG_VERBOSE` | `false` | When `true`, also log per-event detail (every stream event, relayed payloads) at `debug` level. Useful in development; noisy in production. |
+| `cli.local_path` | `AI_BRIDGE_CLI_LOCAL_PATH` | `null` | Absolute path to an `ai-bridge` repo checkout. When set **and `APP_ENV=local`**, the "Add a CLI bridge" command runs that checkout's build (`node <path>/dist/cli.js`) instead of `npx @tetrixdev/ai-bridge@latest` — for testing CLI changes without an npm publish. Build the checkout first (`npm run build`). |
 | `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE and broadcast output. Set to `false` only when intentionally displaying AI reasoning to users. |
+
+### Relay-path logging
+
+When a bridge-mode chat hangs on "Thinking", the bridge relay log is the first
+place to look. A healthy turn logs `relaying conversation message to bridge`,
+then `relayed request to bridge server`, then a terminal `relayed stream done`
+(or `relayed stream error` with the cause). With `logging.verbose` on, every
+stream event and the relayed payload are logged too.
+
+Point `logging.channel` at a dedicated channel to keep these out of the main
+app log and give them their own retention — e.g. in `config/logging.php`:
+
+```php
+'ai-bridge' => [
+    'driver' => 'daily',
+    'path' => storage_path('logs/ai-bridge.log'),
+    'days' => env('AI_BRIDGE_LOG_DAYS', 7),
+],
+```
+
+then set `AI_BRIDGE_LOG_CHANNEL=ai-bridge`.
 
 ## Streaming to Browser
 
