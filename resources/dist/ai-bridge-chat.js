@@ -168,6 +168,13 @@
                 sidebarOpen: false,
             };
 
+            // Watchdog budgets (see armWatchdog). The first event after a send
+            // must absorb a cold CLI start + a possible transparent
+            // session_lost recovery, so it is given a wider window; once
+            // events are flowing, a long silence is a fair stall signal.
+            this.WATCHDOG_FIRST_MS = 120000;
+            this.WATCHDOG_STEADY_MS = 45000;
+
             this.root = this.attachShadow({ mode: 'open' });
             const style = document.createElement('style');
             style.textContent = CSS;
@@ -660,7 +667,10 @@
             // broadcast, Reverb misconfigured) the UI must not sit on
             // "Thinking" forever. armWatchdog() ends the turn with an error;
             // every received event resets it (see handleEvent).
-            this.armWatchdog();
+            // The FIRST event gets a wider budget — a cold CLI start, a fresh
+            // session seeded with long history, or a transparent session_lost
+            // recovery can all delay it well past the steady-state timeout.
+            this.armWatchdog(this.WATCHDOG_FIRST_MS);
 
             try {
                 const res = await fetch(this.api + '/conversations/' + this.s.activeId + '/stream', {
@@ -689,7 +699,7 @@
         // misconfigured broadcaster. The watchdog ends such a turn: it shows
         // an error and reloads the conversation (the assistant reply may have
         // been persisted server-side even though its events never arrived).
-        armWatchdog() {
+        armWatchdog(ms) {
             this.clearWatchdog();
             this._watchdog = setTimeout(() => {
                 if (!this.s.streaming) return;
@@ -697,7 +707,7 @@
                     + 'The bridge or its connection may be down. '
                     + 'Re-open the conversation to refresh it.';
                 this.finish();
-            }, 45000);
+            }, ms || this.WATCHDOG_STEADY_MS);
         }
         clearWatchdog() {
             if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }

@@ -293,9 +293,6 @@ class AiBridgeManager
             if ($connection !== null && ! empty($connection->connection_key)) {
                 $options['user_id'] = $connection->connection_key;
             }
-            if ($connection !== null && ! empty($connection->connection_key)) {
-                $options['user_id'] = $connection->connection_key;
-            }
         } elseif ($mode === ProviderMode::Byok && $connection !== null) {
             if (! empty($connection->endpoint)) {
                 $options['endpoint'] = $connection->endpoint;
