@@ -294,11 +294,14 @@ class MessageHandler
      */
     public function maybeRefreshToken(string $userId): ?string
     {
-        // Only managed CLI bridge tokens carry a `cid` claim — legacy
-        // user-scoped tokens and pre-authenticated (internal-relay) bridges
-        // both have no `cid` (the latter never validates a JWT in onOpen, so
-        // no exp/cid is recorded) and are deliberately left alone here: only
-        // tokens the server itself minted are eligible for refresh.
+        // Only managed CLI bridge tokens carry a `cid` claim (added in
+        // ConnectionController::generateBridgeToken()). Both auth paths —
+        // BridgeWebSocketHandler::onOpen() (?token= URL param) and the
+        // hello-body fallback — record the JWT's `cid` and `exp` when present,
+        // so a managed bridge is eligible for refresh regardless of which path
+        // authenticated it. Legacy user-scoped tokens (no `cid`) and any other
+        // connection without recorded claims are deliberately left alone:
+        // only tokens the server itself minted with a `cid` are refreshable.
         $cid = $this->connectionManager->getTokenCid($userId);
         $expiresAt = $this->connectionManager->getTokenExpiresAt($userId);
         if ($cid === null || $expiresAt === null) {

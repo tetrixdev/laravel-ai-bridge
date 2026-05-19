@@ -32,7 +32,7 @@ function connectionController(): ConnectionController
     return app(ConnectionController::class);
 }
 
-function decodeJson($response): array
+function connectionApiJson($response): array
 {
     return json_decode($response->getContent(), true);
 }
@@ -64,7 +64,7 @@ it('renames a connection via PATCH', function () {
     );
 
     expect($response->getStatusCode())->toBe(200)
-        ->and(decodeJson($response)['connection']['name'])->toBe('new name')
+        ->and(connectionApiJson($response)['connection']['name'])->toBe('new name')
         ->and($connection->fresh()->name)->toBe('new name');
 });
 
@@ -103,7 +103,7 @@ it('rotates the connection_key and returns a fresh token + command', function ()
         $connection->id,
     );
 
-    $body = decodeJson($response);
+    $body = connectionApiJson($response);
 
     expect($response->getStatusCode())->toBe(200);
     expect($body['token'])->toBeString()->not->toBeEmpty();
@@ -156,7 +156,7 @@ it('regenerate rejects a BYOK connection with 422', function () {
     );
 
     expect($response->getStatusCode())->toBe(422);
-    expect(decodeJson($response)['error'])->toBe('not_a_bridge');
+    expect(connectionApiJson($response)['error'])->toBe('not_a_bridge');
 });
 
 it('regenerate returns 404 for an unknown connection', function () {
