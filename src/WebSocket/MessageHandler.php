@@ -115,6 +115,7 @@ class MessageHandler
 
         return match ($type) {
             MessageTypes::HELLO => $this->handleHello($connectionId, $connection, $message),
+            MessageTypes::PROVIDERS_UPDATE => $this->handleProvidersUpdate($connectionId, $message),
             MessageTypes::PING => $this->handlePing($connectionId, $message),
             MessageTypes::AI_REQUEST_ACK => $this->handleAiRequestAck($connectionId, $message),
             MessageTypes::STREAM => $this->handleStreamEnvelope($connectionId, $message),
@@ -173,7 +174,7 @@ class MessageHandler
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
-            return $this->buildWelcomeResponse($connectionId);
+            return $this->buildWelcomeResponse($connectionId, $existingUserId);
         }
 
         // Not pre-authenticated — require token in the hello body
@@ -205,19 +206,61 @@ class MessageHandler
 
         // Register the connection with provider capabilities
         $providers = $message['providers'] ?? [];
-        $this->connectionManager->addConnection($userId, $connectionId, $connection, $providers);
+        $this->connectionManager->addConnection(
+            $userId,
+            $connectionId,
+            $connection,
+            $providers,
+            isset($decoded->exp) ? (int) $decoded->exp : null,
+            isset($decoded->cid) ? (int) $decoded->cid : null,
+        );
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
-        return $this->buildWelcomeResponse($connectionId);
+        return $this->buildWelcomeResponse($connectionId, $userId);
+    }
+
+    /**
+     * Handle a 'providers_update' message — the bridge re-detected its local
+     * CLIs mid-connection and the available set changed.
+     *
+     * Refreshes the connection's advertised providers in the connection
+     * manager (the same store hello populates), so the host application's
+     * provider list reflects what the bridge can currently run. No response
+     * is sent — this is a one-way notification.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function handleProvidersUpdate(string $connectionId, array $message): ?array
+    {
+        $userId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+
+        if ($userId === null) {
+            // A providers_update before the hello handshake completed — ignore.
+            Log::warning('AI Bridge: providers_update from unauthenticated connection', [
+                'connection_id' => $connectionId,
+            ]);
+
+            return null;
+        }
+
+        $providers = $message['providers'] ?? [];
+        $this->connectionManager->setProviders($userId, $providers);
+
+        $this->logBridgeConnection($userId, $connectionId, 'n/a', $providers, 'providers updated');
+
+        return null;
     }
 
     /**
      * Build the standard welcome response sent after successful handshake.
+     *
+     * Carries a `refreshed_token` when the bridge's current token is past half
+     * its life — see maybeRefreshToken().
      */
-    private function buildWelcomeResponse(string $connectionId): array
+    private function buildWelcomeResponse(string $connectionId, string $userId): array
     {
-        return [
+        $welcome = [
             'type' => MessageTypes::WELCOME,
             'session_id' => $connectionId,
             'tools' => $this->toolRegistry->toArray(),
@@ -226,6 +269,59 @@ class MessageHandler
                 'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
             ],
         ];
+
+        $refreshedToken = $this->maybeRefreshToken($userId);
+        if ($refreshedToken !== null) {
+            $welcome['refreshed_token'] = $refreshedToken;
+        }
+
+        return $welcome;
+    }
+
+    /**
+     * Re-issue a CLI bridge's connection token if it is past half its life.
+     *
+     * Bridges are semi-permanent, but their tokens still expire. Rather than
+     * mint a new JWT on every request, the server tops the token up only once
+     * it is older than half the configured bridge TTL — so in steady state a
+     * refresh happens roughly once per half-TTL. Called both at the handshake
+     * (delivered via `welcome.refreshed_token`) and by the server's periodic
+     * timer (delivered via a `token_refresh` message) so a bridge that keeps
+     * reconnecting AND one that stays connected for the full window are both
+     * covered.
+     *
+     * @return string|null  A fresh token, or null when no refresh is due.
+     */
+    public function maybeRefreshToken(string $userId): ?string
+    {
+        // Only managed CLI bridge tokens carry a `cid` claim (added in
+        // ConnectionController::generateBridgeToken()). Both auth paths —
+        // BridgeWebSocketHandler::onOpen() (?token= URL param) and the
+        // hello-body fallback — record the JWT's `cid` and `exp` when present,
+        // so a managed bridge is eligible for refresh regardless of which path
+        // authenticated it. Legacy user-scoped tokens (no `cid`) and any other
+        // connection without recorded claims are deliberately left alone:
+        // only tokens the server itself minted with a `cid` are refreshable.
+        $cid = $this->connectionManager->getTokenCid($userId);
+        $expiresAt = $this->connectionManager->getTokenExpiresAt($userId);
+        if ($cid === null || $expiresAt === null) {
+            return null;
+        }
+
+        $bridgeTtl = (int) config('ai-bridge.token.bridge_ttl', 2592000);
+
+        // Not due yet — more than half the lifetime still remains.
+        if (($expiresAt - time()) > intdiv($bridgeTtl, 2)) {
+            return null;
+        }
+
+        $token = $this->tokenManager->generate($userId, ['cid' => $cid], $bridgeTtl);
+
+        // Record the new expiry so the token is not refreshed again until it
+        // next ages out.
+        $this->connectionManager->setTokenExpiresAt($userId, time() + $bridgeTtl);
+
+        return $token;
     }
 
     /**

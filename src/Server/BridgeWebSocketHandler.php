@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
+use Tetrix\AiBridge\Contracts\SendableConnection;
+use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -68,7 +70,7 @@ class BridgeWebSocketHandler
                 'message' => 'Connection requires an Authorization: Bearer <token> header or a ?token= query parameter.',
             ]));
 
-            $conn->close();
+            $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
 
             return;
         }
@@ -91,9 +93,35 @@ class BridgeWebSocketHandler
                 'message' => 'Token validation failed.',
             ]));
 
-            $conn->close();
+            $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
 
             return;
+        }
+
+        // When the token names a specific connection (the `cid` claim added to
+        // CLI bridge tokens), confirm that connection still exists and its key
+        // has not been rotated. A token for a deleted or regenerated bridge has
+        // a valid signature but must not be allowed to authenticate. Tokens
+        // without the claim (legacy /ai-bridge/token) skip this check.
+        if (isset($decoded->cid)) {
+            $connection = Connection::find($decoded->cid);
+
+            if ($connection === null || (string) $connection->connection_key !== $userId) {
+                Log::info('AI Bridge Server: connection rejected — stale connection token', [
+                    'resource_id' => $resourceId,
+                    'cid' => $decoded->cid,
+                ]);
+
+                $conn->send(json_encode([
+                    'type' => MessageTypes::CONNECTION_ERROR,
+                    'error' => 'token_invalid',
+                    'message' => 'This bridge connection no longer exists or its token has been regenerated.',
+                ]));
+
+                $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
+
+                return;
+            }
         }
 
         // Store connection metadata
@@ -105,7 +133,16 @@ class BridgeWebSocketHandler
 
         // Register in the BridgeConnectionManager — BridgeConnection objects support
         // direct send via the BridgeConnectionManager::sendToUser() instanceof check.
-        $this->connectionManager->addConnection($userId, $connectionId, $conn);
+        // The token's expiry and `cid` claim are recorded so the server can
+        // re-issue the token before it lapses (see MessageHandler::maybeRefreshToken()).
+        $this->connectionManager->addConnection(
+            $userId,
+            $connectionId,
+            $conn,
+            [],
+            isset($decoded->exp) ? (int) $decoded->exp : null,
+            isset($decoded->cid) ? (int) $decoded->cid : null,
+        );
 
         Log::info('AI Bridge Server: connection established', [
             'connection_id' => $connectionId,

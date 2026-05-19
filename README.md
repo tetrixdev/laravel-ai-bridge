@@ -605,6 +605,37 @@ AiBridge::resolveConnectionsUsing(
 Listen for `ConversationCreated` / `ConnectionCreated` to link a newly created
 row to your owner model.
 
+### Connection lifecycle events
+
+The package dispatches synchronous events around connection lifecycle so your
+app can keep its own state in step:
+
+| Event | When | Use it to |
+|-------|------|-----------|
+| `ConnectionCreated` | a connection is registered via the HTTP API | link the new row to your owner/session model |
+| `ConnectionDeleted` | a connection is deleted via the HTTP API | run non-database cleanup tied to the connection |
+
+Each event carries the `Connection` and the live `Request`.
+
+**Cascading the delete.** Give your owner pivot a cascading foreign key so its
+rows are removed automatically when a connection is deleted — no listener
+needed for the database side:
+
+```php
+Schema::create('user_connection', function (Blueprint $table) {
+    $table->foreignId('user_id')->constrained()->cascadeOnDelete();
+    $table->foreignId('connection_id')
+        ->constrained('ai_bridge_connections')
+        ->cascadeOnDelete();
+    $table->primary(['user_id', 'connection_id']);
+});
+```
+
+With the cascade in place, listen for `ConnectionDeleted` only when you have
+*other* work to do (e.g. notifying a service, clearing a cache). For deletes
+that should be vetoed or cleaned up transactionally, you can also hook the
+Eloquent `deleting` event on `Tetrix\AiBridge\Models\Connection`.
+
 > **If your resolver reads the session** (e.g. `$request->session()`), the AI
 > Bridge routes must run with the **full cookie + session middleware stack** —
 > not `StartSession` alone. Configure `ai-bridge.route_middleware` accordingly:
@@ -633,9 +664,11 @@ row to your owner model.
 | `GET /ai-bridge/conversations/{id}` | Conversation + messages + `tools_stale` flag |
 | `DELETE /ai-bridge/conversations/{id}` | Delete a conversation |
 | `POST /ai-bridge/conversations/{id}/stream` | Send a message — SSE (BYOK/Managed) or a Reverb broadcast (Bridge) |
-| `GET /ai-bridge/connections` | List connections with their advertised providers/models |
+| `GET /ai-bridge/connections` | List connections with their advertised providers/models + live `connected` flag |
 | `POST /ai-bridge/connections` | Register a CLI bridge or BYOK connection |
-| `DELETE /ai-bridge/connections/{id}` | Delete a connection |
+| `PATCH /ai-bridge/connections/{id}` | Rename a connection |
+| `POST /ai-bridge/connections/{id}/regenerate` | Rotate a bridge's token (revokes the old one, disconnects any live bridge) |
+| `DELETE /ai-bridge/connections/{id}` | Delete a connection (disconnects any live bridge) |
 
 History injection retains prior text and tool calls/results but excludes
 thinking blocks; switching provider/model/mode mid-conversation is supported.
@@ -670,6 +703,12 @@ The component is a reference implementation — you are never locked into it.
    (as SSE `data:` lines, or as Reverb `.ai.stream` events): `block_start`,
    `block_delta` (`{block_type, content}`), `block_stop`, `tool_call`
    (`{tool_name, parameters}`), `done` (`{usage}`), `error`, `cancelled`.
+
+   The bundled component (`resources/dist/ai-bridge-chat.js`) is the working
+   reference for everything a client needs to do: API calls, Reverb channel
+   subscription via the package's `/broadcasting/auth` endpoint, reassembling
+   `block_*` events into rendered messages, and watchdog handling for stalled
+   turns. Read it as the example rather than re-deriving the contract.
 
 2. **Fork the component.** Copy `resources/dist/ai-bridge-chat.js` from the
    package into your app, adjust it, and point your own `<script>`/element at

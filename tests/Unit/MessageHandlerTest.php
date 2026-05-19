@@ -559,7 +559,9 @@ test('MessageTypes::all() contains all expected message type constants (EFF-006)
     expect($all)->toContain(MessageTypes::DONE);
     expect($all)->toContain(MessageTypes::TOOL_CALL);
     expect($all)->toContain(MessageTypes::CANCELLED);
-    expect($all)->toHaveCount(20);
+    expect($all)->toContain(MessageTypes::TOKEN_REFRESH);
+    expect($all)->toContain(MessageTypes::PROVIDERS_UPDATE);
+    expect($all)->toHaveCount(22);
 });
 
 test('MessageTypes::isValid() accepts known types and rejects unknown (EFF-006)', function () {
@@ -608,4 +610,120 @@ test('a tool_call for a relayed request executes a registered tool and yields to
     expect($response)->toBeArray();
     expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
     expect($response['result'])->toBe(['echoed' => ['val' => 'hi']]);
+});
+
+// --- providers_update: mid-connection provider sync ---
+
+test('providers_update from an authenticated bridge refreshes the connection providers', function () {
+    $this->manager->addConnection('user-1', 'conn-1', null, [
+        ['name' => 'claude', 'available' => true],
+    ]);
+
+    $newProviders = [
+        ['name' => 'claude', 'available' => true],
+        ['name' => 'codex', 'available' => true],
+    ];
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::PROVIDERS_UPDATE,
+        'providers' => $newProviders,
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    // One-way notification: no response is sent.
+    expect($response)->toBeNull();
+    expect($this->manager->getProviders('user-1'))->toBe($newProviders);
+});
+
+test('providers_update before the hello handshake is ignored', function () {
+    // No addConnection() — handshake never completed.
+    $rawMsg = json_encode([
+        'type' => MessageTypes::PROVIDERS_UPDATE,
+        'providers' => [['name' => 'claude', 'available' => true]],
+    ]);
+
+    $response = $this->messageHandler->handleMessage('orphan-conn', null, $rawMsg);
+
+    expect($response)->toBeNull();
+});
+
+// --- Token refresh: long-lived bridge tokens topped up at half-life ---
+
+test('maybeRefreshToken returns null for connections without a cid claim', function () {
+    // No cid recorded — this is a legacy user-scoped or pre-authenticated bridge.
+    $this->manager->addConnection('user-1', 'conn-1');
+
+    expect($this->messageHandler->maybeRefreshToken('user-1'))->toBeNull();
+});
+
+test('maybeRefreshToken returns null when token has more than half its life remaining', function () {
+    $bridgeTtl = 30 * 24 * 3600;
+    config(['ai-bridge.token.bridge_ttl' => $bridgeTtl]);
+
+    // Token issued just now — full TTL ahead.
+    $this->manager->addConnection('user-1', 'conn-1', null, [], time() + $bridgeTtl, 42);
+
+    expect($this->messageHandler->maybeRefreshToken('user-1'))->toBeNull();
+});
+
+test('maybeRefreshToken issues a fresh token once the current one is past half its life', function () {
+    $bridgeTtl = 30 * 24 * 3600;
+    config(['ai-bridge.token.bridge_ttl' => $bridgeTtl]);
+
+    // Token expires in less than half a TTL — refresh is due.
+    $oldExpiresAt = time() + intdiv($bridgeTtl, 4);
+    $this->manager->addConnection('user-1', 'conn-1', null, [], $oldExpiresAt, 42);
+
+    $newToken = $this->messageHandler->maybeRefreshToken('user-1');
+
+    expect($newToken)->toBeString();
+
+    // The fresh token must carry the same cid claim and subject as the original.
+    $decoded = app(TokenManager::class)->validate($newToken);
+    expect((string) $decoded->sub)->toBe('user-1');
+    expect((int) $decoded->cid)->toBe(42);
+
+    // Recorded expiry advances so a back-to-back call returns null instead of churning.
+    expect($this->manager->getTokenExpiresAt('user-1'))->toBeGreaterThan($oldExpiresAt);
+    expect($this->messageHandler->maybeRefreshToken('user-1'))->toBeNull();
+});
+
+test('welcome response carries refreshed_token when the bridge token is past half-life', function () {
+    $bridgeTtl = 30 * 24 * 3600;
+    config(['ai-bridge.token.bridge_ttl' => $bridgeTtl]);
+
+    // Pre-authenticate the connection with an aging token, so handleHello takes
+    // the pre-auth path and still includes refreshed_token in the welcome.
+    $this->manager->addConnection('user-1', 'conn-1', null, [], time() + 60, 99);
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::HELLO,
+        'version' => '0.1',
+        'providers' => [],
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response['type'])->toBe(MessageTypes::WELCOME);
+    expect($response)->toHaveKey('refreshed_token');
+    expect($response['refreshed_token'])->toBeString();
+});
+
+test('welcome response omits refreshed_token when the bridge token is fresh', function () {
+    $bridgeTtl = 30 * 24 * 3600;
+    config(['ai-bridge.token.bridge_ttl' => $bridgeTtl]);
+
+    $this->manager->addConnection('user-1', 'conn-1', null, [], time() + $bridgeTtl, 99);
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::HELLO,
+        'version' => '0.1',
+        'providers' => [],
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response['type'])->toBe(MessageTypes::WELCOME);
+    expect($response)->not->toHaveKey('refreshed_token');
 });

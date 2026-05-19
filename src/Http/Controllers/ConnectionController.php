@@ -39,15 +39,19 @@ class ConnectionController extends Controller
 
         $payload = $connections->map(function (Connection $connection) use ($prefix) {
             $data = $connection->only(['id', 'type', 'name', 'last_connected_at']);
-            $data['providers'] = $connection->isBridge()
-                ? $this->bridgeProviders($connection)
-                : $this->byokProviders($connection);
 
-            // The private channel that pushes this bridge's connect/disconnect
-            // status — the chat UI subscribes to it instead of polling. Only
-            // bridge connections have a CLI process whose presence can change.
             if ($connection->isBridge()) {
+                // Live capabilities + whether a CLI process is currently
+                // attached, so the UI can show an accurate status indicator.
+                $status = $this->bridgeLiveStatus($connection);
+                $data['providers'] = $status['providers'];
+                $data['connected'] = $status['connected'];
+
+                // The private channel that pushes this bridge's connect/disconnect
+                // status — the chat UI subscribes to it instead of polling.
                 $data['channel'] = $prefix.'.connection.'.$connection->id;
+            } else {
+                $data['providers'] = $this->byokProviders($connection);
             }
 
             return $data;
@@ -90,7 +94,7 @@ class ConnectionController extends Controller
         $response = ['connection' => $connection->fresh()];
 
         if ($connection->isBridge()) {
-            $token = $this->tokenManager->generate($connection->connection_key);
+            $token = $this->generateBridgeToken($connection);
             $wsUrl = $this->websocketUrl();
             $response['token'] = $token;
             $response['websocket_url'] = $wsUrl;
@@ -98,6 +102,120 @@ class ConnectionController extends Controller
         }
 
         return response()->json($response, 201);
+    }
+
+    /**
+     * PATCH /ai-bridge/connections/{id} — rename a connection.
+     */
+    public function update(Request $request, int|string $id): JsonResponse
+    {
+        $request->validate([
+            'name' => ['nullable', 'string', 'max:255'],
+        ]);
+
+        $connection = $this->manager->connectionsQuery($request)->whereKey($id)->first();
+
+        if ($connection === null) {
+            return response()->json(['error' => 'not_found', 'message' => 'Connection not found.'], 404);
+        }
+
+        // PATCH semantics: only touch the name when the field was sent.
+        if ($request->has('name')) {
+            $connection->name = $request->input('name');
+            $connection->save();
+        }
+
+        return response()->json(['connection' => $connection->fresh()]);
+    }
+
+    /**
+     * POST /ai-bridge/connections/{id}/regenerate — rotate a bridge's token.
+     *
+     * Rotates the connection_key so the previous token can never authenticate
+     * again, then actively disconnects any bridge still using it. Returns a
+     * fresh token + command for the user to start the bridge somewhere new.
+     */
+    public function regenerate(Request $request, int|string $id): JsonResponse
+    {
+        $connection = $this->manager->connectionsQuery($request)->whereKey($id)->first();
+
+        if ($connection === null) {
+            return response()->json(['error' => 'not_found', 'message' => 'Connection not found.'], 404);
+        }
+
+        if (! $connection->isBridge()) {
+            return response()->json([
+                'error' => 'not_a_bridge',
+                'message' => 'Only CLI bridge connections have a connection token.',
+            ], 422);
+        }
+
+        $oldKey = $connection->connection_key;
+
+        $connection->forceFill(['connection_key' => (string) Str::uuid()])->save();
+
+        // Cut off any bridge still attached with the old token. Its key no
+        // longer exists, so the handshake would reject a reconnect anyway —
+        // this just makes the running process exit now instead of later.
+        if (! empty($oldKey)) {
+            $this->disconnectBridge($oldKey);
+        }
+
+        $token = $this->generateBridgeToken($connection);
+        $wsUrl = $this->websocketUrl();
+
+        return response()->json([
+            'connection' => $connection->fresh(),
+            'token' => $token,
+            'websocket_url' => $wsUrl,
+            'command' => $this->bridgeCommand($wsUrl, $token),
+        ]);
+    }
+
+    /**
+     * Generate a CLI bridge connection token.
+     *
+     * Carries a `cid` claim (the connection id) so the WebSocket handshake can
+     * confirm the connection still exists and its key has not been rotated.
+     * Uses the long bridge TTL — bridges are semi-permanent connections.
+     */
+    private function generateBridgeToken(Connection $connection): string
+    {
+        return $this->tokenManager->generate(
+            (string) $connection->connection_key,
+            ['cid' => $connection->id],
+            (int) config('ai-bridge.token.bridge_ttl', 2592000),
+        );
+    }
+
+    /**
+     * Ask the bridge WebSocket server to drop the live connection for a key.
+     *
+     * Best-effort: a failure (server down, nothing connected) is fine — the
+     * caller has already invalidated the key in the database, so any bridge
+     * still holding the old token is rejected on its next handshake anyway.
+     * Logged at warning, not info, because a failure here means the CLI
+     * process will linger on a stale connection until its next reconnect —
+     * worth surfacing if it happens repeatedly.
+     */
+    private function disconnectBridge(string $connectionKey): void
+    {
+        try {
+            $relayToken = $this->tokenManager->generate(
+                $connectionKey,
+                ['scope' => TokenManager::INTERNAL_RELAY_SCOPE],
+                60,
+            );
+
+            Http::withToken($relayToken)
+                ->timeout((int) config('ai-bridge.server.relay_timeout', 5))
+                ->acceptJson()
+                ->post($this->internalApiBase().'/api/disconnect');
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: bridge disconnect request failed', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -134,24 +252,32 @@ class ConnectionController extends Controller
             return response()->json(['error' => 'not_found', 'message' => 'Connection not found.'], 404);
         }
 
+        // Cut off any live bridge before removing the row, so the CLI process
+        // exits immediately rather than lingering on an orphaned connection.
+        if ($connection->isBridge() && ! empty($connection->connection_key)) {
+            $this->disconnectBridge($connection->connection_key);
+        }
+
         $connection->delete();
+
+        event(new \Tetrix\AiBridge\Events\ConnectionDeleted($connection, $request));
 
         return response()->json(['status' => 'deleted']);
     }
 
     /**
-     * Live provider capabilities for a bridge connection.
+     * Live status (providers + whether a CLI process is attached) for a bridge.
      *
      * Queries the bridge WebSocket server's internal /api/status endpoint with
      * an internal_relay token scoped to the connection key. Falls back to the
-     * cached last_providers when the server is unreachable.
+     * cached last_providers (and connected=false) when the server is unreachable.
      *
-     * @return array<int, mixed>
+     * @return array{providers: array<int, mixed>, connected: bool}
      */
-    private function bridgeProviders(Connection $connection): array
+    private function bridgeLiveStatus(Connection $connection): array
     {
         if (empty($connection->connection_key)) {
-            return $connection->last_providers ?? [];
+            return ['providers' => $connection->last_providers ?? [], 'connected' => false];
         }
 
         try {
@@ -168,14 +294,15 @@ class ConnectionController extends Controller
 
             if ($response->successful()) {
                 $providers = $response->json('providers') ?? [];
+                $connected = (bool) $response->json('connected');
 
                 // Refresh the cache so capabilities survive a server restart.
                 $connection->forceFill([
                     'last_providers' => $providers,
-                    'last_connected_at' => $response->json('connected') ? now() : $connection->last_connected_at,
+                    'last_connected_at' => $connected ? now() : $connection->last_connected_at,
                 ])->save();
 
-                return $providers;
+                return ['providers' => $providers, 'connected' => $connected];
             }
         } catch (\Throwable $e) {
             Log::info('AI Bridge: bridge status unreachable for capabilities', [
@@ -184,7 +311,7 @@ class ConnectionController extends Controller
             ]);
         }
 
-        return $connection->last_providers ?? [];
+        return ['providers' => $connection->last_providers ?? [], 'connected' => false];
     }
 
     /**

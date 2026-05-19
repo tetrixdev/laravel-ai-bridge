@@ -23,11 +23,28 @@ final class MessageTypes
     /** Sent by bridge immediately after WebSocket upgrade. */
     public const HELLO = 'hello';
 
+    /**
+     * Sent by bridge mid-connection when its set of available provider CLIs
+     * changed since the hello — e.g. a CLI was installed or removed while the
+     * bridge stayed connected. The server refreshes the connection's
+     * advertised providers from it.
+     */
+    public const PROVIDERS_UPDATE = 'providers_update';
+
     /** Sent by server in response to a valid hello. */
     public const WELCOME = 'welcome';
 
     /** Sent by server when hello validation fails. */
     public const CONNECTION_ERROR = 'connection_error';
+
+    /**
+     * Sent by server to hand the bridge a fresh connection token.
+     *
+     * Bridge tokens are long-lived but still expire; the server re-issues one
+     * once the current token is past half its life so a long-running bridge
+     * never lapses. The bridge adopts the new token for future reconnects.
+     */
+    public const TOKEN_REFRESH = 'token_refresh';
 
     // ── Heartbeat ───────────────────────────────────────────────────────
 
@@ -130,8 +147,10 @@ final class MessageTypes
 
         return self::$allCache = [
             self::HELLO,
+            self::PROVIDERS_UPDATE,
             self::WELCOME,
             self::CONNECTION_ERROR,
+            self::TOKEN_REFRESH,
             self::PING,
             self::PONG,
             self::AI_REQUEST,
@@ -178,6 +197,7 @@ final class MessageTypes
     {
         return [
             self::HELLO,
+            self::PROVIDERS_UPDATE,
             self::PING,
             self::AI_REQUEST_ACK,
             self::STREAM,
@@ -205,6 +225,8 @@ final class MessageTypes
     {
         return [
             self::WELCOME,
+            self::CONNECTION_ERROR,
+            self::TOKEN_REFRESH,
             self::PONG,
             self::AI_REQUEST,
             self::SESSION_RESET,

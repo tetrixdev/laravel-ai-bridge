@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Event;
+use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Events\BridgeConnected;
@@ -360,4 +361,71 @@ test('failPendingRequestsForUser does not affect other users pending requests', 
 
     // user-2's request should still be there
     expect($this->manager->getPendingRequest('req-2'))->toBe($handler2);
+});
+
+// --- Token claim bookkeeping (cid + exp) for managed CLI bridges ---
+
+test('addConnection records the token exp and cid claims when provided', function () {
+    $expiresAt = time() + 3600;
+    $this->manager->addConnection('user-1', 'conn-1', null, [], $expiresAt, 99);
+
+    expect($this->manager->getTokenExpiresAt('user-1'))->toBe($expiresAt);
+    expect($this->manager->getTokenCid('user-1'))->toBe(99);
+});
+
+test('addConnection without token claims leaves cid and exp null', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+
+    expect($this->manager->getTokenExpiresAt('user-1'))->toBeNull();
+    expect($this->manager->getTokenCid('user-1'))->toBeNull();
+});
+
+test('setTokenExpiresAt updates the recorded expiry for an existing connection', function () {
+    $this->manager->addConnection('user-1', 'conn-1', null, [], time() + 60, 99);
+
+    $next = time() + 86400;
+    $this->manager->setTokenExpiresAt('user-1', $next);
+
+    expect($this->manager->getTokenExpiresAt('user-1'))->toBe($next);
+});
+
+test('setTokenExpiresAt is a no-op for an unknown user', function () {
+    // Must not throw, must not leak a partial row.
+    $this->manager->setTokenExpiresAt('unknown-user', time() + 3600);
+
+    expect($this->manager->hasConnection('unknown-user'))->toBeFalse();
+});
+
+// --- disconnectUser: forced drop on regenerate/delete ---
+
+test('disconnectUser closes the live connection with CLOSE_INVALID_TOKEN and removes it', function () {
+    $closedWith = null;
+    $conn = Mockery::mock(SendableConnection::class);
+    $conn->shouldReceive('close')
+        ->once()
+        ->andReturnUsing(function (int $code) use (&$closedWith) {
+            $closedWith = $code;
+        });
+
+    $this->manager->addConnection('user-1', 'conn-1', $conn);
+
+    expect($this->manager->disconnectUser('user-1'))->toBeTrue();
+    expect($closedWith)->toBe(SendableConnection::CLOSE_INVALID_TOKEN);
+    expect($this->manager->hasConnection('user-1'))->toBeFalse();
+});
+
+test('disconnectUser returns false when no connection is present', function () {
+    expect($this->manager->disconnectUser('nobody'))->toBeFalse();
+});
+
+test('disconnectUser swallows close() failures and still removes the connection', function () {
+    $conn = Mockery::mock(SendableConnection::class);
+    $conn->shouldReceive('close')
+        ->once()
+        ->andThrow(new RuntimeException('stream already closed'));
+
+    $this->manager->addConnection('user-1', 'conn-1', $conn);
+
+    expect($this->manager->disconnectUser('user-1'))->toBeTrue();
+    expect($this->manager->hasConnection('user-1'))->toBeFalse();
 });

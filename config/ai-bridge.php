@@ -46,6 +46,17 @@ return [
         'secret' => env('AI_BRIDGE_TOKEN_SECRET'),
         'ttl' => env('AI_BRIDGE_TOKEN_TTL', 86400), // 24 hours in seconds
 
+        // TTL for CLI bridge connection tokens. These are long-lived: a bridge
+        // is a semi-permanent connection, and the server tops the token up
+        // (re-issues it once past half its life) so a bridge that keeps
+        // connecting — or stays connected for the full window — never expires.
+        'bridge_ttl' => env('AI_BRIDGE_BRIDGE_TOKEN_TTL', 2592000), // 30 days in seconds
+
+        // How often the bridge server sweeps connected bridges to re-issue
+        // tokens that are past half their life. Far slower than the heartbeat —
+        // it only needs to fire well within bridge_ttl / 2.
+        'refresh_check_interval' => env('AI_BRIDGE_TOKEN_REFRESH_INTERVAL', 43200), // 12 hours
+
         // Audience claim that scopes tokens to this application instance, so
         // tokens issued for one deployment are rejected by another that shares
         // the same secret. Defaults to config('app.url') when left null.
