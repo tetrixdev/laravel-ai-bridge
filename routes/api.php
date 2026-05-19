@@ -62,6 +62,8 @@ Route::middleware($middleware)->prefix('ai-bridge')->group(function () {
 
         Route::get('/connections', [ConnectionController::class, 'index']);
         Route::post('/connections', [ConnectionController::class, 'store']);
+        Route::patch('/connections/{id}', [ConnectionController::class, 'update']);
+        Route::post('/connections/{id}/regenerate', [ConnectionController::class, 'regenerate']);
         Route::delete('/connections/{id}', [ConnectionController::class, 'destroy']);
     });
 

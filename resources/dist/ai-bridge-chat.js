@@ -44,9 +44,16 @@
     .setup { border-top: 1px solid #e5e7eb; padding: 12px; }
     .setup > button { width: 100%; display: flex; justify-content: space-between;
         background: none; border: 0; cursor: pointer; font-size: 12px; color: #4b5563; font-weight: 500; }
-    .conn { border: 1px solid #e5e7eb; background: #fff; border-radius: 8px; padding: 8px; font-size: 11px; margin-top: 8px; }
+    .conn { border: 1px solid #e5e7eb; background: #fff; border-radius: 8px; padding: 8px;
+        font-size: 11px; margin-top: 8px; cursor: pointer; }
+    .conn:hover { border-color: #9ca3af; background: #f9fafb; }
     .conn b { display: block; }
     .conn span { color: #6b7280; }
+    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+        margin-right: 5px; vertical-align: middle; }
+    .dot.on { background: #10b981; }
+    .dot.off { background: #d1d5db; }
+    button.ghost.danger { color: #b91c1c; }
     .main { flex: 1; display: flex; flex-direction: column; }
     .placeholder { flex: 1; display: flex; align-items: center; justify-content: center; color: #9ca3af; }
     .header { display: flex; align-items: center; justify-content: space-between;
@@ -260,6 +267,7 @@
         _connSnapshot(conns) {
             return JSON.stringify((conns || []).map((c) => ({
                 id: c.id, type: c.type, name: c.name, providers: c.providers,
+                connected: c.connected,
             })));
         }
 
@@ -374,7 +382,13 @@
                 </div>`).join('');
             const conns = this.s.connections.map((cn) => {
                 const provs = (cn.providers || []).map((p) => p.name).join(', ') || 'no providers';
-                return `<div class="conn"><b>${this.esc(cn.name || cn.type)}</b><span>${this.esc(provs)}</span></div>`;
+                // Only CLI bridges have a process whose presence can change —
+                // BYOK endpoints are always reachable, so they get no status dot.
+                const dot = cn.type === 'bridge'
+                    ? `<i class="dot ${cn.connected ? 'on' : 'off'}" title="${cn.connected ? 'Connected' : 'Not connected'}"></i>`
+                    : '';
+                return `<div class="conn" data-act="manageconn" data-id="${cn.id}" title="Manage this connection">` +
+                    `<b>${dot}${this.esc(cn.name || cn.type)}</b><span>${this.esc(provs)}</span></div>`;
             }).join('');
             return `
             <div class="sidebar">
@@ -480,8 +494,49 @@
                     <label>API key</label><input data-field="apiKey" type="password" placeholder="sk-…" value="${this.esc(this.s.form.apiKey || '')}">
                     <div class="actions"><button class="ghost" data-act="closemodal">Cancel</button>
                         <button class="primary" data-act="createbyok" ${this.s.form.endpoint && this.s.form.apiKey ? '' : 'disabled'}>Save</button></div>`;
+            } else if (this.s.modal === 'manage') {
+                body = this.manageModalHtml();
             }
             return `<div class="overlay" data-act="overlay"><div class="modal">${body}</div></div>`;
+        }
+
+        // Body of the "manage connection" modal — view status, rename,
+        // regenerate the token, or delete. Reached by clicking a connection
+        // card. After a regenerate it shows the fresh command (reusing the
+        // bridgeCommand state, exactly like the add-bridge flow).
+        manageModalHtml() {
+            const cn = this.s.connections.find((c) => String(c.id) === String(this.s.manageId));
+            if (!cn) {
+                return `<h3>Connection</h3>
+                    <p class="hint">This connection no longer exists.</p>
+                    <div class="actions"><button class="primary" data-act="closemodal">Close</button></div>`;
+            }
+            if (this.s.bridgeCommand) {
+                return `<h3>New bridge command</h3>
+                    <p class="hint">The previous token has been revoked. Run this where your
+                       Codex / Claude / Gemini CLI is installed:</p>
+                    <div class="cmd" data-act="copycmd" title="Click to copy">${this.esc(this.s.bridgeCommand)}</div>
+                    <div class="cmd-hint ${this.s.cmdCopied ? 'ok' : ''}">${this.s.cmdCopied ? '✓ Copied to clipboard' : 'Click the command to copy it'}</div>
+                    <div class="actions" style="margin-top:12px"><button class="primary" data-act="closemodal">Done</button></div>`;
+            }
+            const isBridge = cn.type === 'bridge';
+            const provs = (cn.providers || []).map((p) => p.name).join(', ') || 'none';
+            const status = isBridge
+                ? `<p class="hint"><i class="dot ${cn.connected ? 'on' : 'off'}"></i>` +
+                  `${cn.connected ? 'Connected' : 'Not connected'} · Providers: ${this.esc(provs)}</p>`
+                : '';
+            return `<h3>Manage ${isBridge ? 'CLI bridge' : 'BYOK endpoint'}</h3>
+                ${status}
+                <label>Name</label>
+                <input data-field="name" value="${this.esc(this.s.form.name || '')}" placeholder="${this.esc(cn.type)}">
+                <div class="actions" style="justify-content:space-between;margin-bottom:8px">
+                    <button class="ghost danger" data-act="deleteconn">Delete</button>
+                    ${isBridge ? '<button class="ghost" data-act="regenconn">Regenerate token</button>' : ''}
+                </div>
+                <div class="actions">
+                    <button class="ghost" data-act="closemodal">Cancel</button>
+                    <button class="primary" data-act="saveconn">Save</button>
+                </div>`;
         }
 
         // ── events ────────────────────────────────────────────────────
@@ -502,6 +557,10 @@
             else if (act === 'createchat') this.createConversation();
             else if (act === 'createbridge') this.createBridge();
             else if (act === 'createbyok') this.createByok();
+            else if (act === 'manageconn') this.openManage(Number(id));
+            else if (act === 'saveconn') this.saveConn();
+            else if (act === 'regenconn') this.regenConn();
+            else if (act === 'deleteconn') this.deleteConn();
             else if (act === 'togglethink') {
                 const b = this.s.messages[t.dataset.mi].blocks[t.dataset.bi];
                 b._open = !b._open; this.renderAll();
@@ -529,7 +588,21 @@
             const form = this.root.querySelector('[data-act="sendform"]');
             if (form) form.addEventListener('submit', (e) => { e.preventDefault(); this.send(form.draft.value); });
         }
-        refreshModalButtons() { /* lightweight: re-render modal only */ this.renderAll(); }
+        // Update the modal's primary-button enabled state IN PLACE. A full
+        // renderAll() here would rebuild the DOM in the window between a
+        // button's mousedown and mouseup — destroying the button mid-click so
+        // the click never lands, which is why "Create" used to need two
+        // clicks. Toggling .disabled leaves the element (and the click) intact.
+        refreshModalButtons() {
+            const f = this.s.form;
+            const toggle = (act, enabled) => {
+                const b = this.root.querySelector('.modal button[data-act="' + act + '"]');
+                if (b) b.disabled = !enabled;
+            };
+            if (this.s.modal === 'chat') toggle('createchat', !!(f.connectionId && f.provider));
+            else if (this.s.modal === 'byok') toggle('createbyok', !!(f.endpoint && f.apiKey));
+            // The 'bridge' and 'manage' modal primary buttons are never disabled.
+        }
 
         // Commit any not-yet-blurred field values, then trigger the modal's
         // primary action. Backs Enter-to-submit, since a `keydown` does not
@@ -609,6 +682,54 @@
             this.renderAll();
         }
 
+        // ── manage an existing connection (status / rename / regen / delete) ─
+        openManage(id) {
+            const cn = this.s.connections.find((c) => String(c.id) === String(id));
+            this.s.manageId = id;
+            this.s.bridgeCommand = null;
+            this.s.cmdCopied = false;
+            this.s.form = { name: (cn && cn.name) || '' };
+            this.openModal('manage');
+        }
+
+        async saveConn() {
+            try {
+                await this.apiCall('/connections/' + this.s.manageId, {
+                    method: 'PATCH', body: JSON.stringify({ name: this.s.form.name || null }),
+                });
+                this.s.modal = null;
+                await this.loadConnections();
+            } catch (e) { this.s.error = e.message; }
+            this.renderAll();
+        }
+
+        async deleteConn() {
+            const cn = this.s.connections.find((c) => String(c.id) === String(this.s.manageId));
+            const label = (cn && (cn.name || cn.type)) || 'this connection';
+            if (!confirm('Delete "' + label + '"? Any bridge currently connected with it '
+                + 'will be disconnected. This cannot be undone.')) return;
+            try {
+                await this.apiCall('/connections/' + this.s.manageId, { method: 'DELETE' });
+                this.s.modal = null;
+                await this.loadConnections();
+                this.subscribeConnections(); // drop the deleted bridge's status channel
+            } catch (e) { this.s.error = e.message; }
+            this.renderAll();
+        }
+
+        async regenConn() {
+            if (!confirm('Regenerate this bridge\'s token? The current token stops working '
+                + 'immediately — any bridge using it is disconnected and must be restarted '
+                + 'with the new command.')) return;
+            try {
+                const d = await this.apiCall('/connections/' + this.s.manageId + '/regenerate', { method: 'POST' });
+                this.s.bridgeCommand = d.command;
+                this.s.cmdCopied = false;
+                await this.loadConnections();
+            } catch (e) { this.s.error = e.message; this.s.modal = null; }
+            this.renderAll();
+        }
+
         // Copy the bridge command to the clipboard. Uses the async Clipboard
         // API where available, with an execCommand fallback for non-HTTPS
         // origins; brief "Copied" feedback is driven by the cmdCopied flag.
@@ -637,7 +758,7 @@
                 clearTimeout(this._cmdCopiedTimer);
                 this._cmdCopiedTimer = setTimeout(() => {
                     this.s.cmdCopied = false;
-                    if (this.s.modal === 'bridge' && this.s.bridgeCommand) this.renderAll();
+                    if ((this.s.modal === 'bridge' || this.s.modal === 'manage') && this.s.bridgeCommand) this.renderAll();
                 }, 2000);
             }
         }
@@ -805,6 +926,11 @@
             const d = evt.data || {};
             switch (evt.event) {
                 case 'block_start':
+                    // Show the "Thinking" pulse while a block is forming — it is
+                    // cleared by the first delta (content arriving) or by the
+                    // block_stop. Showing it on stop instead caused a flash on
+                    // the final block: stop turned it on, done turned it off.
+                    this.s.pulse = true;
                     this.current = { type: d.block_type || 'text', text: '', _open: false };
                     this.assistant.blocks.push(this.current);
                     break;
@@ -813,7 +939,7 @@
                     if (this.current) this.current.text += (d.content || '');
                     break;
                 case 'block_stop':
-                    this.s.pulse = true; this.current = null;
+                    this.s.pulse = false; this.current = null;
                     break;
                 case 'tool_call':
                     this.assistant.blocks.push({ type: 'tool_call', tool_name: d.tool_name, parameters: d.parameters || {} });

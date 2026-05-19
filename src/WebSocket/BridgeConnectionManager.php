@@ -32,7 +32,7 @@ class BridgeConnectionManager
     /**
      * Map of user_id => connection metadata.
      *
-     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>}>
+     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>, token_expires_at: int|null, token_cid: int|null}>
      */
     private array $connections = [];
 
@@ -79,8 +79,11 @@ class BridgeConnectionManager
      * @param  string  $connectionId  A unique identifier for this connection.
      * @param  mixed  $connection  The underlying WebSocket connection object.
      * @param  array<int, array<string, mixed>>  $providers  Provider capabilities from the bridge hello message.
+     * @param  int|null  $tokenExpiresAt  Unix timestamp at which the bridge's token expires, if known.
+     * @param  int|null  $tokenCid  The `cid` claim of the bridge token (the Connection row id), when present.
+     *                              Identifies a managed bridge connection whose token can be refreshed.
      */
-    public function addConnection(int|string $userId, string $connectionId, mixed $connection = null, array $providers = []): void
+    public function addConnection(int|string $userId, string $connectionId, mixed $connection = null, array $providers = [], ?int $tokenExpiresAt = null, ?int $tokenCid = null): void
     {
         $userId = (string) $userId;
 
@@ -94,6 +97,8 @@ class BridgeConnectionManager
             'connected_at' => time(),
             'connection' => $connection,
             'providers' => $providers,
+            'token_expires_at' => $tokenExpiresAt,
+            'token_cid' => $tokenCid,
         ];
 
         // Maintain reverse index for O(1) lookup by connection_id
@@ -212,6 +217,68 @@ class BridgeConnectionManager
     public function getProviders(int|string $userId): array
     {
         return $this->connections[(string) $userId]['providers'] ?? [];
+    }
+
+    /**
+     * Get the Unix timestamp at which the connection's token expires, if known.
+     */
+    public function getTokenExpiresAt(int|string $userId): ?int
+    {
+        return $this->connections[(string) $userId]['token_expires_at'] ?? null;
+    }
+
+    /**
+     * Get the `cid` claim (Connection row id) of the connection's token.
+     *
+     * Non-null only for managed CLI bridge connections — these are the
+     * connections whose token the server may refresh.
+     */
+    public function getTokenCid(int|string $userId): ?int
+    {
+        return $this->connections[(string) $userId]['token_cid'] ?? null;
+    }
+
+    /**
+     * Record a freshly-issued token's expiry after the connection's token has
+     * been re-issued, so it is not refreshed again until it next ages out.
+     */
+    public function setTokenExpiresAt(int|string $userId, int $expiresAt): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['token_expires_at'] = $expiresAt;
+        }
+    }
+
+    /**
+     * Forcibly disconnect a user's bridge — sends a close frame (code 4001, so
+     * the CLI treats it as fatal and stops reconnecting) and drops the
+     * connection. Used when a connection is deleted or its token regenerated.
+     *
+     * @return bool  True if a connection was present and closed.
+     */
+    public function disconnectUser(int|string $userId, ?string $reason = 'connection_revoked'): bool
+    {
+        $userId = (string) $userId;
+
+        $connection = $this->connections[$userId]['connection'] ?? null;
+
+        if ($connection instanceof SendableConnection) {
+            try {
+                $connection->close(4001);
+            } catch (\Throwable) {
+                // Best effort — the connection may already be gone.
+            }
+        }
+
+        if (! isset($this->connections[$userId])) {
+            return false;
+        }
+
+        $this->removeConnection($userId, $reason);
+
+        return true;
     }
 
     /**

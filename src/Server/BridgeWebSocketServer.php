@@ -85,6 +85,15 @@ class BridgeWebSocketServer
             $this->handleTcpConnection($tcpConnection, $handler);
         });
 
+        // Periodically top up long-lived bridge tokens. A bridge that stays
+        // connected without ever re-running the handshake would otherwise let
+        // its token lapse; this slow timer (default every 12h — far slower than
+        // the heartbeat) re-issues tokens that are past half their life.
+        $refreshInterval = (int) config('ai-bridge.token.refresh_check_interval', 43200);
+        if ($refreshInterval > 0) {
+            $this->loop->addPeriodicTimer($refreshInterval, fn () => $this->refreshAgingTokens());
+        }
+
         if ($onStart !== null) {
             // Schedule the callback to run after the loop starts
             $this->loop->futureTick($onStart);
@@ -323,6 +332,28 @@ class BridgeWebSocketServer
         return $this->port;
     }
 
+    /**
+     * Re-issue connection tokens for bridges whose token is past half its life.
+     *
+     * Driven by the periodic timer set up in start(). Delegates the half-life
+     * decision to MessageHandler::maybeRefreshToken() — the same logic used at
+     * the handshake — and pushes any fresh token to the bridge as a
+     * `token_refresh` message.
+     */
+    private function refreshAgingTokens(): void
+    {
+        foreach ($this->connectionManager->connectedUserIds() as $userId) {
+            $token = $this->messageHandler->maybeRefreshToken($userId);
+
+            if ($token !== null) {
+                $this->connectionManager->sendToUser($userId, [
+                    'type' => MessageTypes::TOKEN_REFRESH,
+                    'token' => $token,
+                ]);
+            }
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Internal HTTP API
     // -------------------------------------------------------------------------
@@ -331,9 +362,10 @@ class BridgeWebSocketServer
     // connected bridge clients through the same port.
     //
     // Endpoints:
-    //   POST /api/request   — Send an ai_request to a user's bridge
-    //   GET  /api/status    — Check connected users
-    //   GET  /api/health    — Health check
+    //   POST /api/request    — Send an ai_request to a user's bridge
+    //   POST /api/disconnect — Forcibly drop a user's bridge connection
+    //   GET  /api/status     — Check connected users
+    //   GET  /api/health     — Health check
     // -------------------------------------------------------------------------
 
     /**
@@ -397,6 +429,7 @@ class BridgeWebSocketServer
         match (true) {
             $method === 'GET' && $path === '/api/status' => $this->apiStatus($tcpConnection, $decoded),
             $method === 'POST' && $path === '/api/request' => $this->apiRequest($tcpConnection, $request, $decoded),
+            $method === 'POST' && $path === '/api/disconnect' => $this->apiDisconnect($tcpConnection, $decoded),
             default => $this->httpResponse($tcpConnection, 404, [
                 'error' => 'not_found',
                 'message' => "Unknown endpoint: {$method} {$path}",
@@ -438,6 +471,35 @@ class BridgeWebSocketServer
         }
 
         $this->httpResponse($tcpConnection, 200, $response);
+    }
+
+    /**
+     * POST /api/disconnect — Forcibly drop the authenticated user's bridge.
+     *
+     * Called by the web app when a connection is deleted or its token is
+     * regenerated. Closes the live WebSocket with code 4001 so the CLI exits
+     * instead of reconnecting. The user is the JWT sub claim — a relay token
+     * can only ever disconnect its own connection.
+     */
+    private function apiDisconnect(ConnectionInterface $tcpConnection, object $decoded): void
+    {
+        $userId = (string) ($decoded->sub ?? '');
+
+        if (empty($userId)) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'missing_subject',
+                'message' => 'Token is missing the "sub" claim.',
+            ]);
+
+            return;
+        }
+
+        $disconnected = $this->connectionManager->disconnectUser($userId, 'connection_revoked');
+
+        $this->httpResponse($tcpConnection, 200, [
+            'user_id' => $userId,
+            'disconnected' => $disconnected,
+        ]);
     }
 
     /**

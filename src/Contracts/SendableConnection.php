@@ -21,4 +21,10 @@ interface SendableConnection
      * Send a text message to the remote end.
      */
     public function send(string $data): void;
+
+    /**
+     * Close the connection, sending a WebSocket close frame with the given
+     * status code (e.g. 4001 to signal an invalid/rejected token).
+     */
+    public function close(int $code = 1000): void;
 }

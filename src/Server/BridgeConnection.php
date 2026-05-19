@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Server;
 
+use Ratchet\RFC6455\Messaging\Frame;
 use React\Stream\WritableStreamInterface;
 use Tetrix\AiBridge\Contracts\SendableConnection;
 
@@ -36,9 +37,15 @@ class BridgeConnection implements SendableConnection
 
     /**
      * Close the WebSocket connection.
+     *
+     * Sends a proper RFC 6455 close frame carrying the status code before
+     * ending the stream, so the client learns *why* it was disconnected.
+     * Notably code 4001 signals an invalid/rejected token — the bridge CLI
+     * treats that as fatal and stops retrying.
      */
-    public function close(): void
+    public function close(int $code = 1000): void
     {
-        $this->stream->end();
+        $closeFrame = new Frame(pack('n', $code), opcode: Frame::OP_CLOSE);
+        $this->stream->end($closeFrame->getContents());
     }
 }
