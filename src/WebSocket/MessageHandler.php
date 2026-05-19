@@ -295,7 +295,10 @@ class MessageHandler
     public function maybeRefreshToken(string $userId): ?string
     {
         // Only managed CLI bridge tokens carry a `cid` claim — legacy
-        // user-scoped tokens are left alone.
+        // user-scoped tokens and pre-authenticated (internal-relay) bridges
+        // both have no `cid` (the latter never validates a JWT in onOpen, so
+        // no exp/cid is recorded) and are deliberately left alone here: only
+        // tokens the server itself minted are eligible for refresh.
         $cid = $this->connectionManager->getTokenCid($userId);
         $expiresAt = $this->connectionManager->getTokenExpiresAt($userId);
         if ($cid === null || $expiresAt === null) {

@@ -252,9 +252,10 @@ class BridgeConnectionManager
     }
 
     /**
-     * Forcibly disconnect a user's bridge — sends a close frame (code 4001, so
-     * the CLI treats it as fatal and stops reconnecting) and drops the
-     * connection. Used when a connection is deleted or its token regenerated.
+     * Forcibly disconnect a user's bridge — sends a close frame
+     * ({@see SendableConnection::CLOSE_INVALID_TOKEN}, so the CLI treats it
+     * as fatal and stops reconnecting) and drops the connection. Used when a
+     * connection is deleted or its token regenerated.
      *
      * @return bool  True if a connection was present and closed.
      */
@@ -266,7 +267,7 @@ class BridgeConnectionManager
 
         if ($connection instanceof SendableConnection) {
             try {
-                $connection->close(4001);
+                $connection->close(SendableConnection::CLOSE_INVALID_TOKEN);
             } catch (\Throwable) {
                 // Best effort — the connection may already be gone.
             }

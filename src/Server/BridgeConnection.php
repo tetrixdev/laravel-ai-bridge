@@ -40,8 +40,9 @@ class BridgeConnection implements SendableConnection
      *
      * Sends a proper RFC 6455 close frame carrying the status code before
      * ending the stream, so the client learns *why* it was disconnected.
-     * Notably code 4001 signals an invalid/rejected token — the bridge CLI
-     * treats that as fatal and stops retrying.
+     * Notably {@see SendableConnection::CLOSE_INVALID_TOKEN} signals an
+     * invalid/rejected token — the bridge CLI treats that as fatal and
+     * stops retrying.
      */
     public function close(int $code = 1000): void
     {

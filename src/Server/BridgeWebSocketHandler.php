@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
+use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
@@ -69,7 +70,7 @@ class BridgeWebSocketHandler
                 'message' => 'Connection requires an Authorization: Bearer <token> header or a ?token= query parameter.',
             ]));
 
-            $conn->close(4001);
+            $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
 
             return;
         }
@@ -92,7 +93,7 @@ class BridgeWebSocketHandler
                 'message' => 'Token validation failed.',
             ]));
 
-            $conn->close(4001);
+            $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
 
             return;
         }
@@ -117,7 +118,7 @@ class BridgeWebSocketHandler
                     'message' => 'This bridge connection no longer exists or its token has been regenerated.',
                 ]));
 
-                $conn->close(4001);
+                $conn->close(SendableConnection::CLOSE_INVALID_TOKEN);
 
                 return;
             }

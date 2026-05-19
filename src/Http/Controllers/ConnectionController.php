@@ -192,7 +192,11 @@ class ConnectionController extends Controller
      * Ask the bridge WebSocket server to drop the live connection for a key.
      *
      * Best-effort: a failure (server down, nothing connected) is fine — the
-     * caller has already invalidated the key in the database.
+     * caller has already invalidated the key in the database, so any bridge
+     * still holding the old token is rejected on its next handshake anyway.
+     * Logged at warning, not info, because a failure here means the CLI
+     * process will linger on a stale connection until its next reconnect —
+     * worth surfacing if it happens repeatedly.
      */
     private function disconnectBridge(string $connectionKey): void
     {
@@ -208,7 +212,7 @@ class ConnectionController extends Controller
                 ->acceptJson()
                 ->post($this->internalApiBase().'/api/disconnect');
         } catch (\Throwable $e) {
-            Log::info('AI Bridge: bridge disconnect request failed', [
+            Log::warning('AI Bridge: bridge disconnect request failed', [
                 'error' => $e->getMessage(),
             ]);
         }
