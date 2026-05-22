@@ -447,10 +447,24 @@
                         <div class="body ${b._open ? '' : 'hidden'}">${this.esc(b.text)}</div></div>`;
                 }
                 if (b.type === 'tool_call') {
+                    // Defensive: a tool_call block with no name carries nothing
+                    // worth showing — never render an empty "🔧" block.
+                    if (!b.tool_name) return '';
                     return `<div class="tool"><b>🔧 ${this.esc(b.tool_name)}</b>
                         <pre>${this.esc(JSON.stringify(b.parameters || {}, null, 2))}</pre>
                         ${b.result !== undefined ? `<div class="res">→ ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
                 }
+                if (b.type === 'tool_result') {
+                    // Persisted conversations store tool results as their own
+                    // blocks. An empty result has nothing to show — rendering it
+                    // would leave a blank grey bubble. Show it only when there
+                    // is content.
+                    const r = b.result;
+                    if (r === undefined || r === null || r === '') return '';
+                    return `<div class="tool"><div class="res">→ ${this.esc(typeof r === 'string' ? r : JSON.stringify(r))}</div></div>`;
+                }
+                // Skip empty text blocks — a blank bubble is just visual noise.
+                if (!b.text) return '';
                 return `<div class="bubble">${this.esc(b.text)}</div>`;
             }).join('');
             return `<div class="msg ${m.role}"><div class="stack">${blocks}</div></div>`;
@@ -777,6 +791,12 @@
             text = (text || '').trim();
             if (this.s.streaming || !text || !this.s.activeId) return;
             this.s.error = null;
+            // Clear the composer now that the message is accepted. Must happen
+            // before renderAll(): _captureInputs() snapshots live field values
+            // and _restoreInputs() would otherwise put the sent text straight
+            // back into the input.
+            const draftEl = this.root.querySelector('[name="draft"]');
+            if (draftEl) draftEl.value = '';
             this.s.messages.push({ role: 'user', blocks: [{ type: 'text', text }] });
             this.assistant = { role: 'assistant', blocks: [] };
             this.s.messages.push(this.assistant);
@@ -931,6 +951,15 @@
                     // block_stop. Showing it on stop instead caused a flash on
                     // the final block: stop turned it on, done turned it off.
                     this.s.pulse = true;
+                    // A tool_call block is delivered whole by the dedicated
+                    // 'tool_call' event (tool_name + parsed parameters). Its
+                    // block_start carries none of that, so pushing a block here
+                    // would render an empty "🔧" placeholder next to the real
+                    // one. Skip it — tool-input deltas are not needed either.
+                    if ((d.block_type || 'text') === 'tool_call') {
+                        this.current = null;
+                        break;
+                    }
                     this.current = { type: d.block_type || 'text', text: '', _open: false };
                     this.assistant.blocks.push(this.current);
                     break;
