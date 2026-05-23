@@ -191,6 +191,39 @@ return [
 
     'cli' => [
         'local_path' => env('AI_BRIDGE_CLI_LOCAL_PATH'),
+
+        /*
+        |----------------------------------------------------------------------
+        | CLI autonomy posture
+        |----------------------------------------------------------------------
+        |
+        | Controls how the bridge spawns provider CLIs (Claude, Codex, Gemini)
+        | when server-declared tools are present. The value is forwarded as
+        | `cli_autonomy` in the welcome message; the bridge translates it into
+        | a different per-provider flag set:
+        |
+        |   restricted  (default, safe)
+        |     - Server-declared tools are reached through the bridge's local
+        |       MCP server only. The CLI's built-in shell / edit / web tools
+        |       require approval and have no interactive approver in headless
+        |       mode, so the model effectively cannot use them.
+        |     - Use this for any deployment where end users send chat messages
+        |       to the bridge (e.g. DungeonMeister players).
+        |
+        |   trusted  (legacy, unsafe with untrusted input)
+        |     - The bridge ALSO passes the CLI-specific bypass flags
+        |       (`bypassPermissions` / `danger-full-access` / `--yolo`), so the
+        |       CLI's built-in shell and edit tools work too. The model can
+        |       run arbitrary shell against the machine running the bridge.
+        |     - Only appropriate when the bridge operator IS the user (e.g.
+        |       a developer running the bridge against their own repo). A
+        |       chat message from a third party in this mode can drive an
+        |       autonomous coding agent across the operator's disk.
+        |
+        | Default: restricted.
+        |
+        */
+        'autonomy' => env('AI_BRIDGE_CLI_AUTONOMY', 'restricted'),
     ],
 
     /*

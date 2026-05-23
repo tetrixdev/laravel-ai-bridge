@@ -268,6 +268,14 @@ class MessageHandler
                 'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
                 'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
             ],
+            // CLI sandbox posture. The bridge translates this into a different
+            // spawn-flag set per provider — `restricted` means MCP-only tools
+            // and no autonomous shell/edit; `trusted` keeps the legacy
+            // `bypassPermissions` / `danger-full-access` / `--yolo` flags as
+            // an operator opt-in. The bridge defaults to `restricted` when
+            // the field is absent, so the safe default holds for older
+            // bridges too — but we send it explicitly for clarity.
+            'cli_autonomy' => $this->resolveCliAutonomy(),
         ];
 
         $refreshedToken = $this->maybeRefreshToken($userId);
@@ -276,6 +284,21 @@ class MessageHandler
         }
 
         return $welcome;
+    }
+
+    /**
+     * Resolve the `cli_autonomy` posture for outgoing welcome messages.
+     *
+     * Reads `ai-bridge.cli.autonomy` and normalizes anything other than the
+     * literal `"trusted"` back to `"restricted"`. This makes typos or
+     * unexpected values default-safe rather than default-bypass — the explicit
+     * opt-in is what counts.
+     */
+    private function resolveCliAutonomy(): string
+    {
+        $value = config('ai-bridge.cli.autonomy', 'restricted');
+
+        return $value === 'trusted' ? 'trusted' : 'restricted';
     }
 
     /**
