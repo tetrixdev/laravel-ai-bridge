@@ -727,3 +727,55 @@ test('welcome response omits refreshed_token when the bridge token is fresh', fu
     expect($response['type'])->toBe(MessageTypes::WELCOME);
     expect($response)->not->toHaveKey('refreshed_token');
 });
+
+// --- cli_isolation in welcome response ---
+
+test('welcome response defaults cli_isolation to "isolated" when the config is unset', function () {
+    config(['ai-bridge.cli.isolation' => null]);
+
+    $token = app(TokenManager::class)->generate('user-1');
+    $rawMsg = json_encode([
+        'type' => MessageTypes::HELLO,
+        'version' => '0.1',
+        'providers' => [],
+        'token' => $token,
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response['type'])->toBe(MessageTypes::WELCOME);
+    expect($response['cli_isolation'])->toBe('isolated');
+});
+
+test('welcome response sends cli_isolation=native when the operator explicitly opts in', function () {
+    config(['ai-bridge.cli.isolation' => 'native']);
+
+    $token = app(TokenManager::class)->generate('user-1');
+    $rawMsg = json_encode([
+        'type' => MessageTypes::HELLO,
+        'version' => '0.1',
+        'providers' => [],
+        'token' => $token,
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response['cli_isolation'])->toBe('native');
+});
+
+test('welcome response normalises unrecognised cli_isolation values back to "isolated"', function () {
+    config(['ai-bridge.cli.isolation' => 'free-for-all']);
+
+    $token = app(TokenManager::class)->generate('user-1');
+    $rawMsg = json_encode([
+        'type' => MessageTypes::HELLO,
+        'version' => '0.1',
+        'providers' => [],
+        'token' => $token,
+    ]);
+
+    $response = $this->messageHandler->handleMessage('conn-1', null, $rawMsg);
+
+    // Typos / surprises default-safe, not default-leaky.
+    expect($response['cli_isolation'])->toBe('isolated');
+});

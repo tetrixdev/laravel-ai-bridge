@@ -268,6 +268,19 @@ class MessageHandler
                 'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
                 'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
             ],
+            // How much the local CLI environment is allowed to influence
+            // behaviour. The bridge translates this into a different per-
+            // provider flag set: `isolated` means MCP-only tools, no
+            // autonomous shell/edit, `--bare` for Claude, no other MCP
+            // servers, and a neutral fallback system prompt when the server
+            // didn't send one. `native` is the legacy posture and keeps the
+            // operator's full local environment (`bypassPermissions` /
+            // `danger-full-access` / `--yolo`, user CLAUDE.md / AGENTS.md /
+            // skills / hooks, configured MCP servers, default system prompt)
+            // intact. The bridge defaults to `isolated` when the field is
+            // absent, so the safe default holds for older bridges too — but
+            // we send it explicitly for clarity.
+            'cli_isolation' => $this->resolveCliIsolation(),
         ];
 
         $refreshedToken = $this->maybeRefreshToken($userId);
@@ -276,6 +289,21 @@ class MessageHandler
         }
 
         return $welcome;
+    }
+
+    /**
+     * Resolve the `cli_isolation` posture for outgoing welcome messages.
+     *
+     * Reads `ai-bridge.cli.isolation` and normalizes anything other than the
+     * literal `"native"` back to `"isolated"`. This makes typos or unexpected
+     * values default-safe rather than default-leaky — the explicit opt-in is
+     * what counts.
+     */
+    private function resolveCliIsolation(): string
+    {
+        $value = config('ai-bridge.cli.isolation', 'isolated');
+
+        return $value === 'native' ? 'native' : 'isolated';
     }
 
     /**
