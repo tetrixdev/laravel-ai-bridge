@@ -22,6 +22,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string|null $system_prompt
  * @property int|null $connection_id
  * @property string|null $cli_session_id
+ * @property string|null $streaming_request_id
  * @property string|null $session_provider
  * @property string|null $session_model
  * @property string|null $tools_hash
@@ -41,6 +42,7 @@ class Conversation extends Model
         'system_prompt',
         'connection_id',
         'cli_session_id',
+        'streaming_request_id',
         'session_provider',
         'session_model',
         'tools_hash',
@@ -65,21 +67,6 @@ class Conversation extends Model
     public function connection(): BelongsTo
     {
         return $this->belongsTo(Connection::class, 'connection_id');
-    }
-
-    /**
-     * The private Reverb channel this conversation broadcasts on.
-     *
-     * Shape: "{prefix}.conversation.{id}" — the prefix comes from
-     * config('ai-bridge.persistence.channel_prefix') (default "ai-bridge").
-     * This is the single source of truth for the channel name, shared by the
-     * streaming engine, the controller, and the channel-authorization route.
-     */
-    public function broadcastChannel(): string
-    {
-        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
-
-        return $prefix.'.conversation.'.$this->id;
     }
 
     /**

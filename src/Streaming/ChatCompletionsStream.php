@@ -377,7 +377,7 @@ class ChatCompletionsStream implements StreamableProvider
             $this->flushToolCalls($toolCallAccumulators, $toolCallsDispatched);
 
             // Stream ended without [DONE] — likely a connection drop or upstream error.
-            // Dispatch error so SSE/Reverb consumers don't hang indefinitely.
+            // Dispatch error so SSE consumers don't hang indefinitely.
             $this->streamHandler->dispatchError(
                 'stream_incomplete',
                 'Chat Completions stream ended without a [DONE] sentinel. The connection may have dropped.'

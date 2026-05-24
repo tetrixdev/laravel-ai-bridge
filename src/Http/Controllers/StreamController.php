@@ -12,11 +12,13 @@ use Tetrix\AiBridge\AiBridgeManager;
 use Tetrix\AiBridge\Enums\ProviderMode;
 
 /**
- * HTTP endpoints for streaming AI responses to the browser.
+ * Conversation-less SSE streaming endpoint.
  *
- * Provides two delivery methods:
- * - SSE: Server-Sent Events streamed directly in the HTTP response.
- * - Broadcast: Events pushed to a Laravel Reverb channel for real-time delivery.
+ * Provided for callers that want a one-shot AI response without persisting
+ * a conversation. The mainstream chat path is the conversation-based one in
+ * {@see ConversationController::stream()}; that endpoint hands back a
+ * `request_id` the browser tails over the resumable
+ * {@see StreamEventsController}.
  */
 class StreamController extends Controller
 {
@@ -48,56 +50,7 @@ class StreamController extends Controller
     }
 
     /**
-     * Reverb broadcast endpoint.
-     *
-     * POST /ai-bridge/stream/broadcast
-     *
-     * Accepts: conversation_id, message, system_prompt, options
-     * Returns: JSON { "status": "started", "request_id": "..." }
-     *
-     * Events are broadcast to a private Reverb channel derived server-side
-     * from the authenticated user. Clients listen via Laravel Echo.
-     */
-    public function broadcast(Request $request): JsonResponse
-    {
-        // SEC: Reject unauthenticated requests — no 'anon' fallback.
-        // Broadcasting to a channel without a real user ID would bypass authorization.
-        $userId = $request->user()?->getAuthIdentifier();
-        if ($userId === null) {
-            return response()->json([
-                'error' => 'unauthenticated',
-                'message' => 'Authentication required for broadcast streaming.',
-            ], 401);
-        }
-
-        $prepared = $this->prepareRequestOptions($request);
-        if ($prepared instanceof JsonResponse) {
-            return $prepared;
-        }
-
-        [$conversationId, $message, $options] = $prepared;
-
-        // SEC: Channel name is derived server-side to prevent cross-user injection.
-        // The client cannot choose which channel to broadcast on.
-        // Note: PrivateChannel prepends "private-" automatically, so pass without prefix.
-        $channel = "user.{$userId}.conversation.{$conversationId}";
-
-        $requestId = $this->manager->streamAndBroadcast(
-            $conversationId,
-            $message,
-            $channel,
-            $options,
-        );
-
-        return response()->json([
-            'status' => 'started',
-            'request_id' => $requestId,
-            'channel' => $channel,
-        ]);
-    }
-
-    /**
-     * Validate and prepare request options shared between sse() and broadcast().
+     * Validate and prepare request options shared with sse().
      *
      * Returns either a [conversationId, message, options] array on success,
      * or a JsonResponse on validation failure.

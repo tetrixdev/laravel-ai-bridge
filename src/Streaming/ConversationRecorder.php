@@ -59,6 +59,7 @@ final class ConversationRecorder
         $handler->onDone(function (?array $usage) use (&$blocks, &$current, $conversation) {
             self::flushCurrent($blocks, $current);
             self::persist($conversation, $blocks, $usage, false);
+            self::clearStreamingRequestId($conversation);
         });
 
         $persistPartial = function () use (&$blocks, &$current, $conversation) {
@@ -66,9 +67,31 @@ final class ConversationRecorder
             if (config('ai-bridge.persistence.persist_partial_on_error', true) && self::hasContent($blocks)) {
                 self::persist($conversation, $blocks, null, true);
             }
+            self::clearStreamingRequestId($conversation);
         };
         $handler->onError(fn () => $persistPartial());
         $handler->onCancelled(fn () => $persistPartial());
+    }
+
+    /**
+     * Clear the conversation's `streaming_request_id` once a turn terminates.
+     *
+     * Done in a separate UPDATE rather than via the model instance so the
+     * write is safe even if the recorder is operating on a stale Eloquent
+     * instance (e.g. across the web/serve process split).
+     */
+    private static function clearStreamingRequestId(Conversation $conversation): void
+    {
+        try {
+            Conversation::query()
+                ->whereKey($conversation->id)
+                ->update(['streaming_request_id' => null]);
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: failed to clear streaming_request_id', [
+                'conversation_id' => $conversation->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

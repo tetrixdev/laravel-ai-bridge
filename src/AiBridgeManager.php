@@ -9,17 +9,18 @@ use InvalidArgumentException;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\Auth\TokenManager;
-use Tetrix\AiBridge\Protocol\MessageTypes;
-use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
+use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Models\Message;
+use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
-use Tetrix\AiBridge\Streaming\ConversationRecorder;
 use Tetrix\AiBridge\Streaming\BridgeStream;
+use Tetrix\AiBridge\Streaming\BufferingSink;
 use Tetrix\AiBridge\Streaming\ChatCompletionsStream;
+use Tetrix\AiBridge\Streaming\ConversationRecorder;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\Tools\ToolRegistry;
@@ -68,18 +69,11 @@ class AiBridgeManager
      */
     public function stream(string $conversationId, string $message, array $options = []): StreamHandler
     {
-        // '_broadcasting' is an internal signal set only by streamAndBroadcast().
-        // Strip it so external callers cannot inject it through the public API.
-        unset($options['_broadcasting']);
-
         return $this->buildStream($conversationId, $message, $options);
     }
 
     /**
      * Build a configured StreamHandler from the given options.
-     *
-     * Internal counterpart of stream() that does NOT strip the '_broadcasting'
-     * key, so streamAndBroadcast() can pass it through to createBridgeProvider().
      *
      * @param  array<string, mixed>  $options
      */
@@ -203,49 +197,6 @@ class AiBridgeManager
         ]);
     }
 
-    /**
-     * Reverb broadcasting — starts a stream and broadcasts each event
-     * to the specified Reverb channel. Returns immediately with a request ID.
-     *
-     * Events are broadcast as "ai.stream" events on the given channel.
-     * The consuming app can listen via Laravel Echo / Reverb.
-     *
-     * @param  string  $conversationId  Unique conversation identifier.
-     * @param  string  $message  The user's message to send to the AI.
-     * @param  string  $channel  The broadcast channel name (e.g. "game.123").
-     * @param  array<string, mixed>  $options  Additional options (system_prompt, temperature, etc.).
-     * @return string  The request ID for this stream.
-     */
-    public function streamAndBroadcast(string $conversationId, string $message, string $channel, array $options = []): string
-    {
-        if (! config('ai-bridge.broadcasting.enabled', true)) {
-            throw new InvalidArgumentException(
-                'Broadcasting is disabled. Set AI_BRIDGE_BROADCAST=true in .env or use streamToResponse() for SSE.'
-            );
-        }
-
-        // Mark the provider as broadcasting mode before start() so relayViaHttpApi()
-        // under PHP-FPM suppresses the false bridge_sse_incompatible error. Use
-        // buildStream() (not stream()) so the '_broadcasting' signal is preserved.
-        $options['_broadcasting'] = true;
-        $stream = $this->buildStream($conversationId, $message, $options);
-        $requestId = $stream->requestId;
-
-        $broadcast = function (array $payload) use ($channel, $requestId): void {
-            event(new AiStreamEvent($channel, $requestId, $payload['event'], $payload['data']));
-        };
-
-        $this->wireCallbacks($stream, $broadcast);
-
-        // For BYOK/managed modes (ChatCompletionsStream), start() blocks until
-        // the HTTP stream completes; run it after the response (carrying the
-        // request_id/channel) has been sent. For bridge mode start() is already
-        // non-blocking, but deferring it is safe there too.
-        $this->startAfterResponse($stream, $requestId, $channel);
-
-        return $requestId;
-    }
-
     // ── Conversation streaming ────────────────────────────────────────
 
     /**
@@ -346,38 +297,59 @@ class AiBridgeManager
     }
 
     /**
-     * Reverb-broadcast streaming for a persisted conversation (Bridge mode).
+     * Start a buffered conversation stream and return its request_id.
      *
-     * Broadcasts on the per-conversation private channel. Returns the request ID.
+     * Initialises a per-turn entry in the {@see StreamStoreContract} buffer,
+     * marks the conversation as actively streaming, and kicks off the stream
+     * in a `terminating()` callback so the HTTP response carrying the
+     * request_id reaches the browser before the bridge round-trip starts.
+     * The browser then opens an SSE tail at `/ai-bridge/streams/{rid}/events`.
+     *
+     * Bridge mode is the primary caller (events arrive in the serve process,
+     * where {@see RelayStream} attaches a parallel {@see BufferingSink} to
+     * the relayed StreamHandler). BYOK/Managed callers can also use this —
+     * the stream runs synchronously in the web worker's terminating phase
+     * and writes events to the buffer there.
      */
-    public function streamConversationAndBroadcast(Conversation $conversation, string $message, array $options = []): string
+    public function startConversationStream(Conversation $conversation, string $message, array $options = []): string
     {
-        if (! config('ai-bridge.broadcasting.enabled', true)) {
-            throw new InvalidArgumentException(
-                'Broadcasting is disabled. Set AI_BRIDGE_BROADCAST=true in .env.'
-            );
-        }
-
-        $channel = $conversation->broadcastChannel();
-
-        $options['_broadcasting'] = true;
-        $options['_broadcast_channel'] = $channel;
         $stream = $this->streamConversation($conversation, $message, $options);
         $requestId = $stream->requestId;
 
-        $broadcast = function (array $payload) use ($channel, $requestId): void {
-            event(new AiStreamEvent($channel, $requestId, $payload['event'], $payload['data']));
-        };
-
-        $this->wireCallbacks($stream, $broadcast);
-
-        BridgeLog::info('relaying conversation message to bridge', [
-            'conversation_id' => $conversation->id,
-            'request_id' => $requestId,
-            'channel' => $channel,
+        $store = app(StreamStoreContract::class);
+        $store->start($requestId, [
+            'conversation_id' => (string) $conversation->id,
+            'started_at' => now()->toIso8601String(),
+            'provider' => $conversation->provider,
+            'model' => $conversation->model,
         ]);
 
-        $this->startAfterResponse($stream, $requestId, $channel);
+        // Mark the conversation as actively streaming so a fresh page-load can
+        // see "is something in flight here?" without scanning the buffer.
+        // Cleared by ConversationRecorder when the turn terminates.
+        try {
+            $conversation->forceFill(['streaming_request_id' => $requestId])->save();
+        } catch (\Throwable $e) {
+            Log::warning('AI Bridge: could not set streaming_request_id', [
+                'conversation_id' => $conversation->id,
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // Attach the buffering sink to the StreamHandler in THIS process.
+        // Bridge mode under PHP-FPM never sees events here (they arrive in the
+        // serve process and are buffered by the parallel sink there); this
+        // attach is harmless then. BYOK/Managed modes run the stream inline
+        // and the buffer is populated by this sink directly.
+        BufferingSink::attach($stream, $store);
+
+        BridgeLog::info('starting buffered conversation stream', [
+            'conversation_id' => $conversation->id,
+            'request_id' => $requestId,
+        ]);
+
+        $this->startAfterResponse($stream, $requestId, $store);
 
         return $requestId;
     }
@@ -386,43 +358,52 @@ class AiBridgeManager
      * Run a wired stream's start() after the HTTP response has been sent.
      *
      * Registered as a terminating callback — NOT dispatched via
-     * dispatch()->afterResponse(). By this point $stream is a StreamHandler
-     * with stream callbacks (Closures) wired into it; afterResponse() routes
-     * the job through the sync queue, which serializes it and throws
-     * "Serialization of 'Closure' is not allowed". That failure is silent to
-     * the browser, so the chat UI hangs on "Thinking" forever. Terminating
-     * callbacks are invoked directly and never serialized.
+     * dispatch()->afterResponse(). The stream callbacks hold Closures that
+     * afterResponse() would try to serialize, which fails silently and leaves
+     * the chat UI hanging. Terminating callbacks invoke directly without
+     * serialization.
      *
-     * Any failure is logged and re-broadcast as a stream `error` event, so a
-     * broken turn ends the UI's "Thinking" state instead of hanging, and is
-     * loud in the logs.
+     * Failures are logged and surfaced as a buffer `error` event so the UI
+     * leaves its "Thinking" state instead of hanging on a dead stream.
      */
-    private function startAfterResponse(StreamHandler $stream, string $requestId, string $channel): void
+    private function startAfterResponse(StreamHandler $stream, string $requestId, StreamStoreContract $store): void
     {
-        app()->terminating(function () use ($stream, $requestId, $channel): void {
+        app()->terminating(function () use ($stream, $requestId, $store): void {
             try {
                 BridgeLog::verbose('starting deferred stream', [
                     'request_id' => $requestId,
-                    'channel' => $channel,
                 ]);
 
                 $stream->start();
             } catch (\Throwable $e) {
                 BridgeLog::error('deferred stream start failed', [
                     'request_id' => $requestId,
-                    'channel' => $channel,
                     'error' => $e->getMessage(),
                 ]);
 
-                // Surface the failure to the browser so the UI leaves the
-                // "Thinking" state instead of hanging indefinitely.
+                // Route the failure through dispatchError so every attached
+                // sink runs: BufferingSink writes the error event and flips
+                // status=failed, ConversationRecorder clears the conversation's
+                // streaming_request_id. Writing directly to the store would
+                // skip the recorder and leave streaming_request_id pointing
+                // at a now-dead turn.
                 try {
-                    event(new AiStreamEvent($channel, $requestId, 'error', [
-                        'code' => 'stream_start_failed',
-                        'message' => 'The request could not be started.',
-                    ]));
+                    $stream->dispatchError(
+                        'stream_start_failed',
+                        'The request could not be started.',
+                    );
                 } catch (\Throwable) {
-                    // Broadcasting unavailable — the logged error is the record.
+                    // Sinks unavailable — fall back to writing the error
+                    // directly so the SSE tail still sees a terminal.
+                    try {
+                        $store->appendEvent($requestId, MessageTypes::ERROR, [
+                            'code' => 'stream_start_failed',
+                            'message' => 'The request could not be started.',
+                        ]);
+                        $store->complete($requestId, 'failed');
+                    } catch (\Throwable) {
+                        // Buffer unavailable too — the logged error is the record.
+                    }
                 }
             }
         });
@@ -677,18 +658,6 @@ class AiBridgeManager
         $provider = $options['provider'] ?? config('ai-bridge.bridge.provider', '');
         if (! empty($provider)) {
             $stream->setProvider($provider);
-        }
-
-        // Propagate the broadcasting flag set by streamAndBroadcast() so
-        // relayViaHttpApi() suppresses the bridge_sse_incompatible false alarm.
-        if (! empty($options['_broadcasting'])) {
-            $stream->setBroadcastingMode(true);
-        }
-
-        // Propagate the per-conversation broadcast channel so the serve
-        // process's RelayStream broadcasts on the channel the browser uses.
-        if (! empty($options['_broadcast_channel'])) {
-            $stream->setBroadcastChannel((string) $options['_broadcast_channel']);
         }
 
         return $stream;

@@ -106,8 +106,8 @@ return [
     |--------------------------------------------------------------------------
     |
     | Configuration for the dedicated WebSocket server that handles CLI bridge
-    | connections. This is separate from Laravel Reverb — it runs on its own
-    | port and speaks the AI Bridge Protocol.
+    | connections. Runs on its own port and speaks the AI Bridge Protocol —
+    | separate from any other realtime infrastructure your app may use.
     |
     */
 
@@ -132,18 +132,54 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Broadcasting Settings
+    | Stream Event Buffer
     |--------------------------------------------------------------------------
     |
-    | Configuration for broadcasting AI stream events via Laravel Reverb.
-    | When enabled, you can use AiBridge::streamAndBroadcast() to push
-    | events to a Reverb channel for real-time browser updates.
+    | Per-turn buffer of streaming AI events. The serve process appends events
+    | here as they arrive from the bridge; the browser tails the buffer over
+    | SSE and resumes by Last-Event-ID after a refresh or reconnect. The DB
+    | is still the archive — the final assistant message is written once at
+    | the end of the turn, separate from this buffer.
+    |
+    | 'default' picks the driver. The package ships with 'redis' (production
+    | default) and 'array' (in-memory, tests only). Apps register their own
+    | with StreamStore::extend('foo', fn ($app) => new MyStore()).
+    |
+    | Redis driver settings:
+    |
+    | - 'connection': the Redis connection from config/database.php to use.
+    |   null = the application's default Redis connection.
+    | - 'prefix': key prefix; full key shape is "{prefix}:{rid}:events" etc.
+    | - 'ttl_streaming': TTL while a turn is live. Refreshed on every event.
+    | - 'ttl_completed': TTL once a turn has terminated. Bounds how long a
+    |   recent page-load can replay it before the buffer expires.
     |
     */
 
-    'broadcasting' => [
-        'enabled' => env('AI_BRIDGE_BROADCAST', true),
-        'connection' => env('AI_BRIDGE_BROADCAST_CONNECTION', 'reverb'),
+    'stream_store' => [
+        'default' => env('AI_BRIDGE_STREAM_STORE', 'redis'),
+
+        'redis' => [
+            'connection' => env('AI_BRIDGE_STREAM_REDIS_CONNECTION'),
+            'prefix' => env('AI_BRIDGE_STREAM_REDIS_PREFIX', 'ai-bridge:stream'),
+            'ttl_streaming' => (int) env('AI_BRIDGE_STREAM_TTL_STREAMING', 3600),
+            'ttl_completed' => (int) env('AI_BRIDGE_STREAM_TTL_COMPLETED', 1800),
+        ],
+
+        // How often the SSE tail endpoint polls the store for new events
+        // while a turn is streaming. Lower = snappier; higher = less load.
+        // 100ms is what pocket-dev uses; safe under reasonable concurrency.
+        'poll_interval_ms' => (int) env('AI_BRIDGE_STREAM_POLL_MS', 100),
+
+        // Keepalive cadence on the SSE tail — must beat any intermediate
+        // proxy/load-balancer idle timeout. Default 30s is safe for nginx
+        // defaults (60s proxy_read_timeout).
+        'keepalive_interval_s' => (int) env('AI_BRIDGE_STREAM_KEEPALIVE_S', 30),
+
+        // Maximum lifetime of one SSE tail connection in seconds. After
+        // this, the server closes the response and the browser reconnects
+        // (free, via EventSource). Keeps PHP-FPM workers cycling.
+        'max_connection_s' => (int) env('AI_BRIDGE_STREAM_MAX_CONNECTION_S', 600),
     ],
 
     /*
@@ -152,8 +188,8 @@ return [
     |--------------------------------------------------------------------------
     |
     | The package logs the bridge relay path (a message being relayed to a CLI
-    | bridge, stream events broadcast back, terminal done/error). This is the
-    | first place to look when the chat UI hangs on "Thinking".
+    | bridge, stream events arriving back into the buffer, terminal done/error).
+    | This is the first place to look when the chat UI hangs on "Thinking".
     |
     | - 'channel': the log channel these messages go to. Leave null to use the
     |   host app's default channel. Point it at a dedicated channel (e.g. a
@@ -247,8 +283,8 @@ return [
     */
 
     'streaming' => [
-        // When true, thinking/reasoning block events are suppressed from SSE and
-        // broadcast outputs. Defaults to TRUE to prevent AI chain-of-thought reasoning
+        // When true, thinking/reasoning block events are suppressed from SSE
+        // outputs and the per-turn buffer. Defaults to TRUE to prevent AI chain-of-thought reasoning
         // from being accidentally exposed to end users — set to false only when you
         // intentionally want to display AI reasoning in your UI (e.g. a debug view).
         'suppress_thinking_blocks' => env('AI_BRIDGE_SUPPRESS_THINKING', true),
@@ -285,10 +321,5 @@ return [
         // Persist a partial assistant message when a stream errors or is
         // cancelled mid-response. The row is flagged incomplete=true.
         'persist_partial_on_error' => env('AI_BRIDGE_PERSIST_PARTIAL', true),
-
-        // Namespace prefix for per-conversation Reverb broadcast channels.
-        // The full private channel name is "{prefix}.conversation.{id}", so the
-        // default below produces "ai-bridge.conversation.42".
-        'channel_prefix' => env('AI_BRIDGE_CHANNEL_PREFIX', 'ai-bridge'),
     ],
 ];

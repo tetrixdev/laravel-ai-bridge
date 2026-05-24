@@ -26,7 +26,6 @@ function makeStreamController(string $mode = 'byok'): StreamController
     $manager->shouldReceive('streamToResponse')->byDefault()->andReturn(
         new \Symfony\Component\HttpFoundation\StreamedResponse()
     );
-    $manager->shouldReceive('streamAndBroadcast')->byDefault()->andReturn('req-123');
 
     return new StreamController($manager);
 }
@@ -181,29 +180,6 @@ test('sse() returns 422 when message is missing', function () {
 
     $request = makeRequest([]);
     $response = $controller->sse($request);
-
-    expect($response->getStatusCode())->toBe(422);
-});
-
-test('broadcast() returns 401 when unauthenticated', function () {
-    $controller = makeStreamController();
-
-    $request = makeRequest(['message' => 'Hello']);
-    $response = $controller->broadcast($request);
-
-    expect($response)->toBeInstanceOf(\Illuminate\Http\JsonResponse::class);
-    expect($response->getStatusCode())->toBe(401);
-});
-
-test('broadcast() returns 422 when message is empty', function () {
-    $controller = makeStreamController();
-
-    $user = new class {
-        public function getAuthIdentifier() { return 42; }
-    };
-
-    $request = makeRequest(['message' => ''], $user);
-    $response = $controller->broadcast($request);
 
     expect($response->getStatusCode())->toBe(422);
 });
