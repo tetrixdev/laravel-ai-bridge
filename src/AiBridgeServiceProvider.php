@@ -102,8 +102,9 @@ class AiBridgeServiceProvider extends ServiceProvider
 
         // Reference chat UI component — usable as <x-ai-bridge::chat />.
         // Fully optional (the backend works without it) and overridable by
-        // publishing the views. Self-contained: it loads Tailwind/Alpine/Echo
-        // from a CDN, so the host app needs no build toolchain.
+        // publishing the views. Self-contained: a Web Component bundle
+        // (Shadow DOM, no global CSS/JS) served by the package itself, so
+        // the host app needs no build toolchain.
         $this->loadViewsFrom(__DIR__.'/../resources/views', 'ai-bridge');
         $this->publishes([
             __DIR__.'/../resources/views' => resource_path('views/vendor/ai-bridge'),

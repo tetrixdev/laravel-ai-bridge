@@ -29,9 +29,9 @@ final class BufferingSink
     {
         $rid = $handler->requestId;
 
-        // Apply the same thinking-block suppression decision the broadcast/
-        // SSE wiring applies, so what gets buffered matches what the UI
-        // expects to see on replay.
+        // Apply the same thinking-block suppression decision the SSE wiring
+        // applies, so what gets buffered matches what the UI expects to see
+        // on replay.
         $suppressThinking = (bool) config('ai-bridge.streaming.suppress_thinking_blocks', true);
         $currentBlockSuppressed = false;
 

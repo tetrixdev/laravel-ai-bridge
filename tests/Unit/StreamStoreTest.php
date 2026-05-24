@@ -128,8 +128,9 @@ test('StreamStoreManager — apps can register their own driver', function () {
 });
 
 test('StreamStore facade — round-trips through the default driver', function () {
-    // The facade resolves to the contract binding; the test harness pins the
-    // contract to the array driver, so writes here are visible via the facade.
+    // The facade resolves to the StreamStoreManager, which forwards driver
+    // methods to the current default driver via Manager::__call. The test
+    // harness pins that to the array driver, so writes here are visible.
     StreamStore::start('facade-rid', ['conversation_id' => '7']);
     StreamStore::appendEvent('facade-rid', 'block_delta', ['content' => 'hi']);
 

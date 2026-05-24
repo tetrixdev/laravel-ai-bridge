@@ -106,8 +106,8 @@ return [
     |--------------------------------------------------------------------------
     |
     | Configuration for the dedicated WebSocket server that handles CLI bridge
-    | connections. This is separate from Laravel Reverb — it runs on its own
-    | port and speaks the AI Bridge Protocol.
+    | connections. Runs on its own port and speaks the AI Bridge Protocol —
+    | separate from any other realtime infrastructure your app may use.
     |
     */
 
