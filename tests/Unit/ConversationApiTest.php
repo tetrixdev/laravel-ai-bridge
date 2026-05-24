@@ -94,3 +94,69 @@ it('deletes a conversation', function () {
     expect($response->getStatusCode())->toBe(200)
         ->and(Conversation::find($conversation->id))->toBeNull();
 });
+
+it('returns 409 when a turn is already in flight on the conversation', function () {
+    $store = new \Tetrix\AiBridge\Streaming\Drivers\ArrayStreamStore();
+    app()->instance(\Tetrix\AiBridge\Contracts\StreamStoreContract::class, $store);
+
+    $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+    app(AiBridgeManager::class)->resolveConversationsUsing(
+        fn () => Conversation::whereKey($conversation->id)
+    );
+
+    // Simulate an in-flight turn: streaming_request_id set, buffer status=streaming.
+    $rid = 'rid-already-streaming';
+    $store->start($rid, ['conversation_id' => (string) $conversation->id]);
+    $conversation->forceFill(['streaming_request_id' => $rid])->save();
+
+    $response = conversationController()->stream(
+        Request::create('/x', 'POST', ['message' => 'second turn']),
+        $conversation->id,
+    );
+
+    expect($response->getStatusCode())->toBe(409);
+    $body = jsonOf($response);
+    expect($body['error'])->toBe('conflict');
+    expect($body['request_id'])->toBe($rid);
+});
+
+it('does not 409 when the previous streaming_request_id points to a completed buffer', function () {
+    // Stale pointer: a previous turn died without clearing the column, but
+    // the buffer already shows the terminal status. We should accept the new
+    // turn rather than block on the corpse.
+    $store = new \Tetrix\AiBridge\Streaming\Drivers\ArrayStreamStore();
+    app()->instance(\Tetrix\AiBridge\Contracts\StreamStoreContract::class, $store);
+
+    $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+    app(AiBridgeManager::class)->resolveConversationsUsing(
+        fn () => Conversation::whereKey($conversation->id)
+    );
+
+    $rid = 'rid-stale';
+    $store->start($rid, ['conversation_id' => (string) $conversation->id]);
+    $store->complete($rid, 'failed');
+    $conversation->forceFill(['streaming_request_id' => $rid])->save();
+
+    // Stub out the actual stream start so we don't try to dial a bridge.
+    $manager = Mockery::mock(AiBridgeManager::class, [
+        app(\Tetrix\AiBridge\Tools\ToolRegistry::class),
+        app(\Tetrix\AiBridge\WebSocket\BridgeConnectionManager::class),
+        app(\Tetrix\AiBridge\Auth\TokenManager::class),
+    ])->makePartial();
+    $manager->shouldReceive('conversationsQuery')->andReturn(Conversation::whereKey($conversation->id));
+    $manager->shouldReceive('startConversationStream')->once()->andReturn('rid-new');
+    app()->instance(AiBridgeManager::class, $manager);
+
+    $controller = new ConversationController(
+        $manager,
+        app(\Tetrix\AiBridge\Tools\ToolRegistry::class),
+    );
+
+    $response = $controller->stream(
+        Request::create('/x', 'POST', ['message' => 'new turn']),
+        $conversation->id,
+    );
+
+    expect($response->getStatusCode())->toBe(200);
+    expect(jsonOf($response)['request_id'])->toBe('rid-new');
+});

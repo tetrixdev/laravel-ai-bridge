@@ -976,7 +976,7 @@ class MessageHandler
     /**
      * Handle a 'cancelled' message — bridge acknowledges cancellation.
      *
-     * Dispatches a cancelled event to the StreamHandler so consumers (SSE, Reverb)
+     * Dispatches a cancelled event to the StreamHandler so SSE consumers
      * receive a terminal event and don't hang waiting for done.
      *
      * Applies the same ownership check as the other terminal handlers so a

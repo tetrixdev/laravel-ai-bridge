@@ -381,16 +381,29 @@ class AiBridgeManager
                     'error' => $e->getMessage(),
                 ]);
 
-                // Push an error event into the buffer so the SSE tail sees a
-                // terminal and the UI can exit the "Thinking" state.
+                // Route the failure through dispatchError so every attached
+                // sink runs: BufferingSink writes the error event and flips
+                // status=failed, ConversationRecorder clears the conversation's
+                // streaming_request_id. Writing directly to the store would
+                // skip the recorder and leave streaming_request_id pointing
+                // at a now-dead turn.
                 try {
-                    $store->appendEvent($requestId, MessageTypes::ERROR, [
-                        'code' => 'stream_start_failed',
-                        'message' => 'The request could not be started.',
-                    ]);
-                    $store->complete($requestId, 'failed');
+                    $stream->dispatchError(
+                        'stream_start_failed',
+                        'The request could not be started.',
+                    );
                 } catch (\Throwable) {
-                    // Buffer unavailable — the logged error is the record.
+                    // Sinks unavailable — fall back to writing the error
+                    // directly so the SSE tail still sees a terminal.
+                    try {
+                        $store->appendEvent($requestId, MessageTypes::ERROR, [
+                            'code' => 'stream_start_failed',
+                            'message' => 'The request could not be started.',
+                        ]);
+                        $store->complete($requestId, 'failed');
+                    } catch (\Throwable) {
+                        // Buffer unavailable too — the logged error is the record.
+                    }
                 }
             }
         });

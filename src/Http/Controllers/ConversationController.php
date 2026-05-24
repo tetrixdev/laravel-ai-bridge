@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
 use Tetrix\AiBridge\AiBridgeManager;
+use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Events\ConversationCreated;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Tools\ToolRegistry;
@@ -151,6 +152,23 @@ class ConversationController extends Controller
                 'error' => 'validation_error',
                 'message' => 'The message field is required and cannot be empty.',
             ], 422);
+        }
+
+        // One in-flight turn per conversation. A double-clicked Send (or a
+        // second tab racing) would otherwise overwrite streaming_request_id
+        // and leave one of the turns orphaned in the buffer. Reject with 409
+        // when a turn is genuinely still running; ignore stale pointers
+        // (a previous turn that died without clearing the column — buffer
+        // says not_found / completed).
+        if ($conversation->streaming_request_id !== null) {
+            $status = app(StreamStoreContract::class)->status($conversation->streaming_request_id);
+            if ($status['status'] === 'streaming') {
+                return response()->json([
+                    'error' => 'conflict',
+                    'message' => 'Another turn is already in flight for this conversation.',
+                    'request_id' => $conversation->streaming_request_id,
+                ], 409);
+            }
         }
 
         // Optional per-turn provider/model override (e.g. switching mid-conversation).

@@ -78,16 +78,7 @@ class StreamEventsController extends Controller
             return response()->json(['error' => 'forbidden'], 403);
         }
 
-        // Resume index resolution order: the SSE-spec `Last-Event-ID` header
-        // wins (the browser sets it automatically on reconnect); the
-        // `from_index` query param is the manual fallback for clients that
-        // can't influence headers.
-        $lastEventId = $request->header('Last-Event-ID');
-        if ($lastEventId !== null && is_numeric($lastEventId)) {
-            $fromIndex = (int) $lastEventId;
-        } else {
-            $fromIndex = $request->has('from_index') ? (int) $request->input('from_index', -1) : -1;
-        }
+        $fromIndex = self::resolveFromIndex($request);
 
         $pollIntervalMs = (int) config('ai-bridge.stream_store.poll_interval_ms', 100);
         $keepaliveS = (int) config('ai-bridge.stream_store.keepalive_interval_s', 30);
@@ -202,6 +193,32 @@ class StreamEventsController extends Controller
         return $this->manager->conversationsQuery($request)
             ->whereKey($conversationId)
             ->exists();
+    }
+
+    /**
+     * Resolve the resume-from index from request headers/query.
+     *
+     * The SSE-spec `Last-Event-ID` header wins (the browser sets it
+     * automatically on reconnect); the `from_index` query param is the
+     * manual fallback for clients that can't influence headers. Non-numeric
+     * / empty values fall back to -1 (replay from the start) — never to 0,
+     * which would silently skip event 0.
+     *
+     * @internal Exposed for testability; not part of the public API.
+     */
+    public static function resolveFromIndex(Request $request): int
+    {
+        $lastEventId = $request->header('Last-Event-ID');
+        if ($lastEventId !== null && is_numeric($lastEventId)) {
+            return (int) $lastEventId;
+        }
+
+        $raw = $request->query('from_index');
+        if ($raw !== null && $raw !== '' && is_numeric($raw)) {
+            return (int) $raw;
+        }
+
+        return -1;
     }
 
     /**

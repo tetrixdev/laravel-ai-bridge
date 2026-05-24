@@ -188,8 +188,8 @@ return [
     |--------------------------------------------------------------------------
     |
     | The package logs the bridge relay path (a message being relayed to a CLI
-    | bridge, stream events broadcast back, terminal done/error). This is the
-    | first place to look when the chat UI hangs on "Thinking".
+    | bridge, stream events arriving back into the buffer, terminal done/error).
+    | This is the first place to look when the chat UI hangs on "Thinking".
     |
     | - 'channel': the log channel these messages go to. Leave null to use the
     |   host app's default channel. Point it at a dedicated channel (e.g. a
@@ -283,8 +283,8 @@ return [
     */
 
     'streaming' => [
-        // When true, thinking/reasoning block events are suppressed from SSE and
-        // broadcast outputs. Defaults to TRUE to prevent AI chain-of-thought reasoning
+        // When true, thinking/reasoning block events are suppressed from SSE
+        // outputs and the per-turn buffer. Defaults to TRUE to prevent AI chain-of-thought reasoning
         // from being accidentally exposed to end users — set to false only when you
         // intentionally want to display AI reasoning in your UI (e.g. a debug view).
         'suppress_thinking_blocks' => env('AI_BRIDGE_SUPPRESS_THINKING', true),

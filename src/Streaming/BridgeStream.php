@@ -197,9 +197,11 @@ class BridgeStream implements StreamableProvider
      * (Octane, bridge server itself) where BridgeConnectionManager holds connections
      * in-memory and sendToUser() returns immediately.
      *
-     * NOTE: When using the PHP-FPM relay path with SSE mode, no stream events will
-     * be delivered because events arrive asynchronously via the WebSocket server after
-     * the PHP-FPM process has exited. Use broadcasting (Reverb) mode instead.
+     * NOTE: Under the PHP-FPM relay path, response events arrive
+     * asynchronously at the long-running serve process; they are written
+     * to the per-turn stream-event buffer there. The web caller can hand
+     * the request_id back to the browser, which tails the buffer over
+     * SSE for the actual reply.
      */
     public function start(): void
     {
@@ -246,9 +248,9 @@ class BridgeStream implements StreamableProvider
      * The internal API at POST /api/request accepts the request and forwards
      * it to the connected bridge client.
      *
-     * NOTE: Response events arrive asynchronously via the WebSocket server.
-     * For SSE mode, this means the response will be empty — use broadcasting
-     * (Reverb) mode when running under PHP-FPM with bridge mode.
+     * NOTE: Response events arrive asynchronously at the serve process via
+     * the WebSocket server, where RelayStream's BufferingSink writes them
+     * to the per-turn stream-event buffer the browser tails over SSE.
      */
     private function relayViaHttpApi(array $payload): void
     {

@@ -56,27 +56,14 @@ final class RedisStreamStore implements StreamStoreContract
         $conn = $this->conn();
         $eventsKey = $this->key($requestId, 'events');
 
-        // RPUSH returns the new list length; subtract 1 for the appended
-        // element's index. The JSON carries the index too, so range() never
-        // has to recompute it.
+        // RPUSH returns the new list length; the appended element's index is
+        // length - 1. The index is intentionally NOT encoded into the payload:
+        // computing it from list position on read avoids a RPUSH-then-LSET
+        // race where a concurrent LRANGE could otherwise observe a transient
+        // null placeholder. range() assigns index = start + offset on read.
         $newLength = (int) $conn->rpush(
             $eventsKey,
             json_encode([
-                'index' => null, // placeholder; we fix it after the push
-                'event' => $eventName,
-                'data' => $data,
-            ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-        );
-
-        $index = $newLength - 1;
-
-        // Re-encode with the assigned index in place. LSET overwrites the
-        // just-pushed element atomically with respect to other writers.
-        $conn->lset(
-            $eventsKey,
-            $index,
-            json_encode([
-                'index' => $index,
                 'event' => $eventName,
                 'data' => $data,
             ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
@@ -84,7 +71,7 @@ final class RedisStreamStore implements StreamStoreContract
 
         $conn->expire($eventsKey, $this->streamingTtl);
 
-        return $index;
+        return $newLength - 1;
     }
 
     public function range(string $requestId, int $fromIndex = -1): array
@@ -95,12 +82,15 @@ final class RedisStreamStore implements StreamStoreContract
         $start = $fromIndex < 0 ? 0 : $fromIndex + 1;
         $raw = $conn->lrange($eventsKey, $start, -1);
 
+        // Index is the element's position in the list — computed here rather
+        // than read from the payload so that no race window can ever surface
+        // a stale or placeholder index to a concurrent reader.
         $out = [];
-        foreach ($raw as $line) {
+        foreach ($raw as $offset => $line) {
             $decoded = json_decode((string) $line, true);
             if (is_array($decoded) && isset($decoded['event'])) {
                 $out[] = [
-                    'index' => (int) ($decoded['index'] ?? 0),
+                    'index' => $start + $offset,
                     'event' => (string) $decoded['event'],
                     'data' => is_array($decoded['data'] ?? null) ? $decoded['data'] : [],
                 ];

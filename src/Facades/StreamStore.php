@@ -5,13 +5,16 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Facades;
 
 use Illuminate\Support\Facades\Facade;
-use Tetrix\AiBridge\Contracts\StreamStoreContract;
+use Tetrix\AiBridge\Streaming\StreamStoreManager;
 
 /**
  * Facade for the per-turn streaming event buffer.
  *
- * Resolves to the default driver configured under `ai-bridge.stream_store`.
- * Apps that need a non-default driver call `StreamStore::driver('foo')`.
+ * Resolves to the {@see StreamStoreManager}, which forwards driver methods
+ * (start / appendEvent / range / status / setAbort / isAborted / complete /
+ * cleanup) to the default driver via Laravel's Manager `__call`. Apps that
+ * need a non-default driver call `StreamStore::driver('foo')`; apps that
+ * want to register their own driver call `StreamStore::extend('foo', …)`.
  *
  * @method static void start(string $requestId, array $metadata = [])
  * @method static int appendEvent(string $requestId, string $eventName, array $data)
@@ -30,6 +33,6 @@ class StreamStore extends Facade
 {
     protected static function getFacadeAccessor(): string
     {
-        return StreamStoreContract::class;
+        return StreamStoreManager::class;
     }
 }

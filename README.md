@@ -286,12 +286,18 @@ Full reference for `config/ai-bridge.php`:
 | `chat_completions.allowed_models` | -- | `[]` | Model allowlist. Empty array allows all models. When non-empty, requests for a model not in the list are rejected with HTTP 422 |
 | `server.host` | `AI_BRIDGE_SERVER_HOST` | `127.0.0.1` | Bridge WebSocket server bind address (set to `0.0.0.0` in Docker/multi-host setups) |
 | `server.port` | `AI_BRIDGE_SERVER_PORT` | `8085` | Bridge WebSocket server port |
-| `broadcasting.enabled` | `AI_BRIDGE_BROADCAST` | `true` | Enable Reverb broadcasting |
-| `broadcasting.connection` | `AI_BRIDGE_BROADCAST_CONNECTION` | `reverb` | Broadcasting connection name |
+| `stream_store.default` | `AI_BRIDGE_STREAM_STORE` | `redis` | Per-turn event buffer driver. Ships with `redis` and `array` (tests); apps register their own via `StreamStore::extend()`. |
+| `stream_store.redis.connection` | `AI_BRIDGE_STREAM_REDIS_CONNECTION` | `null` | Redis connection from `config/database.php`. `null` = app default. |
+| `stream_store.redis.prefix` | `AI_BRIDGE_STREAM_REDIS_PREFIX` | `ai-bridge:stream` | Key prefix for buffer entries. |
+| `stream_store.redis.ttl_streaming` | `AI_BRIDGE_STREAM_TTL_STREAMING` | `3600` | TTL (s) while a turn is live; refreshed on every event. |
+| `stream_store.redis.ttl_completed` | `AI_BRIDGE_STREAM_TTL_COMPLETED` | `1800` | TTL (s) once a turn has terminated; bounds how long a recent page-load can replay. |
+| `stream_store.poll_interval_ms` | `AI_BRIDGE_STREAM_POLL_MS` | `100` | SSE long-poll interval while a turn is streaming. |
+| `stream_store.keepalive_interval_s` | `AI_BRIDGE_STREAM_KEEPALIVE_S` | `30` | SSE keepalive comment cadence (must beat intermediate proxy idle timeouts). |
+| `stream_store.max_connection_s` | `AI_BRIDGE_STREAM_MAX_CONNECTION_S` | `600` | Per-SSE-connection lifetime ceiling; the browser auto-reconnects via `Last-Event-ID` after. |
 | `logging.channel` | `AI_BRIDGE_LOG_CHANNEL` | `null` | Log channel for the bridge relay path. `null` uses the app's default channel; point it at a dedicated channel (e.g. a `daily` channel with its own retention) to keep bridge logs separate. Falls back to the default channel if the named one is undefined. |
 | `logging.verbose` | `AI_BRIDGE_LOG_VERBOSE` | `false` | When `true`, also log per-event detail (every stream event, relayed payloads) at `debug` level. Useful in development; noisy in production. |
 | `cli.local_path` | `AI_BRIDGE_CLI_LOCAL_PATH` | `null` | Absolute path to an `ai-bridge` repo checkout. When set **and `APP_ENV=local`**, the "Add a CLI bridge" command runs that checkout's build (`node <path>/dist/cli.js`) instead of `npx @tetrixdev/ai-bridge@latest` — for testing CLI changes without an npm publish. Build the checkout first (`npm run build`). |
-| `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE and broadcast output. Set to `false` only when intentionally displaying AI reasoning to users. |
+| `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE output and the per-turn buffer. Set to `false` only when intentionally displaying AI reasoning to users. |
 
 ### Relay-path logging
 
@@ -369,21 +375,25 @@ data: {"event":"done","data":{"usage":{"prompt_tokens":10,"completion_tokens":5}
 data: [DONE]
 ```
 
-### Reverb Broadcasting
+### Buffered streaming (refresh-safe)
 
-Pushes events to a Laravel Reverb channel. Ideal for multiplayer scenarios where multiple users see the same AI response.
+For persisted conversations, use the buffered streaming path. The server
+writes every event to a short-lived per-turn buffer (Redis by default);
+the browser tails it over SSE. Native `EventSource` reconnection via
+`Last-Event-ID` makes refresh, tab-switch and network blip recover the
+in-flight reply for free — without losing tokens or restarting the turn.
 
 ```php
-// In your controller -- returns immediately
-public function generate(Request $request)
+// In your controller — returns immediately with a request_id
+public function send(Request $request)
 {
-    $requestId = AiBridge::streamAndBroadcast(
-        conversationId: $request->input('conversation_id'),
-        message: $request->input('message'),
-        channel: 'game.' . $request->input('game_id'),
-        options: [
-            'system_prompt' => 'You are a game master.',
-        ],
+    $conversation = AiBridge::conversationsQuery($request)
+        ->whereKey($request->input('conversation_id'))
+        ->firstOrFail();
+
+    $requestId = AiBridge::startConversationStream(
+        $conversation,
+        $request->input('message'),
     );
 
     return response()->json([
@@ -393,32 +403,53 @@ public function generate(Request $request)
 }
 ```
 
-Or use the built-in endpoint:
+Or use the built-in endpoint, which the bundled chat UI uses:
 
 ```
-POST /ai-bridge/stream/broadcast
+POST /ai-bridge/conversations/{id}/stream
 Content-Type: application/json
 
-{
-    "conversation_id": "conv-123",
-    "message": "I search the room",
-    "channel": "game.456",
-    "system_prompt": "You are a game master."
+{ "message": "I search the room" }
+
+→ 200 { "status": "started", "request_id": "..." }
+→ 409 { "error": "conflict", ... } when a turn is already in flight
+```
+
+Then tail the per-turn buffer from the browser using native
+`EventSource`:
+
+```javascript
+const es = new EventSource(`/ai-bridge/streams/${requestId}/events`, { withCredentials: true });
+['block_start','block_delta','block_stop','tool_call','tool_result','done','error','cancelled']
+    .forEach(name => es.addEventListener(name, e => {
+        const data = JSON.parse(e.data);
+        // ...render
+    }));
+```
+
+On page load, check whether a turn is in flight and re-attach. The
+conversation payload (`GET /ai-bridge/conversations/{id}`) carries
+`streaming_request_id` when a turn is live:
+
+```javascript
+const conv = await fetch(`/ai-bridge/conversations/${id}`).then(r => r.json());
+if (conv.streaming_request_id) {
+    // EventSource resumes from `Last-Event-ID` automatically on reconnect;
+    // for a first attach on page load, replay from the start.
+    new EventSource(`/ai-bridge/streams/${conv.streaming_request_id}/events`, { withCredentials: true });
 }
 ```
 
-Listen on the client with Laravel Echo / Reverb:
+Stop an in-flight turn:
 
-```javascript
-Echo.channel('game.456')
-    .listen('.ai.stream', (e) => {
-        console.log(e.event, e.data);
-    });
+```
+POST /ai-bridge/streams/{requestId}/abort
 ```
 
 ## JavaScript Client
 
-A lightweight (~100 lines) vanilla JS module that handles both SSE and Reverb modes. Publish it first:
+A lightweight vanilla JS module that wraps the HTTP endpoints with the
+same refresh-safe semantics the bundled chat UI uses. Publish it first:
 
 ```bash
 php artisan vendor:publish --tag=ai-bridge-js
@@ -438,71 +469,51 @@ import './vendor/ai-bridge.js';
 <script src="/js/vendor/ai-bridge.js"></script>
 ```
 
-### SSE Mode
+### Buffered mode (default — recommended)
+
+For conversation-based streams. POSTs the message, then tails the
+per-turn buffer over native `EventSource`. Refresh, tab-switch and
+network blip recover the in-flight reply automatically via
+`Last-Event-ID`.
 
 ```javascript
-const stream = new AiBridgeStream({
-    mode: 'sse',
-    url: '/ai-bridge/stream/sse',
-});
+const stream = new AiBridgeStream({ mode: 'buffered', api: '/ai-bridge' });
 
-let conversationId = null;
-
-stream.send({
-    message: 'I search the room',
-    conversation_id: 'conv-123',
-    system_prompt: 'You are a game master.',
-});
-
-// The server emits 'conversation_id' as the first event. Capture it and pass it
-// back on subsequent send() calls to keep the conversation multi-turn.
-stream.on('conversation_id', (id) => {
-    conversationId = id;
-});
-
-stream.on('text', (content) => {
-    // Append text to chat UI
-});
-
-stream.on('thinking', (content) => {
-    // Show thinking indicator
-});
-
-stream.on('tool_call', (name, params) => {
-    // Show tool usage in UI
-});
-
-stream.on('done', (usage) => {
-    // Finalize, show token counts
-});
-
-stream.on('error', (code, message) => {
-    // Handle error
-});
-```
-
-### Reverb Mode
-
-```javascript
-const stream = new AiBridgeStream({
-    mode: 'reverb',
-    channel: 'game.456',
-    // Requires Laravel Echo to be configured
-});
-
-stream.send({
-    message: 'I cast fireball',
-    conversation_id: 'conv-123',
-});
-
-stream.on('text', (content) => { /* ... */ });
-stream.on('done', (usage) => { /* ... */ });
+stream.on('text', (content) => { /* append to chat UI */ });
+stream.on('thinking', (content) => { /* show reasoning */ });
+stream.on('tool_call', (data) => { /* show tool usage */ });
+stream.on('done', (usage) => { /* finalize, show token counts */ });
+stream.on('error', (code, message) => { /* show error */ });
 
 // 'cancelled' is a terminal event — handle it alongside 'done' and 'error' so UI
-// cleanup (hiding spinners, re-enabling inputs) still runs if the stream is cancelled
-// (e.g. by the user or on a bridge reconnect). Without it the UI can stay stuck.
-stream.on('cancelled', () => { /* reset UI: hide spinner, re-enable input */ });
-stream.on('error', (code, message) => { /* ... */ });
+// cleanup (hiding spinners, re-enabling inputs) still runs if the stream is cancelled.
+stream.on('cancelled', () => { /* reset UI */ });
+
+stream.send({ conversationId: 42, message: 'I cast fireball' });
+
+// On page load: if a turn is already in flight on this conversation,
+// re-attach to its buffer (replays everything emitted so far).
+//   const conv = await fetch(`/ai-bridge/conversations/${id}`).then(r => r.json());
+//   if (conv.streaming_request_id) stream.attach(conv.streaming_request_id);
+
+// Cancel the in-flight turn server-side.
+//   stream.abort();
+```
+
+### SSE mode (one-shot, no conversation row)
+
+For non-conversation use — a direct `text/event-stream` against
+`/ai-bridge/stream/sse`. No resumption; a refresh loses the response.
+Use buffered mode if you need refresh-safety.
+
+```javascript
+const stream = new AiBridgeStream({ mode: 'sse', url: '/ai-bridge/stream/sse' });
+
+stream.on('conversation_id', (id) => { /* persist for follow-ups */ });
+stream.on('text', (content) => { /* append */ });
+stream.on('done', (usage) => { /* finalize */ });
+
+stream.send({ message: 'Hello!', conversation_id: 'temp-123' });
 ```
 
 ### With Alpine.js
@@ -663,7 +674,10 @@ Eloquent `deleting` event on `Tetrix\AiBridge\Models\Connection`.
 | `POST /ai-bridge/conversations` | Create a conversation |
 | `GET /ai-bridge/conversations/{id}` | Conversation + messages + `tools_stale` flag |
 | `DELETE /ai-bridge/conversations/{id}` | Delete a conversation |
-| `POST /ai-bridge/conversations/{id}/stream` | Send a message — SSE (BYOK/Managed) or a Reverb broadcast (Bridge) |
+| `POST /ai-bridge/conversations/{id}/stream` | Start a turn — returns `{request_id}`; the browser tails `/streams/{rid}/events` |
+| `GET /ai-bridge/streams/{rid}/status` | Status snapshot of an in-flight or recently-completed turn |
+| `GET /ai-bridge/streams/{rid}/events` | SSE tail of the per-turn event buffer; resumes by `Last-Event-ID` |
+| `POST /ai-bridge/streams/{rid}/abort` | Cancel an in-flight turn (serve process observes the flag, sends `cancel` to the CLI) |
 | `GET /ai-bridge/connections` | List connections with their advertised providers/models + live `connected` flag |
 | `POST /ai-bridge/connections` | Register a CLI bridge or BYOK connection |
 | `PATCH /ai-bridge/connections/{id}` | Rename a connection |
@@ -678,12 +692,7 @@ thinking blocks; switching provider/model/mode mid-conversation is supported.
 A drop-in ChatGPT-style chat component ships with the package:
 
 ```blade
-<x-ai-bridge::chat
-    api="/ai-bridge"
-    :reverb-key="config('broadcasting.connections.reverb.key')"
-    reverb-host="localhost"
-    reverb-port="8080"
-/>
+<x-ai-bridge::chat api="/ai-bridge" />
 ```
 
 It is a thin wrapper that renders an `<ai-bridge-chat>` **Web Component**. The
@@ -698,15 +707,16 @@ The component is a reference implementation — you are never locked into it.
 
 1. **Build your own UI (recommended for anything beyond light tweaks).** Every
    piece of logic lives server-side, so a custom UI is lightweight: render JSON
-   from the HTTP API above and POST messages to the stream endpoint. Use any
-   stack — Blade, Livewire, Vue, React. The stream endpoint emits these events
-   (as SSE `data:` lines, or as Reverb `.ai.stream` events): `block_start`,
+   from the HTTP API above, POST messages to the stream endpoint, tail the
+   returned `request_id`'s buffer over `EventSource`. Use any stack — Blade,
+   Livewire, Vue, React. The stream emits these events (each as an SSE
+   `event: <name>` line with a JSON `data:` payload): `block_start`,
    `block_delta` (`{block_type, content}`), `block_stop`, `tool_call`
    (`{tool_name, parameters}`), `done` (`{usage}`), `error`, `cancelled`.
 
    The bundled component (`resources/dist/ai-bridge-chat.js`) is the working
-   reference for everything a client needs to do: API calls, Reverb channel
-   subscription via the package's `/broadcasting/auth` endpoint, reassembling
+   reference for everything a client needs to do: API calls, EventSource
+   lifecycle, `Last-Event-ID` resumption on conversation-open, reassembling
    `block_*` events into rendered messages, and watchdog handling for stalled
    turns. Read it as the example rather than re-deriving the contract.
 
@@ -856,7 +866,7 @@ $stream->start();
 
 ## Bridge Server
 
-The `ai-bridge:serve` command starts a dedicated WebSocket server for CLI bridge connections. This is **not** Laravel Reverb -- it is a separate, lightweight server on its own port that speaks the AI Bridge Protocol.
+The `ai-bridge:serve` command starts a dedicated WebSocket server for CLI bridge connections. It runs on its own port and speaks the AI Bridge Protocol — separate from any other realtime infrastructure your app may use.
 
 ```bash
 php artisan ai-bridge:serve
@@ -876,35 +886,31 @@ The server:
 - Tracks connections via `BridgeConnectionManager`
 - Handles graceful shutdown on SIGINT/SIGTERM
 
-### Running bridge mode — two background processes are required
+### Running bridge mode — one background process is required
 
-Bridge mode does **not** work with `php artisan serve` / PHP-FPM alone. It needs
-**two long-running processes** running alongside your web server, because the
-AI response arrives at a different process than the one handling the browser
-request (see the data-flow diagram in [Architecture](#architecture)):
+Bridge mode needs **one** long-running process alongside your web server,
+because the AI response arrives at a different process than the one
+handling the browser request (see the data-flow diagram in
+[Architecture](#architecture)):
 
 | Process | Command | Why it is needed |
 |---------|---------|------------------|
-| **AI Bridge server** | `php artisan ai-bridge:serve` | Accepts the WebSocket connection from the user's local `npx @tetrixdev/ai-bridge` CLI bridge. |
-| **Laravel Reverb** | `php artisan reverb:start` | Bridge-mode stream events are produced in the `ai-bridge:serve` process, not the web worker, so they are delivered to the browser by broadcasting over Reverb. |
+| **AI Bridge server** | `php artisan ai-bridge:serve` | Accepts the WebSocket connection from the user's local `npx @tetrixdev/ai-bridge` CLI bridge, and writes stream events from it into the per-turn buffer the browser tails over SSE. |
 
-Both must run continuously — under a process manager (Supervisor), as
-dedicated containers, or via Octane in development. A typical Supervisor setup:
+It must run continuously — under a process manager (Supervisor), as a
+dedicated container, or via Octane in development. A typical Supervisor
+setup:
 
 ```ini
 [program:ai-bridge-serve]
 command=php /app/artisan ai-bridge:serve --host=0.0.0.0 --port=8085
 autostart=true
 autorestart=true
-
-[program:reverb]
-command=php /app/artisan reverb:start --host=0.0.0.0 --port=8080
-autostart=true
-autorestart=true
 ```
 
-**BYOK / Managed mode needs neither** — those stream over SSE directly from the
-web process, so a plain web server is enough.
+A working Redis (used for the per-turn buffer by default) is also
+required. **BYOK / Managed mode needs neither** — those stream over SSE
+directly from the web process, so a plain web server plus Redis is enough.
 
 ## Artisan Commands
 
@@ -951,11 +957,13 @@ Sends a test request and displays streaming events in the console.
 graph LR
     Browser["Browser"]
     Laravel["Laravel App"]
+    Buffer["Per-turn buffer (Redis)"]
     API["Chat Completions API"]
     Bridge["Bridge (local)"]
     CLI["CLI Tools"]
 
-    Browser <-->|SSE / Reverb| Laravel
+    Browser <-->|SSE tail (Last-Event-ID)| Laravel
+    Laravel <--> Buffer
     Laravel <-->|HTTPS| API
     Laravel <-->|WebSocket :8085| Bridge
     Bridge --> CLI
@@ -971,23 +979,23 @@ graph LR
 ```
 
 ```
-Browser <--SSE/Reverb--> Laravel App <--WebSocket--> Bridge (local) --> CLI tools
-                              |
-                         Chat Completions API (BYOK/Managed)
+Browser <--SSE--> Laravel App <--WebSocket--> Bridge (local) --> CLI tools
+                       |
+                  per-turn buffer (Redis)
+                       |
+                  Chat Completions API (BYOK/Managed)
 ```
 
 **Data flow (BYOK/Managed):**
-1. Browser sends message via SSE POST or Reverb trigger
-2. Laravel calls Chat Completions API with streaming enabled
-3. SSE chunks are normalized into `StreamEvent` objects
-4. Events are delivered to browser via SSE response or Reverb broadcast
+1. Browser POSTs the message to `/conversations/{id}/stream`; Laravel returns `{request_id}` and runs the upstream AI call in a `terminating()` callback.
+2. Each streamed event is written to the per-turn buffer keyed by `request_id`.
+3. Browser opens `EventSource('/streams/{rid}/events')` and tails the buffer; native `Last-Event-ID` reconnect makes refresh/blip recover the in-flight reply.
 
 **Data flow (CLI Bridge):**
-1. Browser sends message via SSE POST or Reverb trigger
-2. Laravel sends `ai_request` over WebSocket to bridge
-3. Bridge pipes message through local CLI tool (Codex, Claude, etc.)
-4. CLI output is normalized and streamed back as `StreamEvent` objects
-5. Events are delivered to browser via SSE response or Reverb broadcast
+1. Browser POSTs the message; the web worker relays an `ai_request` to the `ai-bridge:serve` process over its internal HTTP API.
+2. The serve process sends the request over WebSocket to the user's local bridge; events come back asynchronously into the same serve process.
+3. Each event is written to the per-turn buffer (and the assistant message is persisted at terminal).
+4. Browser tails the buffer over SSE, same as BYOK/Managed — uniform shape across modes.
 
 ## Protocol
 

@@ -250,7 +250,6 @@
                 this.s.connections = conns;
                 this.renderAll();
             }
-            this.subscribeConnections(); // pick up channels for new connections
         }
 
         // ── HTTP ──────────────────────────────────────────────────────

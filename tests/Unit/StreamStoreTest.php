@@ -140,3 +140,23 @@ test('StreamStore facade — round-trips through the default driver', function (
 test('StreamStoreContract binding resolves to a driver instance', function () {
     expect(app(StreamStoreContract::class))->toBeInstanceOf(StreamStoreContract::class);
 });
+
+test('StreamStore facade resolves to the manager (so extend() works)', function () {
+    // Regression: previously the facade resolved to the contract binding,
+    // which is a driver instance with no extend() method.
+    Tetrix\AiBridge\Facades\StreamStore::extend('counted', function () {
+        return new ArrayStreamStore();
+    });
+
+    expect(Tetrix\AiBridge\Facades\StreamStore::driver('counted'))
+        ->toBeInstanceOf(ArrayStreamStore::class);
+});
+
+test('StreamStore facade forwards driver methods via Manager __call', function () {
+    Tetrix\AiBridge\Facades\StreamStore::start('forward-rid', ['k' => 'v']);
+    Tetrix\AiBridge\Facades\StreamStore::appendEvent('forward-rid', 'x', ['a' => 1]);
+
+    $status = Tetrix\AiBridge\Facades\StreamStore::status('forward-rid');
+    expect($status['event_count'])->toBe(1);
+    expect($status['metadata'])->toBe(['k' => 'v']);
+});

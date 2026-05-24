@@ -126,3 +126,58 @@ test('events() returns 403 when the conversation is out of scope', function () {
 
     expect($res->getStatusCode())->toBe(403);
 });
+
+/*
+| SSE resume-index resolution
+|
+| The full SSE long-poll is verified live in the dev stack (curl with
+| `-H "Last-Event-ID: N"` and `?from_index=N`). These unit tests pin the
+| controller's resume-index resolution rule directly, which is the piece
+| most likely to regress.
+*/
+
+test('Last-Event-ID header wins over from_index query', function () {
+    $req = Request::create('/', 'GET', ['from_index' => '0']);
+    $req->headers->set('Last-Event-ID', '5');
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(5);
+});
+
+test('from_index query is honoured when no Last-Event-ID header', function () {
+    $req = Request::create('/', 'GET', ['from_index' => '3']);
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(3);
+});
+
+test('no header and no query yields -1 (replay from start)', function () {
+    expect(StreamEventsController::resolveFromIndex(Request::create('/')))->toBe(-1);
+});
+
+test('empty from_index does not silently become 0 (would skip event 0)', function () {
+    // Regression guard: (int) '' === 0 would mean "give me events with
+    // index > 0", skipping event 0 entirely. Must fall back to -1.
+    $req = Request::create('/', 'GET', ['from_index' => '']);
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(-1);
+});
+
+test('non-numeric from_index falls back to -1', function () {
+    $req = Request::create('/', 'GET', ['from_index' => 'garbage']);
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(-1);
+});
+
+test('non-numeric Last-Event-ID falls back to from_index query', function () {
+    $req = Request::create('/', 'GET', ['from_index' => '2']);
+    $req->headers->set('Last-Event-ID', 'not-a-number');
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(2);
+});
+
+test('Last-Event-ID = 0 is treated as a real index (resume from event 1)', function () {
+    // The client has seen event 0 and wants what's after it.
+    $req = Request::create('/');
+    $req->headers->set('Last-Event-ID', '0');
+
+    expect(StreamEventsController::resolveFromIndex($req))->toBe(0);
+});
