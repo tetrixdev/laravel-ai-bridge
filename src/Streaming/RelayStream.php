@@ -5,12 +5,10 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Streaming;
 
 use Illuminate\Support\Facades\Log;
-use Tetrix\AiBridge\Broadcasting\AiStreamEvent;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
+use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Models\Conversation;
-use Tetrix\AiBridge\Protocol\StreamEvent;
-use Tetrix\AiBridge\Support\BridgeLog;
 
 /**
  * Serve-side counterpart of BridgeStream for relayed (PHP-FPM) requests.
@@ -18,15 +16,15 @@ use Tetrix\AiBridge\Support\BridgeLog;
  * When a request originates under PHP-FPM, BridgeStream relays it to the
  * bridge server's internal HTTP API. The actual AI response events then
  * arrive asynchronously at the separate `ai-bridge:serve` process — never
- * at the PHP-FPM worker that issued the request. The broadcasting callbacks
- * wired by AiBridgeManager::streamAndBroadcast() live in that PHP-FPM worker
- * and therefore never see the events.
+ * at the PHP-FPM worker that issued the request. The web worker's
+ * BufferingSink and ConversationRecorder live in the dead PHP-FPM worker
+ * and therefore never see those events.
  *
  * RelayStream bridges that gap. The serve process registers a RelayStream as
- * the pending request for each relayed request_id. Its StreamHandler callbacks
- * re-broadcast every event via AiStreamEvent on the user/conversation channel,
- * so the browser receives stream events and tool calls can be verified and
- * executed (the StreamHandler is what verifySenderOwnsRequest() looks up).
+ * the pending request for each relayed request_id and attaches a parallel
+ * {@see BufferingSink} (so events land in the per-turn event buffer for the
+ * browser's SSE tail) and {@see ConversationRecorder} (so the assistant row
+ * is persisted at terminal).
  *
  * Unlike BridgeStream, RelayStream does not drive the stream — the remote
  * bridge already received the ai_request. start() and cancel() are no-ops.
@@ -37,43 +35,29 @@ final class RelayStream implements StreamableProvider
 
     /**
      * @param  string  $requestId       The relayed request's ID (preserved for event routing).
-     * @param  string  $channel         The broadcast channel, e.g. "user.1.conversation.456".
-     * @param  string  $conversationId  The conversation ID, for StreamCompleted reporting.
+     * @param  string  $conversationId  The conversation ID, for persistence + StreamCompleted reporting.
      */
     public function __construct(
         string $requestId,
-        private readonly string $channel,
         string $conversationId = '',
     ) {
         $this->streamHandler = new StreamHandler($this, $requestId);
         $this->streamHandler->setMode(ProviderMode::Bridge);
         $this->streamHandler->setConversationId($conversationId);
 
-        $this->streamHandler->onBlockStart(function (StreamEvent $event): void {
-            $this->broadcast($event->event, $event->data);
-        });
-        $this->streamHandler->onBlockDelta(function (StreamEvent $event): void {
-            $this->broadcast($event->event, $event->data);
-        });
-        $this->streamHandler->onBlockStop(function (StreamEvent $event): void {
-            $this->broadcast($event->event, $event->data);
-        });
-        $this->streamHandler->onToolCall(function (string $name, array $params, string $callId): void {
-            $this->broadcast('tool_call', [
-                'tool_name' => $name,
-                'parameters' => $params,
-                'tool_call_id' => $callId,
+        // Attach the stream-store buffering sink in this (serve) process so
+        // every event the bridge delivers lands in the per-turn buffer the
+        // browser's SSE tail reads. The web worker also attaches a sink to
+        // its (separate) StreamHandler instance, but that one never sees
+        // events under PHP-FPM — its writes happen here.
+        try {
+            BufferingSink::attach($this->streamHandler, app(StreamStoreContract::class));
+        } catch (\Throwable $e) {
+            Log::error('AI Bridge: failed to attach buffering sink to relayed stream', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
             ]);
-        });
-        $this->streamHandler->onDone(function (?array $usage): void {
-            $this->broadcast('done', ['usage' => $usage]);
-        });
-        $this->streamHandler->onError(function (string $code, string $message): void {
-            $this->broadcast('error', ['code' => $code, 'message' => $message]);
-        });
-        $this->streamHandler->onCancelled(function (string $reason): void {
-            $this->broadcast('cancelled', ['reason' => $reason]);
-        });
+        }
 
         // Bridge-mode stream events arrive in THIS (serve) process, so this is
         // where bridge-conversation persistence must happen. When the relayed
@@ -92,45 +76,6 @@ final class RelayStream implements StreamableProvider
                     'error' => $e->getMessage(),
                 ]);
             }
-        }
-    }
-
-    /**
-     * Broadcast a single relayed stream event via Reverb.
-     *
-     * Broadcasting failures must NOT bubble up — a missing or misconfigured
-     * broadcast driver must never break tool execution or terminate the stream.
-     *
-     * @param  array<string, mixed>  $data
-     */
-    private function broadcast(string $eventName, array $data): void
-    {
-        // A turn's terminal events get an info line (so a completed/failed
-        // turn is visible without verbose logging); intermediate block/tool
-        // events are debug-only to keep the relay-path log readable.
-        if (in_array($eventName, ['done', 'error', 'cancelled'], true)) {
-            BridgeLog::info('relayed stream '.$eventName, [
-                'request_id' => $this->streamHandler->requestId,
-                'channel' => $this->channel,
-                'detail' => $eventName === 'error' ? $data : null,
-            ]);
-        } else {
-            BridgeLog::verbose('broadcasting relayed stream event', [
-                'request_id' => $this->streamHandler->requestId,
-                'channel' => $this->channel,
-                'event' => $eventName,
-            ]);
-        }
-
-        try {
-            event(new AiStreamEvent($this->channel, $this->streamHandler->requestId, $eventName, $data));
-        } catch (\Throwable $e) {
-            Log::error('AI Bridge: failed to broadcast relayed stream event (is the broadcast driver / Reverb configured?)', [
-                'request_id' => $this->streamHandler->requestId,
-                'channel' => $this->channel,
-                'event' => $eventName,
-                'error' => $e->getMessage(),
-            ]);
         }
     }
 

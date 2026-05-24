@@ -10,6 +10,7 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\AiBridgeManager;
 use Tetrix\AiBridge\Contracts\ToolHandler;
 use Tetrix\AiBridge\Enums\ProviderMode;
+use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
@@ -19,7 +20,9 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  *
  * @method static StreamHandler stream(string $conversationId, string $message, array $options = [])
  * @method static StreamedResponse streamToResponse(string $conversationId, string $message, array $options = [])
- * @method static string streamAndBroadcast(string $conversationId, string $message, string $channel, array $options = [])
+ * @method static StreamHandler streamConversation(Conversation $conversation, string $message, array $options = [])
+ * @method static StreamedResponse streamConversationToResponse(Conversation $conversation, string $message, array $options = [])
+ * @method static string startConversationStream(Conversation $conversation, string $message, array $options = [])
  * @method static AiBridgeManager registerTool(string $name, string $description, array $parameters, Closure $handler)
  * @method static AiBridgeManager registerToolHandler(ToolHandler $handler)
  * @method static ToolRegistry tools()

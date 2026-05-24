@@ -4,14 +4,15 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge;
 
-use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Console\GenerateTokenCommand;
 use Tetrix\AiBridge\Console\ServeCommand;
 use Tetrix\AiBridge\Console\TestCommand;
+use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Http\Middleware\ValidateBridgeToken;
+use Tetrix\AiBridge\Streaming\StreamStoreManager;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -70,6 +71,18 @@ class AiBridgeServiceProvider extends ServiceProvider
                 $app->make(TokenManager::class),
             );
         });
+
+        // StreamStore — driver-based per-turn event buffer. Bound by the
+        // manager so apps may register additional drivers via
+        // StreamStore::extend(); the contract binding resolves to the
+        // currently-configured default driver.
+        $this->app->singleton(StreamStoreManager::class, function ($app) {
+            return new StreamStoreManager($app);
+        });
+
+        $this->app->bind(StreamStoreContract::class, function ($app) {
+            return $app->make(StreamStoreManager::class)->driver();
+        });
     }
 
     /**
@@ -116,15 +129,6 @@ class AiBridgeServiceProvider extends ServiceProvider
         // so consuming apps cannot fork them and break future package updates.
         $this->loadMigrationsFrom(__DIR__.'/../database/migrations');
 
-        // Register the per-conversation broadcast channel. Authorization reuses
-        // the project's conversations resolver, so a client may only listen on
-        // a conversation it is allowed to see — no separate channels.php needed.
-        $this->registerBroadcastChannel();
-
-        // Relay bridge connect/disconnect events to the browser over Reverb so
-        // the chat UI reflects live connections without polling.
-        $this->registerConnectionStatusBroadcasting();
-
         // Register artisan commands
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -133,67 +137,5 @@ class AiBridgeServiceProvider extends ServiceProvider
                 ServeCommand::class,
             ]);
         }
-    }
-
-    /**
-     * Register the per-conversation private broadcast channel.
-     *
-     * Authorization delegates to the project-supplied conversations resolver:
-     * a client may subscribe only to a conversation it is allowed to see.
-     * Skipped silently when broadcasting is not configured in the host app.
-     */
-    private function registerBroadcastChannel(): void
-    {
-        if (! class_exists(\Illuminate\Support\Facades\Broadcast::class)) {
-            return;
-        }
-
-        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
-
-        try {
-            \Illuminate\Support\Facades\Broadcast::channel(
-                $prefix.'.conversation.{conversationId}',
-                function ($user, $conversationId) {
-                    return app(AiBridgeManager::class)
-                        ->conversationsQuery(request())
-                        ->whereKey($conversationId)
-                        ->exists();
-                },
-            );
-
-            // Per-connection channel — carries bridge connect/disconnect pushes.
-            // Authorized via the project's connections resolver.
-            \Illuminate\Support\Facades\Broadcast::channel(
-                $prefix.'.connection.{connectionId}',
-                function ($user, $connectionId) {
-                    return app(AiBridgeManager::class)
-                        ->connectionsQuery(request())
-                        ->whereKey($connectionId)
-                        ->exists();
-                },
-            );
-        } catch (\Throwable $e) {
-            Log::warning('AI Bridge: could not register broadcast channel', ['error' => $e->getMessage()]);
-        }
-    }
-
-    /**
-     * Wire bridge connect/disconnect events to the connection-status broadcast.
-     *
-     * The BridgeConnected / BridgeDisconnected events fire inside the
-     * long-running bridge server (ai-bridge:serve); this listener turns each
-     * into a ConnectionStatusEvent so the chat UI updates without polling.
-     */
-    private function registerConnectionStatusBroadcasting(): void
-    {
-        Event::listen(
-            \Tetrix\AiBridge\Events\BridgeConnected::class,
-            [\Tetrix\AiBridge\Listeners\BroadcastConnectionStatus::class, 'handleConnected'],
-        );
-
-        Event::listen(
-            \Tetrix\AiBridge\Events\BridgeDisconnected::class,
-            [\Tetrix\AiBridge\Listeners\BroadcastConnectionStatus::class, 'handleDisconnected'],
-        );
     }
 }

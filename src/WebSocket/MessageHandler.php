@@ -7,6 +7,7 @@ namespace Tetrix\AiBridge\WebSocket;
 use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
+use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Enums\BlockType;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Protocol\MessageTypes;
@@ -53,22 +54,16 @@ class MessageHandler
      * a pending request here tool calls would be rejected (no recorded owner) and
      * stream events would be dropped ("unknown request").
      *
-     * This wires a RelayStream whose StreamHandler re-broadcasts every event via
-     * AiStreamEvent on "user.{userId}.conversation.{conversationId}" — the same
-     * channel convention StreamController::broadcast() uses — so the browser
-     * receives stream events and tool calls verify+execute against a real owner.
+     * This wires a RelayStream whose StreamHandler streams events into the
+     * per-turn stream-event buffer and persists the assistant row when the turn
+     * completes. The browser tails the buffer over SSE.
      *
      * Cleanup is handled by the existing done/error/cancelled handlers, which
      * already call removePendingRequest().
      */
-    public function registerRelayedRequest(string $requestId, string $userId, string $conversationId, ?string $channel = null): void
+    public function registerRelayedRequest(string $requestId, string $userId, string $conversationId): void
     {
-        // Prefer the channel threaded through the relay body (per-conversation
-        // streaming uses "{prefix}.{conversationId}"); fall back to the legacy
-        // per-user convention when no channel was supplied.
-        $channel ??= "user.{$userId}.conversation.{$conversationId}";
-
-        $relay = new RelayStream($requestId, $channel, $conversationId);
+        $relay = new RelayStream($requestId, $conversationId);
 
         $this->connectionManager->registerPendingRequest(
             $requestId,
@@ -469,10 +464,67 @@ class MessageHandler
             return null;
         }
 
+        // Check the abort flag in the stream buffer before forwarding the event.
+        // If the user has clicked "stop" since the last event, dispatch a
+        // cancelled terminal locally and send a cancel frame to the bridge so
+        // the CLI exits. Polling here is cheap (one Redis EXISTS per event).
+        if ($this->isAbortRequested($requestId)) {
+            $this->handleUserAbort($connectionId, $requestId, $handler);
+
+            return null;
+        }
+
         $event = StreamEvent::fromArray($message);
         $handler->dispatchEvent($event);
 
         return null;
+    }
+
+    /**
+     * Check the stream buffer for a user-requested abort.
+     *
+     * Swallows store failures (a transient Redis blip should not break the
+     * stream itself — the worst case without polling is the turn finishes
+     * normally and the user has to wait an extra moment).
+     */
+    private function isAbortRequested(string $requestId): bool
+    {
+        try {
+            return app(StreamStoreContract::class)->isAborted($requestId);
+        } catch (\Throwable $e) {
+            BridgeLog::warning('failed to poll stream-store abort flag', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
+    /**
+     * Dispatch a cancelled terminal locally and send a cancel frame to the bridge.
+     *
+     * Called when an abort flag is observed mid-turn. Idempotent — the
+     * StreamHandler guards against double-termination, and the bridge handles
+     * a cancel for an already-terminated request gracefully.
+     */
+    private function handleUserAbort(string $connectionId, string $requestId, StreamHandler $handler): void
+    {
+        BridgeLog::info('user-requested abort observed, cancelling turn', [
+            'request_id' => $requestId,
+        ]);
+
+        $userId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+        if ($userId !== null) {
+            $this->connectionManager->sendToUser($userId, [
+                'type' => MessageTypes::CANCEL,
+                'request_id' => $requestId,
+            ]);
+        }
+
+        $handler->dispatchCancelled('Cancelled by user.');
+        $this->connectionManager->removePendingRequest($requestId);
+        unset($this->recoveredRequests[$requestId]);
     }
 
     /**

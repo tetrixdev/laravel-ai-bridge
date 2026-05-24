@@ -35,9 +35,7 @@ class ConnectionController extends Controller
     {
         $connections = $this->manager->connectionsQuery($request)->get();
 
-        $prefix = (string) config('ai-bridge.persistence.channel_prefix', 'ai-bridge');
-
-        $payload = $connections->map(function (Connection $connection) use ($prefix) {
+        $payload = $connections->map(function (Connection $connection) {
             $data = $connection->only(['id', 'type', 'name', 'last_connected_at']);
 
             if ($connection->isBridge()) {
@@ -46,10 +44,6 @@ class ConnectionController extends Controller
                 $status = $this->bridgeLiveStatus($connection);
                 $data['providers'] = $status['providers'];
                 $data['connected'] = $status['connected'];
-
-                // The private channel that pushes this bridge's connect/disconnect
-                // status — the chat UI subscribes to it instead of polling.
-                $data['channel'] = $prefix.'.connection.'.$connection->id;
             } else {
                 $data['providers'] = $this->byokProviders($connection);
             }

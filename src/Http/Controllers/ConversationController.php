@@ -7,9 +7,7 @@ namespace Tetrix\AiBridge\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use Tetrix\AiBridge\AiBridgeManager;
-use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Events\ConversationCreated;
 use Tetrix\AiBridge\Models\Conversation;
 use Tetrix\AiBridge\Tools\ToolRegistry;
@@ -101,12 +99,11 @@ class ConversationController extends Controller
         return response()->json([
             'conversation' => $conversation,
             'messages' => $conversation->messages,
-            // The broadcast channel for this conversation's stream events. The
-            // chat UI subscribes to it as soon as a conversation is opened —
-            // before any message is sent — so a fast terminal event (e.g. an
-            // immediate error) cannot be broadcast before the browser is
-            // listening. Reverb does not replay missed events.
-            'channel' => $conversation->broadcastChannel(),
+            // The request_id of an actively-streaming turn for this
+            // conversation, or null if none is in flight. The chat UI
+            // checks this on conversation open to decide whether to attach
+            // an EventSource to /ai-bridge/streams/{rid}/events for replay.
+            'streaming_request_id' => $conversation->streaming_request_id,
             // Soft signal: the registered tool set changed since this
             // conversation was created.
             'tools_stale' => $conversation->tools_hash !== null
@@ -134,10 +131,12 @@ class ConversationController extends Controller
     /**
      * POST /ai-bridge/conversations/{id}/stream — send a message.
      *
-     * Bridge mode → starts a Reverb broadcast, returns JSON {request_id, channel}.
-     * BYOK / Managed → returns an SSE stream.
+     * Returns JSON {status, request_id} immediately. The browser then opens
+     * an EventSource against /ai-bridge/streams/{request_id}/events to
+     * receive the streamed reply; that endpoint resumes by Last-Event-ID
+     * after a refresh or reconnect.
      */
-    public function stream(Request $request, int|string $id): StreamedResponse|JsonResponse
+    public function stream(Request $request, int|string $id): JsonResponse
     {
         $conversation = $this->manager->conversationsQuery($request)
             ->whereKey($id)->first();
@@ -157,17 +156,12 @@ class ConversationController extends Controller
         // Optional per-turn provider/model override (e.g. switching mid-conversation).
         $this->applyOverrides($request, $conversation);
 
-        if (ProviderMode::from($conversation->mode) === ProviderMode::Bridge) {
-            $requestId = $this->manager->streamConversationAndBroadcast($conversation, $message);
+        $requestId = $this->manager->startConversationStream($conversation, $message);
 
-            return response()->json([
-                'status' => 'started',
-                'request_id' => $requestId,
-                'channel' => $conversation->broadcastChannel(),
-            ]);
-        }
-
-        return $this->manager->streamConversationToResponse($conversation, $message);
+        return response()->json([
+            'status' => 'started',
+            'request_id' => $requestId,
+        ]);
     }
 
     /**

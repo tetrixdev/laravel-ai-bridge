@@ -13,26 +13,19 @@
     Props:
       api               Base path of the AI Bridge API (default "/ai-bridge").
       thinking-visible  false to hide expandable thinking blocks (default true).
-      reverb-key/-host/-port/-scheme  Reverb connection details. Required for
-                        bridge-mode streaming; omit for BYOK-only setups.
+
+    Streaming is delivered over plain SSE (text/event-stream) tailed by the
+    browser's native EventSource — no Reverb/Echo dependency.
 --}}
 @props([
     'api' => '/ai-bridge',
     'thinkingVisible' => true,
-    'reverbKey' => null,
-    'reverbHost' => null,
-    'reverbPort' => null,
-    'reverbScheme' => 'http',
 ])
 
 <ai-bridge-chat
     api="{{ $api }}"
     assets="{{ $api }}/assets"
     thinking-visible="{{ $thinkingVisible ? 'true' : 'false' }}"
-    @if($reverbKey) reverb-key="{{ $reverbKey }}" @endif
-    @if($reverbHost) reverb-host="{{ $reverbHost }}" @endif
-    @if($reverbPort) reverb-port="{{ $reverbPort }}" @endif
-    reverb-scheme="{{ $reverbScheme }}"
 ></ai-bridge-chat>
 
 <script src="{{ $api }}/assets/ai-bridge-chat.js" defer></script>

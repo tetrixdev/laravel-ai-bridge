@@ -36,9 +36,9 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * Under PHP-FPM (shared-nothing model), the BridgeConnectionManager is empty because
  * the WebSocket server runs in a separate process. In this case, BridgeStream falls
  * back to relaying the request through the bridge server's internal HTTP API
- * (POST /api/request on the configured server port). The response events still arrive
- * asynchronously via the WebSocket server and must be delivered to the client via
- * broadcasting (Reverb), NOT SSE (which requires a blocking connection).
+ * (POST /api/request on the configured server port). The response events arrive
+ * asynchronously at the serve process and are buffered to the stream-event store
+ * there; the browser tails the buffer via SSE.
  */
 class BridgeStream implements StreamableProvider
 {
@@ -61,23 +61,6 @@ class BridgeStream implements StreamableProvider
 
     /** The provider name to route to on the bridge (e.g. 'claude', 'codex', 'gemini'). */
     private string $provider = '';
-
-    /**
-     * Whether the caller is using broadcasting mode (Reverb).
-     *
-     * When true, the bridge_sse_incompatible error in relayViaHttpApi() is
-     * suppressed — broadcasting callers receive events via Reverb, not SSE.
-     */
-    private bool $broadcastingMode = false;
-
-    /**
-     * The Reverb channel relayed events should broadcast on.
-     *
-     * Under PHP-FPM bridge mode the serve process (not this one) does the
-     * broadcasting, so the channel is threaded through the relay body to
-     * RelayStream. Null = the serve process falls back to its default channel.
-     */
-    private ?string $broadcastChannel = null;
 
     public function __construct(
         private readonly BridgeConnectionManager $connectionManager,
@@ -117,32 +100,6 @@ class BridgeStream implements StreamableProvider
     public function setProvider(string $provider): static
     {
         $this->provider = $provider;
-
-        return $this;
-    }
-
-    /**
-     * Mark this stream as using broadcasting (Reverb) mode.
-     *
-     * When set, the bridge_sse_incompatible error fired under PHP-FPM is
-     * suppressed, since broadcasting callers receive events via Reverb.
-     */
-    public function setBroadcastingMode(bool $broadcasting): static
-    {
-        $this->broadcastingMode = $broadcasting;
-
-        return $this;
-    }
-
-    /**
-     * Set the Reverb channel relayed events should broadcast on.
-     *
-     * Threaded through the internal relay so the serve process's RelayStream
-     * broadcasts on the same channel the browser is subscribed to.
-     */
-    public function setBroadcastChannel(?string $channel): static
-    {
-        $this->broadcastChannel = $channel;
 
         return $this;
     }
@@ -369,12 +326,6 @@ class BridgeStream implements StreamableProvider
                 $relayBody['history'] = $payload['history'];
             }
 
-            // Thread the broadcast channel so the serve process's RelayStream
-            // broadcasts relayed events on the channel the browser subscribes to.
-            if ($this->broadcastChannel !== null) {
-                $relayBody['channel'] = $this->broadcastChannel;
-            }
-
             BridgeLog::verbose('relay request payload', [
                 'request_id' => $relayBody['request_id'],
                 'url' => $url,
@@ -408,29 +359,15 @@ class BridgeStream implements StreamableProvider
             }
 
             // Request was accepted by the bridge server. Events will arrive
-            // asynchronously via WebSocket → MessageHandler → broadcasting.
-            BridgeLog::info('relayed request to bridge server (events arrive via broadcasting)', [
+            // asynchronously at the serve process, where RelayStream's
+            // BufferingSink writes them to the per-turn buffer the browser
+            // tails over SSE.
+            BridgeLog::info('relayed request to bridge server (events buffered in serve process)', [
                 'request_id' => $payload['request_id'] ?? '',
                 'user_id' => $this->userId,
                 'url' => $url,
                 'conversation_id' => $payload['conversation_id'] ?? '',
             ]);
-
-            // Under PHP-FPM the SSE response body is already closing when events
-            // arrive asynchronously via WebSocket — without a [DONE] sentinel the
-            // browser reconnects indefinitely. Dispatch an error so the SSE
-            // response closes cleanly. Skipped in broadcasting mode, where the
-            // serve process registers a RelayStream that broadcasts the events.
-            if (! $this->broadcastingMode) {
-                Log::warning('AI Bridge: bridge mode under PHP-FPM — SSE callers will receive no stream events. Use broadcasting mode or switch to Octane/Swoole.', [
-                    'request_id' => $payload['request_id'] ?? '',
-                ]);
-
-                $this->streamHandler->dispatchError(
-                    'bridge_sse_incompatible',
-                    'SSE mode is not supported for bridge mode under PHP-FPM. Use broadcasting (Reverb) instead.'
-                );
-            }
 
         } catch (\Exception $e) {
             BridgeLog::error('failed to relay request to bridge server', [

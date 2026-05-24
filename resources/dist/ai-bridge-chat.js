@@ -12,8 +12,13 @@
  * Attributes:
  *   api               Base path of the AI Bridge API (default "/ai-bridge").
  *   thinking-visible  "false" to hide expandable thinking blocks (default true).
- *   reverb-key/-host/-port/-scheme  Reverb connection details (bridge mode).
- *   assets            Base path the package serves vendored pusher/echo from.
+ *   assets            Base path the package serves the component bundle from.
+ *
+ * Streaming model:
+ *   POST /conversations/{id}/stream returns JSON {request_id}. The browser
+ *   immediately opens an EventSource on /streams/{rid}/events; native
+ *   EventSource reconnection (Last-Event-ID) is what makes a refresh,
+ *   tab-switch or network blip recover the in-flight reply for free.
  */
 (function () {
     'use strict';
@@ -159,12 +164,6 @@
             this.api = this.getAttribute('api') || '/ai-bridge';
             this.assets = this.getAttribute('assets') || (this.api + '/assets');
             this.thinkingVisible = this.getAttribute('thinking-visible') !== 'false';
-            this.reverb = {
-                key: this.getAttribute('reverb-key') || null,
-                host: this.getAttribute('reverb-host') || location.hostname,
-                port: this.getAttribute('reverb-port') || '8080',
-                scheme: this.getAttribute('reverb-scheme') || 'http',
-            };
 
             this.s = {
                 conversations: [], connections: [], activeId: null, conv: null,
@@ -198,19 +197,17 @@
             await this.loadConnections();
             await this.loadConversations();
             this.renderAll();
-            // Live connection updates are pushed over Reverb (see
-            // subscribeConnections). Two cheap safety nets cover a status
-            // event that never arrives — Reverb not configured, the tab
-            // asleep, or a dropped broadcast: a refresh on tab re-focus, and
-            // a slow (60s) fallback poll. Both are no-ops when nothing
-            // meaningful changed (see refreshConnections / _connSnapshot).
+            // Connection status is polled rather than pushed — a CLI bridge is
+            // started manually by the user AFTER this UI loads, so its
+            // providers/models are unknown on the first fetch. A 15s poll plus
+            // a refresh on tab re-focus covers picking up the change. Both are
+            // no-ops when nothing meaningful changed (see _connSnapshot).
             this.connSnapshot = this._connSnapshot(this.s.connections);
-            this.subscribeConnections();
             this._onVisible = () => {
                 if (document.visibilityState === 'visible') this.refreshConnections();
             };
             document.addEventListener('visibilitychange', this._onVisible);
-            this._fallbackTimer = setInterval(() => this.refreshConnections(), 60000);
+            this._fallbackTimer = setInterval(() => this.refreshConnections(), 15000);
         }
 
         disconnectedCallback() {
@@ -222,42 +219,8 @@
                 clearInterval(this._fallbackTimer);
                 this._fallbackTimer = null;
             }
-            if (this.echo && this._connChannels) {
-                Object.keys(this._connChannels).forEach((ch) => {
-                    try { this.echo.leave(ch); } catch (e) {}
-                });
-            }
-            this._connChannels = {};
             this.clearWatchdog();
-            if (this.echo && this._streamChannel) {
-                try { this.echo.leave(this._streamChannel); } catch (e) {}
-                this._streamChannel = null;
-            }
-        }
-
-        // ── live connection updates (push, with a slow poll fallback) ──
-        // A CLI bridge is started manually by the user AFTER this UI loads, so
-        // its providers/models are unknown on the first fetch. The bridge
-        // server broadcasts a "connection.status" event when one connects or
-        // drops; subscribeConnections() listens for it and refreshes. The 60s
-        // fallback poll in init() only covers a missed/undeliverable event.
-        async subscribeConnections() {
-            let echo;
-            try { echo = await this.getEcho(); } catch (e) { echo = null; }
-            if (!echo) return; // no Reverb configured — list updates on refocus
-            this._connChannels = this._connChannels || {};
-            const wanted = {};
-            this.s.connections.forEach((c) => { if (c.channel) wanted[c.channel] = true; });
-            // Drop channels for connections that no longer exist.
-            Object.keys(this._connChannels).forEach((ch) => {
-                if (!wanted[ch]) { try { echo.leave(ch); } catch (e) {} delete this._connChannels[ch]; }
-            });
-            // Subscribe to channels we are not yet listening on.
-            Object.keys(wanted).forEach((ch) => {
-                if (this._connChannels[ch]) return;
-                this._connChannels[ch] = true;
-                echo.private(ch).listen('.connection.status', () => this.refreshConnections());
-            });
+            this.detachStreamSource();
         }
 
         // Snapshot of only the *meaningful* connection fields. The /connections
@@ -639,12 +602,16 @@
         async openConversation(id) {
             this.s.activeId = id; this.s.error = null;
             this.s.sidebarOpen = false; // close the mobile drawer once a chat is picked
-            let channel = null;
+            // Drop any in-flight EventSource from a previous conversation. The
+            // new one (if any) is attached below from streaming_request_id.
+            this.detachStreamSource();
+            this.s.streaming = false; this.s.pulse = false; this.current = null;
+            let streamingRequestId = null;
             try {
                 const d = await this.apiCall('/conversations/' + id);
                 this.s.conv = d.conversation;
                 this.s.toolsStale = !!d.tools_stale;
-                channel = d.channel || null;
+                streamingRequestId = d.streaming_request_id || null;
                 this.s.messages = (d.messages || []).map((m) => ({
                     role: m.role,
                     blocks: (Array.isArray(m.blocks) && m.blocks.length)
@@ -653,11 +620,20 @@
                 }));
             } catch (e) { this.s.error = e.message; }
             this.renderAll();
-            // Subscribe to the conversation's stream channel NOW, on open —
-            // not when a message is sent. A fast terminal event (e.g. an
-            // immediate error) would otherwise be broadcast before the browser
-            // finished subscribing, and Reverb does not replay missed events.
-            if (channel) this.subscribeConversation(channel);
+
+            // If a turn is currently in flight on this conversation, attach an
+            // EventSource to its event buffer and replay from the beginning so
+            // the in-flight assistant message rebuilds. The browser handles
+            // any later reconnects on its own via Last-Event-ID.
+            if (streamingRequestId) {
+                this.assistant = { role: 'assistant', blocks: [] };
+                this.s.messages.push(this.assistant);
+                this.s.streaming = true;
+                this.s.pulse = true;
+                this.renderAll();
+                this.attachStreamSource(streamingRequestId, { fromIndex: -1 });
+                this.armWatchdog(this.WATCHDOG_FIRST_MS);
+            }
         }
         async deleteConversation(id) {
             await this.apiCall('/conversations/' + id, { method: 'DELETE' });
@@ -691,7 +667,6 @@
                 this.s.bridgeCommand = d.command;
                 this.s.cmdCopied = false;
                 await this.loadConnections();
-                this.subscribeConnections(); // listen for the new bridge coming online
             } catch (e) { this.s.error = e.message; this.s.modal = null; }
             this.renderAll();
         }
@@ -726,7 +701,6 @@
                 await this.apiCall('/connections/' + this.s.manageId, { method: 'DELETE' });
                 this.s.modal = null;
                 await this.loadConnections();
-                this.subscribeConnections(); // drop the deleted bridge's status channel
             } catch (e) { this.s.error = e.message; }
             this.renderAll();
         }
@@ -804,49 +778,56 @@
             this.s.streaming = true;
             this.s.pulse = true;
             this.renderAll();
-            // Backstop: if nothing is heard back at all (a hung POST, a lost
-            // broadcast, Reverb misconfigured) the UI must not sit on
-            // "Thinking" forever. armWatchdog() ends the turn with an error;
-            // every received event resets it (see handleEvent).
-            // The FIRST event gets a wider budget — a cold CLI start, a fresh
-            // session seeded with long history, or a transparent session_lost
-            // recovery can all delay it well past the steady-state timeout.
+            // Backstop: if nothing comes back at all the UI must not sit on
+            // "Thinking" forever. armWatchdog() ends the turn; every received
+            // event resets it (see handleEvent). The FIRST event gets a wider
+            // budget because a cold CLI start or a transparent session_lost
+            // recovery can delay it well past the steady-state timeout.
             this.armWatchdog(this.WATCHDOG_FIRST_MS);
 
             try {
                 const res = await fetch(this.api + '/conversations/' + this.s.activeId + '/stream', {
                     method: 'POST', credentials: 'same-origin',
-                    headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json' },
+                    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text }),
                 });
-                const ct = res.headers.get('content-type') || '';
-                if (ct.includes('application/json')) {
-                    const d = await res.json();
-                    if (d.error) throw new Error(d.message || d.error);
-                    // Bridge mode: events arrive over Reverb. The channel was
-                    // already subscribed on conversation open; re-subscribing
-                    // here is idempotent and covers an older open path.
-                    const ok = await this.subscribeConversation(d.channel);
-                    if (!ok) { this.s.error = 'Reverb is not configured for this app.'; this.finish(); }
-                } else {
-                    await this.readSse(res);
+                if (!res.ok) {
+                    const ct = res.headers.get('content-type') || '';
+                    const body = ct.includes('application/json') ? await res.json() : null;
+                    throw new Error((body && (body.message || body.error)) || ('HTTP ' + res.status));
                 }
+                const d = await res.json();
+                if (d.error) throw new Error(d.message || d.error);
+                if (!d.request_id) throw new Error('Server did not return a request_id.');
+                this.attachStreamSource(d.request_id, { fromIndex: -1 });
             } catch (e) { this.s.error = e.message; this.finish(); }
         }
 
+        // Cancel the in-flight turn (server-side). The serve process notices
+        // the abort flag, dispatches `cancelled`, sends `cancel` to the CLI.
+        async stopTurn() {
+            const rid = this._activeRequestId;
+            if (!rid) return;
+            try {
+                await fetch(this.api + '/streams/' + encodeURIComponent(rid) + '/abort', {
+                    method: 'POST', credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json' },
+                });
+            } catch (e) { /* the EventSource will deliver the terminal regardless */ }
+        }
+
         // ── watchdog: never let the UI hang on "Thinking" ─────────────
-        // A turn can stall with no terminal event — a dropped Reverb
-        // broadcast, an event broadcast before the browser subscribed, a
-        // misconfigured broadcaster. The watchdog ends such a turn: it shows
-        // an error and reloads the conversation (the assistant reply may have
-        // been persisted server-side even though its events never arrived).
+        // The buffer + EventSource model already makes refresh/reconnect
+        // recoverable — the watchdog only catches the case where a turn
+        // genuinely produces no events at all (the bridge is down, the
+        // server crashed). It triggers a buffer-status check rather than an
+        // immediate hard error, because the events may simply be lagging.
         armWatchdog(ms) {
             this.clearWatchdog();
             this._watchdog = setTimeout(() => {
                 if (!this.s.streaming) return;
-                this.s.error = 'No response received — the turn timed out. '
-                    + 'The bridge or its connection may be down. '
-                    + 'Re-open the conversation to refresh it.';
+                this.s.error = 'No response received — the turn appears to be stalled. '
+                    + 'Try refreshing the page; if the turn is still running, it will resume here.';
                 this.finish();
             }, ms || this.WATCHDOG_STEADY_MS);
         }
@@ -854,90 +835,58 @@
             if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
         }
 
-        async readSse(res) {
-            const reader = res.body.getReader();
-            const dec = new TextDecoder();
-            let buf = '';
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buf += dec.decode(value, { stream: true });
-                const lines = buf.split('\n');
-                buf = lines.pop() || '';
-                for (const line of lines) {
-                    const tl = line.trim();
-                    if (!tl.startsWith('data: ')) continue;
-                    const p = tl.slice(6);
-                    if (p === '[DONE]') { this.finish(); return; }
-                    try { this.handleEvent(JSON.parse(p)); } catch (e) {}
+        // ── per-turn EventSource ─────────────────────────────────────
+        // Open an EventSource against the per-turn event buffer. The browser
+        // does the reconnect work for us: a dropped connection comes back
+        // with Last-Event-ID set automatically, and the server resumes from
+        // the next index. fromIndex < 0 means "give me everything from the
+        // start" (used on first attach and on conversation-open replay).
+        attachStreamSource(requestId, opts) {
+            this.detachStreamSource();
+            this._activeRequestId = requestId;
+            const fromIndex = (opts && typeof opts.fromIndex === 'number') ? opts.fromIndex : -1;
+            const url = this.api + '/streams/' + encodeURIComponent(requestId)
+                + '/events' + (fromIndex >= 0 ? ('?from_index=' + fromIndex) : '');
+            const es = new EventSource(url, { withCredentials: true });
+            this._eventSource = es;
+            // EventSource fires a typed event per server `event:` line — wire
+            // every name the server may emit. Keepalive lines have no event
+            // name and a `:`-prefixed body, so they never reach a listener.
+            const wire = (name) => es.addEventListener(name, (e) => this.onSseEvent(name, e));
+            ['block_start', 'block_delta', 'block_stop', 'tool_call', 'tool_result',
+             'done', 'error', 'cancelled'].forEach(wire);
+            // onerror fires both on transient disconnects (the browser will
+            // reconnect automatically) and on terminal failures. Only treat
+            // it as terminal once readyState is CLOSED.
+            es.onerror = () => {
+                if (es.readyState === 2 /* CLOSED */) {
+                    this.detachStreamSource();
+                    // A CLOSED EventSource that we didn't ourselves close
+                    // means the server stopped serving — leave the error in
+                    // place so the user knows the turn didn't complete here,
+                    // but the assistant row may still finalize server-side.
+                    if (this.s.streaming) {
+                        this.s.error = this.s.error
+                            || 'The stream connection was closed unexpectedly. '
+                               + 'Refresh to see the persisted result.';
+                        this.finish();
+                    }
                 }
-            }
-            this.finish();
+            };
         }
 
-        // Lazily create the one shared Echo instance, reused by both the
-        // connection-status channels and the per-conversation stream channel.
-        // Resolves to null when Reverb is not configured for this app.
-        async getEcho() {
-            if (this.echo) return this.echo;
-            if (!this.reverb.key) return null;
-            if (!this._echoPromise) {
-                this._echoPromise = (async () => {
-                    const Echo = await this.loadEcho();
-                    this.echo = new Echo({
-                        broadcaster: 'reverb', key: this.reverb.key,
-                        wsHost: this.reverb.host, wsPort: Number(this.reverb.port), wssPort: Number(this.reverb.port),
-                        forceTLS: this.reverb.scheme === 'https', enabledTransports: ['ws', 'wss'],
-                        // Package-owned auth route — authorizes via the project's
-                        // resolvers, so it works without Laravel authentication.
-                        authEndpoint: this.api + '/broadcasting/auth',
-                    });
-                    return this.echo;
-                })();
+        detachStreamSource() {
+            if (this._eventSource) {
+                try { this._eventSource.close(); } catch (e) {}
+                this._eventSource = null;
             }
-            return this._echoPromise;
+            this._activeRequestId = null;
         }
 
-        // Subscribe to a conversation's stream channel for `.ai.stream` events.
-        // Idempotent: subscribing the already-subscribed channel is a no-op, so
-        // it is safe to call both on conversation open and again on send.
-        // Resolves to false when Reverb is not configured for this app.
-        async subscribeConversation(channel) {
-            if (!channel) return false;
-            const echo = await this.getEcho().catch(() => null);
-            if (!echo) return false;
-            if (this._streamChannel === channel) return true;
-            // Leave the previous conversation's channel before joining a new one.
-            if (this._streamChannel) {
-                try { echo.leave(this._streamChannel); } catch (e) {}
-            }
-            this._streamChannel = channel;
-            echo.private(channel).listen('.ai.stream', (e) => this.handleEvent(e));
-            return true;
-        }
-
-        /** Load vendored pusher + echo without touching the host's globals. */
-        async loadEcho() {
-            if (this._EchoClass) return this._EchoClass;
-            const hostPusher = window.Pusher, hostEcho = window.Echo;
-            await this.loadScript(this.assets + '/pusher.min.js');
-            await this.loadScript(this.assets + '/echo.iife.js');
-            // The IIFE/UMD bundles expose a module namespace ({ default: Class })
-            // on the global, not the class itself — unwrap `.default` so
-            // `new Echo(...)` doesn't throw "Echo is not a constructor".
-            this._EchoClass = (window.Echo && window.Echo.default) || window.Echo;
-            this._PusherClass = (window.Pusher && window.Pusher.default) || window.Pusher;
-            window.Pusher = this._PusherClass; // echo needs Pusher global at construct time
-            // restore the host's references after capturing ours
-            this._restoreGlobals = () => { window.Pusher = hostPusher; window.Echo = hostEcho; };
-            return this._EchoClass;
-        }
-        loadScript(src) {
-            return new Promise((resolve, reject) => {
-                const s = document.createElement('script');
-                s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('Failed to load ' + src));
-                document.head.appendChild(s);
-            });
+        onSseEvent(name, ev) {
+            let data = {};
+            try { data = JSON.parse(ev.data || '{}'); } catch (e) { data = {}; }
+            this.handleEvent({ event: name, data });
         }
 
         handleEvent(evt) {
@@ -981,6 +930,7 @@
         }
         finish() {
             this.clearWatchdog();
+            this.detachStreamSource();
             this.s.streaming = false; this.s.pulse = false; this.current = null;
             this.loadConversations().then(() => this.renderAll());
             this.renderAll();

@@ -95,9 +95,14 @@ test('package config file specifies 86400 as the TTL env default', function () {
     expect($configSource)->toContain("AI_BRIDGE_TOKEN_TTL', 86400");
 });
 
-test('broadcasting config defaults', function () {
-    expect(config('ai-bridge.broadcasting.enabled'))->toBeTrue();
-    expect(config('ai-bridge.broadcasting.connection'))->toBe('reverb');
+test('stream_store config defaults', function () {
+    // The test harness pins the driver to 'array'; the package default in
+    // config/ai-bridge.php is 'redis' for production use.
+    expect(config('ai-bridge.stream_store.default'))->toBe('array');
+    expect(config('ai-bridge.stream_store.redis.prefix'))->toBe('ai-bridge:stream');
+    expect(config('ai-bridge.stream_store.redis.ttl_streaming'))->toBe(3600);
+    expect(config('ai-bridge.stream_store.redis.ttl_completed'))->toBe(1800);
+    expect(config('ai-bridge.stream_store.poll_interval_ms'))->toBe(100);
 });
 
 test('websocket config defaults', function () {

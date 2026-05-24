@@ -37,7 +37,8 @@ abstract class TestCase extends OrchestraTestCase
         $app['config']->set('ai-bridge.token.ttl', 3600);
         $app['config']->set('ai-bridge.mode', 'byok');
         $app['config']->set('ai-bridge.route_middleware', ['auth']);
-        $app['config']->set('ai-bridge.broadcasting.enabled', true);
+        // Use the in-memory array stream store for tests so they need no Redis.
+        $app['config']->set('ai-bridge.stream_store.default', 'array');
         $app['config']->set('ai-bridge.chat_completions.stream_timeout', 300);
 
         // In-memory SQLite for tests that exercise conversation persistence.
