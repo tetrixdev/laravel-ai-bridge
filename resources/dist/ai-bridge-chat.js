@@ -790,6 +790,25 @@
                     headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: text }),
                 });
+                // 409: another tab is already streaming a response on this
+                // conversation. The server returns the in-flight request_id;
+                // we re-open the conversation (which attaches an EventSource
+                // to that turn) so this tab sees the response alongside the
+                // other one. The typed message goes back into the composer
+                // so the player can re-send it once the current turn ends.
+                if (res.status === 409) {
+                    const body = await res.json().catch(() => ({}));
+                    if (body && body.request_id) {
+                        this.clearWatchdog();
+                        await this.openConversation(this.s.activeId);
+                        const draftBack = this.root.querySelector('[name="draft"]');
+                        if (draftBack) draftBack.value = text;
+                        this.s.error = 'Another window is already responding in this conversation. '
+                            + 'Your message was not sent — re-send it once the current turn finishes.';
+                        this.renderAll();
+                        return;
+                    }
+                }
                 if (!res.ok) {
                     const ct = res.headers.get('content-type') || '';
                     const body = ct.includes('application/json') ? await res.json() : null;
