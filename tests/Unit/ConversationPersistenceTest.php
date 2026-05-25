@@ -99,6 +99,107 @@ it('ConversationRecorder writes the assistant turn on done', function () {
         ->and($assistant->blocks)->toHaveCount(2);          // thinking block kept for replay
 });
 
+it('ConversationRecorder dedupes shadow tool_call stream blocks and pairs results to WS-frame ids', function () {
+    // In bridge/MCP mode the CLI emits a block_start(tool_call) + block_delta
+    // + block_stop carrying the args text, AND the bridge separately dispatches
+    // a structured WS tool_call frame. Persisting both produces two tool_call
+    // blocks per invocation; the CLI's tool_result then carries the CLI's id
+    // (not the bridge's), so a chat UI pairing by tool_call_id cannot match
+    // either block to the result. Recorder must keep only the WS-frame block
+    // and remap each tool_result id to the next pending WS id (FIFO).
+    $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'gemini']);
+    $conversation->appendMessage(Message::ROLE_USER, 'roll 1d20 and 1d6');
+
+    $handler = new StreamHandler(fakeProvider());
+    $handler->setMode(ProviderMode::Bridge);
+    ConversationRecorder::attach($handler, $conversation);
+
+    // First tool call: stream-event shadow (block_start/delta/stop) + WS frame.
+    $handler->dispatchBlockStart(BlockType::ToolCall, 0);
+    $handler->dispatchBlockDelta(BlockType::ToolCall, 0, '{"notation":"1d20"}');
+    $handler->dispatchBlockStop(BlockType::ToolCall, 0);
+    $handler->dispatchToolCall('roll_dice', ['notation' => '1d20'], 'mcp-rid-12');
+
+    // Second tool call: same shape (Gemini parallel-tool-call pattern).
+    $handler->dispatchBlockStart(BlockType::ToolCall, 1);
+    $handler->dispatchBlockDelta(BlockType::ToolCall, 1, '{"notation":"1d6"}');
+    $handler->dispatchBlockStop(BlockType::ToolCall, 1);
+    $handler->dispatchToolCall('roll_dice', ['notation' => '1d6'], 'mcp-rid-13');
+
+    // Tool results come back from the CLI's stream with the CLI's own ids —
+    // mismatched, in invocation order.
+    $handler->dispatchToolResult('cli-1779-0', '{"total":11}');
+    $handler->dispatchToolResult('cli-1779-1', '{"total":6}');
+
+    // Final text block from the model.
+    $handler->dispatchBlockStart(BlockType::Text, 2);
+    $handler->dispatchBlockDelta(BlockType::Text, 2, 'Rolled 11 and 6.');
+    $handler->dispatchBlockStop(BlockType::Text, 2);
+    $handler->dispatchDone(null);
+
+    $assistant = $conversation->messages()->where('role', 'assistant')->first();
+    $blocks = $assistant->blocks;
+
+    // No shadow tool_call blocks (the {type:tool_call,text:'…json…'} entries
+    // that used to appear before this fix).
+    expect($blocks)->toHaveCount(5);
+    expect($blocks[0])->toBe([
+        'type' => 'tool_call',
+        'tool_name' => 'roll_dice',
+        'parameters' => ['notation' => '1d20'],
+        'tool_call_id' => 'mcp-rid-12',
+    ]);
+    expect($blocks[1])->toBe([
+        'type' => 'tool_call',
+        'tool_name' => 'roll_dice',
+        'parameters' => ['notation' => '1d6'],
+        'tool_call_id' => 'mcp-rid-13',
+    ]);
+    // tool_results are paired by FIFO arrival order to the WS-frame ids — the
+    // CLI's cli-1779-0/1 ids are dropped.
+    expect($blocks[2])->toBe([
+        'type' => 'tool_result',
+        'tool_call_id' => 'mcp-rid-12',
+        'result' => '{"total":11}',
+    ]);
+    expect($blocks[3])->toBe([
+        'type' => 'tool_result',
+        'tool_call_id' => 'mcp-rid-13',
+        'result' => '{"total":6}',
+    ]);
+    expect($blocks[4])->toBe(['type' => 'text', 'text' => 'Rolled 11 and 6.']);
+});
+
+it('ConversationRecorder leaves BYOK-style tool_call/result ids untouched', function () {
+    // For BYOK / non-bridge providers the tool_call and tool_result come from
+    // a single provider stream with matching ids, so the FIFO remap should be
+    // a no-op for them.
+    $conversation = Conversation::create(['mode' => 'byok', 'provider' => 'openai']);
+    $conversation->appendMessage(Message::ROLE_USER, 'use a tool');
+
+    $handler = new StreamHandler(fakeProvider());
+    ConversationRecorder::attach($handler, $conversation);
+
+    // BYOK path: no stream-event tool_call shadow. The provider drives
+    // dispatchToolCall directly.
+    $handler->dispatchToolCall('do_thing', ['x' => 1], 'call_abc');
+    $handler->dispatchToolResult('call_abc', 'ok');
+    $handler->dispatchBlockStart(BlockType::Text, 0);
+    $handler->dispatchBlockDelta(BlockType::Text, 0, 'done');
+    $handler->dispatchBlockStop(BlockType::Text, 0);
+    $handler->dispatchDone(null);
+
+    $blocks = $conversation->messages()->where('role', 'assistant')->first()->blocks;
+
+    expect($blocks)->toHaveCount(3);
+    expect($blocks[0]['tool_call_id'])->toBe('call_abc');
+    expect($blocks[1])->toBe([
+        'type' => 'tool_result',
+        'tool_call_id' => 'call_abc',  // unchanged — already matched
+        'result' => 'ok',
+    ]);
+});
+
 it('ConversationRecorder flags a partial turn on error', function () {
     config()->set('ai-bridge.persistence.persist_partial_on_error', true);
 

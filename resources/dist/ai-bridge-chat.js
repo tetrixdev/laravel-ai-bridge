@@ -910,6 +910,19 @@
         handleEvent(evt) {
             // Any event means the turn is alive — push the watchdog back.
             if (this.s.streaming) this.armWatchdog();
+            // Defensive: re-resolve this.assistant from the messages array.
+            // The capture in openConversation/send happens at push time; if
+            // anything later replaces the array or inserts another message,
+            // events would silently mutate an orphaned object — visible as
+            // "the thinking chip never appears on stream recovery" because
+            // the new blocks live on a message no longer in this.s.messages.
+            // Re-resolving the last assistant here makes the orphan impossible.
+            if (this.s.messages.length > 0) {
+                const last = this.s.messages[this.s.messages.length - 1];
+                if (last && last.role === 'assistant') {
+                    this.assistant = last;
+                }
+            }
             const d = evt.data || {};
             switch (evt.event) {
                 case 'block_start':

@@ -35,26 +35,71 @@ final class ConversationRecorder
         $blocks = [];
         /** @var array<string, mixed>|null $current */
         $current = null;
+        // True while accumulating block_delta for a stream-event tool_call block.
+        // See onBlockStart for why these blocks are dropped.
+        $inStreamToolCall = false;
+        // FIFO of tool_call_ids dispatched via the WS frame path (onToolCall),
+        // so that tool_result blocks coming back from the CLI's stream events
+        // can be paired with the bridge-side block by ORDER. See onToolResult.
+        /** @var array<int, string> $pendingWsToolCallIds */
+        $pendingWsToolCallIds = [];
 
-        $handler->onBlockStart(function (StreamEvent $event) use (&$current) {
-            $current = ['type' => $event->data['block_type'] ?? 'text', 'text' => ''];
+        $handler->onBlockStart(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
+            $blockType = $event->data['block_type'] ?? 'text';
+            // Drop stream-event tool_call blocks. They are a shadow of the WS
+            // tool_call frame: the CLI emits block_start (tool_call) + a
+            // block_delta carrying the args text + block_stop, but with no
+            // tool_name and no tool_call_id. The chat UI cannot render them
+            // (it skips tool_call blocks with no tool_name) and on a recorded
+            // turn they appear as duplicate, unpaired tool_call entries. The
+            // canonical block is stored by the onToolCall callback below.
+            if ($blockType === 'tool_call') {
+                $inStreamToolCall = true;
+                $current = null;
+
+                return;
+            }
+            $current = ['type' => $blockType, 'text' => ''];
         });
-        $handler->onBlockDelta(function (StreamEvent $event) use (&$current) {
+        $handler->onBlockDelta(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
+            if ($inStreamToolCall) {
+                return;
+            }
             if ($current !== null) {
                 $current['text'] .= $event->data['content'] ?? '';
             }
         });
-        $handler->onBlockStop(function () use (&$blocks, &$current) {
+        $handler->onBlockStop(function () use (&$blocks, &$current, &$inStreamToolCall) {
+            if ($inStreamToolCall) {
+                $inStreamToolCall = false;
+
+                return;
+            }
             if ($current !== null) {
                 $blocks[] = $current;
                 $current = null;
             }
         });
-        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
+        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks, &$pendingWsToolCallIds) {
             $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
+            $pendingWsToolCallIds[] = $callId;
         });
-        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks) {
-            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
+        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks, &$pendingWsToolCallIds) {
+            // In bridge/MCP mode the CLI's tool_result carries the CLI's own
+            // tool_call_id, but the corresponding tool_call block was stored
+            // (by onToolCall above) with the bridge's `mcp-<requestId>-<n>` id —
+            // so a chat UI pairing by tool_call_id cannot match them. Remap by
+            // FIFO arrival order: the next pending WS-frame id wins. CLIs emit
+            // results in the same order they invoked the tools, so this pairs
+            // correctly for both sequential and (Claude's) parallel tool calls.
+            //
+            // BYOK/non-bridge providers also queue here, but their callIds
+            // already match across tool_call → tool_result (both come from one
+            // provider stream), so the remap is a no-op for them.
+            $pairedId = ! empty($pendingWsToolCallIds)
+                ? array_shift($pendingWsToolCallIds)
+                : $callId;
+            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $pairedId, 'result' => $result];
         });
         $handler->onDone(function (?array $usage) use (&$blocks, &$current, $conversation) {
             self::flushCurrent($blocks, $current);
