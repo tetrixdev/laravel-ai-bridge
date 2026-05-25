@@ -36,13 +36,10 @@ final class ConversationRecorder
         /** @var array<string, mixed>|null $current */
         $current = null;
         // True while accumulating block_delta for a stream-event tool_call block.
-        // See onBlockStart for why these blocks are dropped.
+        // See onBlockStart for why these blocks are dropped. Reset defensively
+        // on terminal events so a tool_call without a matching block_stop
+        // (truncated stream) can't make us swallow subsequent block_deltas.
         $inStreamToolCall = false;
-        // FIFO of tool_call_ids dispatched via the WS frame path (onToolCall),
-        // so that tool_result blocks coming back from the CLI's stream events
-        // can be paired with the bridge-side block by ORDER. See onToolResult.
-        /** @var array<int, string> $pendingWsToolCallIds */
-        $pendingWsToolCallIds = [];
 
         $handler->onBlockStart(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
             $blockType = $event->data['block_type'] ?? 'text';
@@ -80,34 +77,34 @@ final class ConversationRecorder
                 $current = null;
             }
         });
-        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks, &$pendingWsToolCallIds) {
+        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
             $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
-            $pendingWsToolCallIds[] = $callId;
         });
-        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks, &$pendingWsToolCallIds) {
-            // In bridge/MCP mode the CLI's tool_result carries the CLI's own
-            // tool_call_id, but the corresponding tool_call block was stored
-            // (by onToolCall above) with the bridge's `mcp-<requestId>-<n>` id —
-            // so a chat UI pairing by tool_call_id cannot match them. Remap by
-            // FIFO arrival order: the next pending WS-frame id wins. CLIs emit
-            // results in the same order they invoked the tools, so this pairs
-            // correctly for both sequential and (Claude's) parallel tool calls.
-            //
-            // BYOK/non-bridge providers also queue here, but their callIds
-            // already match across tool_call → tool_result (both come from one
-            // provider stream), so the remap is a no-op for them.
-            $pairedId = ! empty($pendingWsToolCallIds)
-                ? array_shift($pendingWsToolCallIds)
-                : $callId;
-            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $pairedId, 'result' => $result];
+        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks) {
+            // Record the tool_result with the id the dispatcher provided. In
+            // bridge mode that's the CLI's own id (which won't match the WS
+            // tool_call block's `mcp-<rid>-<n>` id) — but the chat UI renders
+            // tool_result blocks STANDALONE (see msgHtml in ai-bridge-chat.js:
+            // type === 'tool_result' branch), so the mismatch is harmless. An
+            // earlier draft tried to remap ids by FIFO arrival order; that
+            // assumed CLIs emit results in invocation order, which is not
+            // guaranteed under parallel tool_use, so it was dropped.
+            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
         });
-        $handler->onDone(function (?array $usage) use (&$blocks, &$current, $conversation) {
+        $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+            $inStreamToolCall = false;
             self::flushCurrent($blocks, $current);
             self::persist($conversation, $blocks, $usage, false);
             self::clearStreamingRequestId($conversation);
         });
 
-        $persistPartial = function () use (&$blocks, &$current, $conversation) {
+        $persistPartial = function () use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+            // A truncated stream may have left $inStreamToolCall set without a
+            // matching block_stop. Clearing it isn't strictly necessary here
+            // (this is a terminal — no more events arrive), but resetting
+            // keeps the closure state consistent if a future refactor reuses
+            // the recorder across turns.
+            $inStreamToolCall = false;
             self::flushCurrent($blocks, $current);
             if (config('ai-bridge.persistence.persist_partial_on_error', true) && self::hasContent($blocks)) {
                 self::persist($conversation, $blocks, null, true);
