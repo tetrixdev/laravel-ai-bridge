@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Tetrix\AiBridge\Streaming;
 
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
 use Tetrix\AiBridge\Protocol\MessageTypes;
@@ -265,8 +264,14 @@ class BridgeStream implements StreamableProvider
             // cleartext unless the host is loopback — warn so operators switch to https://.
             $configuredHost = parse_url($configuredUrl, PHP_URL_HOST) ?: '';
             if (str_starts_with(strtolower($configuredUrl), 'http://') && ! $this->isLoopbackHost($configuredHost)) {
-                Log::warning(
-                    'AI Bridge: AI_BRIDGE_RELAY_URL uses plaintext http:// for a non-loopback host. '
+                // Use BridgeLog (logging failures are swallowed) rather than
+                // the Log facade. start() is wrapped by
+                // AiBridgeManager::startAfterResponse() which surfaces ANY
+                // exception as "The request could not be started" — including
+                // a Monolog write failure on this informational warning.
+                // Losing a log line is always preferable to killing the turn.
+                BridgeLog::warning(
+                    'AI_BRIDGE_RELAY_URL uses plaintext http:// for a non-loopback host. '
                     .'The internal relay token is transmitted unencrypted. Use an https:// URL when the '
                     .'bridge server runs on a separate host.',
                     ['host' => $configuredHost]
@@ -285,8 +290,10 @@ class BridgeStream implements StreamableProvider
             // loopback hosts, but on a non-loopback host the internal relay token
             // is sent in cleartext. Warn so operators set AI_BRIDGE_RELAY_URL.
             if (! $this->isLoopbackHost($host)) {
-                Log::warning(
-                    'AI Bridge: internal relay falls back to plaintext http:// for a non-loopback bridge host. '
+                // See note on the previous BridgeLog::warning call about why we
+                // do not use the Log facade in start()'s call path.
+                BridgeLog::warning(
+                    'internal relay falls back to plaintext http:// for a non-loopback bridge host. '
                     .'The internal relay token is transmitted unencrypted. Set AI_BRIDGE_RELAY_URL to an https:// '
                     .'URL when the bridge server runs on a separate host.',
                     ['host' => $host, 'port' => $port]

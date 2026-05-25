@@ -99,6 +99,104 @@ it('ConversationRecorder writes the assistant turn on done', function () {
         ->and($assistant->blocks)->toHaveCount(2);          // thinking block kept for replay
 });
 
+it('ConversationRecorder drops shadow stream-event tool_call blocks in bridge mode', function () {
+    // In bridge/MCP mode the CLI emits a block_start(tool_call) + block_delta
+    // (args text) + block_stop AND the bridge separately dispatches a
+    // structured WS tool_call frame. Persisting both produced two tool_call
+    // blocks per invocation: a "shadow" `{type:'tool_call', text:'<args json>'}`
+    // with no tool_name, plus the canonical `{tool_name, parameters,
+    // tool_call_id}`. The recorder must drop the shadow and keep only the
+    // WS-frame block; the tool_result block keeps the dispatcher's id (the
+    // chat UI renders tool_result standalone, so no id-pairing is needed).
+    $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'gemini']);
+    $conversation->appendMessage(Message::ROLE_USER, 'roll 1d20 and 1d6');
+
+    $handler = new StreamHandler(fakeProvider());
+    $handler->setMode(ProviderMode::Bridge);
+    ConversationRecorder::attach($handler, $conversation);
+
+    // First tool call: stream-event shadow (block_start/delta/stop) + WS frame.
+    $handler->dispatchBlockStart(BlockType::ToolCall, 0);
+    $handler->dispatchBlockDelta(BlockType::ToolCall, 0, '{"notation":"1d20"}');
+    $handler->dispatchBlockStop(BlockType::ToolCall, 0);
+    $handler->dispatchToolCall('roll_dice', ['notation' => '1d20'], 'mcp-rid-12');
+
+    // Second tool call: same shape (Gemini parallel-tool-call pattern).
+    $handler->dispatchBlockStart(BlockType::ToolCall, 1);
+    $handler->dispatchBlockDelta(BlockType::ToolCall, 1, '{"notation":"1d6"}');
+    $handler->dispatchBlockStop(BlockType::ToolCall, 1);
+    $handler->dispatchToolCall('roll_dice', ['notation' => '1d6'], 'mcp-rid-13');
+
+    // Tool results come back from the CLI's stream with the CLI's own ids.
+    $handler->dispatchToolResult('cli-1779-0', '{"total":11}');
+    $handler->dispatchToolResult('cli-1779-1', '{"total":6}');
+
+    // Final text block from the model.
+    $handler->dispatchBlockStart(BlockType::Text, 2);
+    $handler->dispatchBlockDelta(BlockType::Text, 2, 'Rolled 11 and 6.');
+    $handler->dispatchBlockStop(BlockType::Text, 2);
+    $handler->dispatchDone(null);
+
+    $assistant = $conversation->messages()->where('role', 'assistant')->first();
+    $blocks = $assistant->blocks;
+
+    // 5 blocks where the pre-fix recorder would have produced 7 (two extra
+    // shadow tool_call entries with `{text:'…json…'}` and no tool_name).
+    expect($blocks)->toHaveCount(5);
+    expect($blocks[0])->toBe([
+        'type' => 'tool_call',
+        'tool_name' => 'roll_dice',
+        'parameters' => ['notation' => '1d20'],
+        'tool_call_id' => 'mcp-rid-12',
+    ]);
+    expect($blocks[1])->toBe([
+        'type' => 'tool_call',
+        'tool_name' => 'roll_dice',
+        'parameters' => ['notation' => '1d6'],
+        'tool_call_id' => 'mcp-rid-13',
+    ]);
+    // tool_result keeps the CLI's id. The chat UI renders them standalone, so
+    // the mismatch with the WS tool_call id is harmless.
+    expect($blocks[2])->toBe([
+        'type' => 'tool_result',
+        'tool_call_id' => 'cli-1779-0',
+        'result' => '{"total":11}',
+    ]);
+    expect($blocks[3])->toBe([
+        'type' => 'tool_result',
+        'tool_call_id' => 'cli-1779-1',
+        'result' => '{"total":6}',
+    ]);
+    expect($blocks[4])->toBe(['type' => 'text', 'text' => 'Rolled 11 and 6.']);
+});
+
+it('ConversationRecorder recovers from a truncated shadow tool_call (no block_stop)', function () {
+    // If the stream errors / cancels mid-tool-call, the `inStreamToolCall`
+    // flag is left set without a matching block_stop. A naïve implementation
+    // would silently swallow any later block_delta. Verify the recorder
+    // resets state on terminal events.
+    $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+    $conversation->appendMessage(Message::ROLE_USER, 'roll dice and tell me');
+
+    $handler = new StreamHandler(fakeProvider());
+    $handler->setMode(ProviderMode::Bridge);
+    ConversationRecorder::attach($handler, $conversation);
+
+    // Shadow tool_call opens, no block_stop ever arrives.
+    $handler->dispatchBlockStart(BlockType::ToolCall, 0);
+    $handler->dispatchBlockDelta(BlockType::ToolCall, 0, '{"notation":"1d20"}');
+
+    // Stream errors before block_stop.
+    $handler->dispatchError('provider_error', 'connection dropped');
+
+    $assistant = $conversation->messages()->where('role', 'assistant')->first();
+
+    // Partial persistence path is exercised. Whether the assistant row exists
+    // depends on hasContent() — with no real content yet, no row should be
+    // written. The key assertion is that no exception escaped.
+    expect($assistant)->toBeNull();
+});
+
 it('ConversationRecorder flags a partial turn on error', function () {
     config()->set('ai-bridge.persistence.persist_partial_on_error', true);
 

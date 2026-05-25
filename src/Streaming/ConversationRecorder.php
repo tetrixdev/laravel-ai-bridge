@@ -35,16 +35,43 @@ final class ConversationRecorder
         $blocks = [];
         /** @var array<string, mixed>|null $current */
         $current = null;
+        // True while accumulating block_delta for a stream-event tool_call block.
+        // See onBlockStart for why these blocks are dropped. Reset defensively
+        // on terminal events so a tool_call without a matching block_stop
+        // (truncated stream) can't make us swallow subsequent block_deltas.
+        $inStreamToolCall = false;
 
-        $handler->onBlockStart(function (StreamEvent $event) use (&$current) {
-            $current = ['type' => $event->data['block_type'] ?? 'text', 'text' => ''];
+        $handler->onBlockStart(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
+            $blockType = $event->data['block_type'] ?? 'text';
+            // Drop stream-event tool_call blocks. They are a shadow of the WS
+            // tool_call frame: the CLI emits block_start (tool_call) + a
+            // block_delta carrying the args text + block_stop, but with no
+            // tool_name and no tool_call_id. The chat UI cannot render them
+            // (it skips tool_call blocks with no tool_name) and on a recorded
+            // turn they appear as duplicate, unpaired tool_call entries. The
+            // canonical block is stored by the onToolCall callback below.
+            if ($blockType === 'tool_call') {
+                $inStreamToolCall = true;
+                $current = null;
+
+                return;
+            }
+            $current = ['type' => $blockType, 'text' => ''];
         });
-        $handler->onBlockDelta(function (StreamEvent $event) use (&$current) {
+        $handler->onBlockDelta(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
+            if ($inStreamToolCall) {
+                return;
+            }
             if ($current !== null) {
                 $current['text'] .= $event->data['content'] ?? '';
             }
         });
-        $handler->onBlockStop(function () use (&$blocks, &$current) {
+        $handler->onBlockStop(function () use (&$blocks, &$current, &$inStreamToolCall) {
+            if ($inStreamToolCall) {
+                $inStreamToolCall = false;
+
+                return;
+            }
             if ($current !== null) {
                 $blocks[] = $current;
                 $current = null;
@@ -54,15 +81,30 @@ final class ConversationRecorder
             $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
         });
         $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks) {
+            // Record the tool_result with the id the dispatcher provided. In
+            // bridge mode that's the CLI's own id (which won't match the WS
+            // tool_call block's `mcp-<rid>-<n>` id) — but the chat UI renders
+            // tool_result blocks STANDALONE (see msgHtml in ai-bridge-chat.js:
+            // type === 'tool_result' branch), so the mismatch is harmless. An
+            // earlier draft tried to remap ids by FIFO arrival order; that
+            // assumed CLIs emit results in invocation order, which is not
+            // guaranteed under parallel tool_use, so it was dropped.
             $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
         });
-        $handler->onDone(function (?array $usage) use (&$blocks, &$current, $conversation) {
+        $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+            $inStreamToolCall = false;
             self::flushCurrent($blocks, $current);
             self::persist($conversation, $blocks, $usage, false);
             self::clearStreamingRequestId($conversation);
         });
 
-        $persistPartial = function () use (&$blocks, &$current, $conversation) {
+        $persistPartial = function () use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+            // A truncated stream may have left $inStreamToolCall set without a
+            // matching block_stop. Clearing it isn't strictly necessary here
+            // (this is a terminal — no more events arrive), but resetting
+            // keeps the closure state consistent if a future refactor reuses
+            // the recorder across turns.
+            $inStreamToolCall = false;
             self::flushCurrent($blocks, $current);
             if (config('ai-bridge.persistence.persist_partial_on_error', true) && self::hasContent($blocks)) {
                 self::persist($conversation, $blocks, null, true);
