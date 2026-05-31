@@ -612,6 +612,198 @@ test('a tool_call for a relayed request executes a registered tool and yields to
     expect($response['result'])->toBe(['echoed' => ['val' => 'hi']]);
 });
 
+// --- Handler-registered tools execute through the real WS path (parity with closures) ---
+
+test('a tool_call executes a ToolHandler-registered tool and yields tool_resolve', function () {
+    // A tool registered via registerHandler() (ToolHandler instance), NOT a closure.
+    $registry = new ToolRegistry();
+    $registry->registerHandler(new class extends \Tetrix\AiBridge\Tools\AbstractTool {
+        public function name(): string
+        {
+            return 'handler_echo';
+        }
+
+        public function description(): string
+        {
+            return 'Echo via a ToolHandler instance.';
+        }
+
+        protected function defineParameters(): array
+        {
+            return [
+                new \Tetrix\AiBridge\Tools\ToolParameter('val', 'string', 'A value to echo back.', required: false),
+            ];
+        }
+
+        public function handle(array $params): mixed
+        {
+            return ['echoed' => $params, 'via' => 'handler'];
+        }
+    });
+
+    $mh = makeMessageHandler($this->manager, $registry);
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::TOOL_CALL,
+        'request_id' => 'req-1',
+        'tool_name' => 'handler_echo',
+        'parameters' => ['val' => 'hi'],
+        'call_id' => 'call-h1',
+    ]);
+
+    $response = $mh->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response)->toBeArray();
+    expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($response['result'])->toBe(['echoed' => ['val' => 'hi'], 'via' => 'handler']);
+});
+
+test('handler-registered and closure-registered tools resolve identically through executeToolCall', function () {
+    $registry = new ToolRegistry();
+    $registry->register('closure_tool', 'Closure tool', ['type' => 'object'], fn ($p) => ['ok' => true, 'p' => $p]);
+    $registry->registerHandler(new class extends \Tetrix\AiBridge\Tools\AbstractTool {
+        public function name(): string
+        {
+            return 'handler_tool';
+        }
+
+        public function description(): string
+        {
+            return 'A handler tool returning the same shape as the closure tool.';
+        }
+
+        protected function defineParameters(): array
+        {
+            return [];
+        }
+
+        public function handle(array $params): mixed
+        {
+            return ['ok' => true, 'p' => $params];
+        }
+    });
+
+    $mh = makeMessageHandler($this->manager, $registry);
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $call = function (string $tool) use ($mh) {
+        return $mh->handleMessage('conn-1', null, json_encode([
+            'type' => MessageTypes::TOOL_CALL,
+            'request_id' => 'req-1',
+            'tool_name' => $tool,
+            'parameters' => ['x' => 1],
+            'call_id' => 'call-'.$tool,
+        ]));
+    };
+
+    $closure = $call('closure_tool');
+    $handler = $call('handler_tool');
+
+    expect($closure['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($handler['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    // Both paths produce a real result, not a tool_error.
+    expect($closure['result'])->toBe(['ok' => true, 'p' => ['x' => 1]]);
+    expect($handler['result'])->toBe(['ok' => true, 'p' => ['x' => 1]]);
+});
+
+test('a tool_call for a relayed request executes a ToolHandler-registered tool', function () {
+    $registry = new ToolRegistry();
+    $registry->registerHandler(new class extends \Tetrix\AiBridge\Tools\AbstractTool {
+        public function name(): string
+        {
+            return 'relay_handler';
+        }
+
+        public function description(): string
+        {
+            return 'Handler tool exercised through the relay (serve) path.';
+        }
+
+        protected function defineParameters(): array
+        {
+            return [];
+        }
+
+        public function handle(array $params): mixed
+        {
+            return ['from' => 'relay_handler', 'params' => $params];
+        }
+    });
+
+    $mh = makeMessageHandler($this->manager, $registry);
+    $this->manager->addConnection('user-1', 'conn-1');
+    $mh->registerRelayedRequest('req-relay-handler', 'user-1', 'conv-1');
+
+    $rawMsg = json_encode([
+        'type' => MessageTypes::TOOL_CALL,
+        'request_id' => 'req-relay-handler',
+        'tool_name' => 'relay_handler',
+        'parameters' => ['a' => 'b'],
+        'call_id' => 'call-relay-h',
+    ]);
+
+    $response = $mh->handleMessage('conn-1', null, $rawMsg);
+
+    expect($response)->toBeArray();
+    expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($response['result'])->toBe(['from' => 'relay_handler', 'params' => ['a' => 'b']]);
+});
+
+test('executeToolCall injects the conversation into the shared ToolContext a handler reads', function () {
+    // This is the regression guard for the singleton-ToolContext fix. A handler
+    // tool that reads app(ToolContext::class) at execution time MUST observe the
+    // conversation id that executeToolCall sets — which only holds if ToolContext
+    // is a shared singleton. A fresh-per-resolution binding would leave the
+    // handler's copy empty (the closure-vs-handler bug this fixes).
+    $registry = new ToolRegistry();
+    $registry->registerHandler(new class extends \Tetrix\AiBridge\Tools\AbstractTool {
+        public function name(): string
+        {
+            return 'context_probe';
+        }
+
+        public function description(): string
+        {
+            return 'Returns the conversation id the runtime injected into ToolContext.';
+        }
+
+        protected function defineParameters(): array
+        {
+            return [];
+        }
+
+        public function handle(array $params): mixed
+        {
+            // Resolved fresh from the container — exactly how a consuming-app
+            // handler (via its injected ActiveCampaign) would read it.
+            return ['seen_conversation' => app(\Tetrix\AiBridge\Tools\ToolContext::class)->conversationId()];
+        }
+    });
+
+    $mh = makeMessageHandler($this->manager, $registry);
+    $this->manager->addConnection('user-1', 'conn-1');
+    // makeHandler() sets the conversation id to 'test-conv'.
+    $this->manager->registerPendingRequest('req-1', makeHandler($this->manager), 'user-1');
+
+    $response = $mh->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::TOOL_CALL,
+        'request_id' => 'req-1',
+        'tool_name' => 'context_probe',
+        'parameters' => [],
+        'call_id' => 'call-ctx',
+    ]));
+
+    expect($response['type'])->toBe(MessageTypes::TOOL_RESOLVE);
+    expect($response['result'])->toBe(['seen_conversation' => 'test-conv']);
+
+    // And the context is cleared after the call (finally { forget() }).
+    expect(app(\Tetrix\AiBridge\Tools\ToolContext::class)->conversationId())->toBeNull();
+});
+
 // --- providers_update: mid-connection provider sync ---
 
 test('providers_update from an authenticated bridge refreshes the connection providers', function () {

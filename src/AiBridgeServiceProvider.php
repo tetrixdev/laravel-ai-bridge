@@ -13,6 +13,7 @@ use Tetrix\AiBridge\Console\TestCommand;
 use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Http\Middleware\ValidateBridgeToken;
 use Tetrix\AiBridge\Streaming\StreamStoreManager;
+use Tetrix\AiBridge\Tools\ToolContext;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -45,6 +46,18 @@ class AiBridgeServiceProvider extends ServiceProvider
         $this->app->singleton(ToolRegistry::class, function () {
             return new ToolRegistry();
         });
+
+        // The current tool-call's conversation, injected by the runtime around
+        // each execution so handlers can scope their work without the AI knowing.
+        //
+        // MUST be a singleton: MessageHandler::executeToolCall() resolves it from
+        // the container and sets the conversation id, while consuming-app handlers
+        // (e.g. an ActiveCampaign resolver) receive it via constructor injection.
+        // If this were a fresh instance per resolution, the id set on the
+        // runtime's copy would never reach the handler's copy and every
+        // context-dependent handler tool would see no conversation. Closure tools
+        // don't read context, so they'd appear to work while handler tools failed.
+        $this->app->singleton(ToolContext::class);
 
         $this->app->singleton(TokenManager::class, function () {
             return new TokenManager();
