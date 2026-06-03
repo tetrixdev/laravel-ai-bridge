@@ -35,6 +35,16 @@ use Tetrix\AiBridge\WebSocket\MessageHandler;
  */
 class BridgeWebSocketServer
 {
+    /**
+     * Pre-upgrade buffering caps. The HTTP header section is bounded tightly to
+     * stop a header flood; a request body (e.g. a relayed conversation seed,
+     * which can legitimately be large) is bounded by its declared Content-Length
+     * up to this generous maximum.
+     */
+    private const MAX_HEADER_BYTES = 65536;          // 64 KB
+
+    private const MAX_REQUEST_BODY_BYTES = 16777216; // 16 MB
+
     private ?LoopInterface $loop = null;
 
     private ?SocketServer $socket = null;
@@ -130,17 +140,17 @@ class BridgeWebSocketServer
 
             $httpBuffer .= $data;
 
-            // SEC: Prevent unbounded buffer growth before WebSocket upgrade (max 64KB).
-            if (strlen($httpBuffer) > 65536) {
-                $this->httpResponse($tcpConnection, 413, ['error' => 'payload_too_large']);
-
-                return;
-            }
-
             // Phase 1: wait for headers to complete (\r\n\r\n)
             if (! $headersComplete) {
                 $headerEnd = strpos($httpBuffer, "\r\n\r\n");
                 if ($headerEnd === false) {
+                    // SEC: bound the header section to stop a header flood before
+                    // we even know what this connection is (the body limit below
+                    // covers the request body once Content-Length is known).
+                    if (strlen($httpBuffer) > self::MAX_HEADER_BYTES) {
+                        $this->httpResponse($tcpConnection, 413, ['error' => 'payload_too_large']);
+                    }
+
                     return;
                 }
 
@@ -151,6 +161,14 @@ class BridgeWebSocketServer
                 $headerSection = substr($httpBuffer, 0, $headerEnd);
                 if (preg_match('/^Content-Length:\s*(\d+)/im', $headerSection, $m)) {
                     $expectedBodyLength = (int) $m[1];
+                }
+
+                // SEC: reject an over-large declared body up front. A relayed
+                // conversation seed can be large (hundreds of KB), but bound it.
+                if ($expectedBodyLength > self::MAX_REQUEST_BODY_BYTES) {
+                    $this->httpResponse($tcpConnection, 413, ['error' => 'payload_too_large']);
+
+                    return;
                 }
             }
 

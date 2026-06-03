@@ -31,6 +31,20 @@ test('ProviderMode enum accepts valid byok mode', function () {
     expect(ProviderMode::from('byok'))->toBe(ProviderMode::Byok);
 });
 
+test('ToolContext is bound as a shared singleton', function () {
+    // The runtime (MessageHandler::executeToolCall) and consuming-app handlers
+    // must share ONE ToolContext instance, or the conversation injected by the
+    // runtime never reaches a handler that reads it via constructor injection.
+    $a = app(\Tetrix\AiBridge\Tools\ToolContext::class);
+    $b = app(\Tetrix\AiBridge\Tools\ToolContext::class);
+
+    expect($a)->toBe($b);
+
+    $a->setConversationId('42');
+    expect($b->conversationId())->toBe('42');
+    $a->forget();
+});
+
 test('ProviderMode enum accepts valid managed mode', function () {
     expect(ProviderMode::from('managed'))->toBe(ProviderMode::Managed);
 });
