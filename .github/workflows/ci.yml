@@ -15,17 +15,27 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # Pin testbench to the line that matches the Laravel major: testbench 9
+        # tracks Laravel 11, testbench 10 tracks Laravel 12. Without this, the
+        # unconstrained ^9.0|^10.0 dev range resolves to testbench 10 even on the
+        # Laravel-11 rows, which drags in laravel/framework 12 and conflicts with
+        # the pinned illuminate/support 11 (framework *replaces* that package).
         include:
           - php: '8.2'
             laravel: '11.*'
+            testbench: '9.*'
           - php: '8.2'
             laravel: '12.*'
+            testbench: '10.*'
           - php: '8.3'
             laravel: '11.*'
+            testbench: '9.*'
           - php: '8.3'
             laravel: '12.*'
+            testbench: '10.*'
           - php: '8.4'
             laravel: '12.*'
+            testbench: '10.*'
 
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +50,7 @@ jobs:
       - name: Install dependencies
         run: |
           composer require "illuminate/support:${{ matrix.laravel }}" --no-interaction --no-update
+          composer require "orchestra/testbench:${{ matrix.testbench }}" --dev --no-interaction --no-update
           composer install --prefer-dist --no-interaction --no-progress
 
       - name: Run tests
