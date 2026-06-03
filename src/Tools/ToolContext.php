@@ -11,7 +11,7 @@ namespace Tetrix\AiBridge\Tools;
  * Tool handlers receive only their own parameters, by design: the AI should never
  * have to (and must not be trusted to) restate which conversation it is in. But a
  * server-side handler often needs that binding to scope its work — e.g. to resolve
- * the campaign/session a game tool acts on. The bridge already knows the
+ * which tenant/record/session in the consuming app the call acts on. The bridge already knows the
  * conversation for every tool call ({@see StreamHandler::getConversationId()}); it
  * sets it here for the duration of the execution, without the AI being involved.
  *

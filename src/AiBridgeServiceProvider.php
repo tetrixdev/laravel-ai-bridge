@@ -52,7 +52,7 @@ class AiBridgeServiceProvider extends ServiceProvider
         //
         // MUST be a singleton: MessageHandler::executeToolCall() resolves it from
         // the container and sets the conversation id, while consuming-app handlers
-        // (e.g. an ActiveCampaign resolver) receive it via constructor injection.
+        // (e.g. a tenant/record resolver) receive it via constructor injection.
         // If this were a fresh instance per resolution, the id set on the
         // runtime's copy would never reach the handler's copy and every
         // context-dependent handler tool would see no conversation. Closure tools

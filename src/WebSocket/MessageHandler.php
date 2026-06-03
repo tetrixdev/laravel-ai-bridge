@@ -645,7 +645,7 @@ class MessageHandler
         // Execute the tool if registered
         if ($this->toolRegistry->has($toolName)) {
             // Inject this call's conversation so handlers can scope their work
-            // (e.g. resolve which game campaign they act on) without the AI
+            // (e.g. resolve which tenant/record the call acts on) without the AI
             // having to pass — or even know — the id. Cleared in finally.
             $toolContext = app(\Tetrix\AiBridge\Tools\ToolContext::class);
             $toolContext->setConversationId($handler->getConversationId());
