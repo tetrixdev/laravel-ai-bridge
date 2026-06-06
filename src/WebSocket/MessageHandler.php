@@ -634,6 +634,25 @@ class MessageHandler
             ];
         }
 
+        // Enforce the conversation's tool allowlist at execution time. Advertising
+        // a filtered tool set is not enough on its own — a forged or compromised
+        // bridge client could send a tool_call for a tool this conversation never
+        // exposed, so the runtime guard is the actual boundary.
+        if (! $this->toolAllowedForConversation($handler->getConversationId(), $toolName)) {
+            Log::warning('AI Bridge: tool call rejected by conversation allowlist', [
+                'request_id' => $requestId,
+                'conversation_id' => $handler->getConversationId(),
+                'tool' => $toolName,
+            ]);
+
+            return [
+                'type' => MessageTypes::TOOL_ERROR,
+                'request_id' => $requestId,
+                'tool_call_id' => $callId,
+                'error' => "Tool '{$toolName}' is not allowed for this conversation.",
+            ];
+        }
+
         // Tool execution is synchronous and runs on the ReactPHP event loop
         // thread — a slow tool blocks all WebSocket events for every connected
         // user. Tool handlers registered via AiBridge::registerTool() must be
@@ -701,6 +720,23 @@ class MessageHandler
             'tool_call_id' => $callId,
             'error' => "Tool '{$toolName}' is not registered.",
         ];
+    }
+
+    /**
+     * Whether a conversation may execute a given tool — the runtime side of the
+     * advertised allowlist. A conversation with `allowed_tools = null` (or a
+     * non-persisted / direct stream whose id isn't a conversation key) allows
+     * everything, preserving prior behaviour; otherwise the tool must be listed.
+     */
+    private function toolAllowedForConversation(string $conversationId, string $toolName): bool
+    {
+        if ($conversationId === '' || ! is_numeric($conversationId)) {
+            return true;
+        }
+
+        $allowed = Conversation::query()->whereKey($conversationId)->first(['allowed_tools'])?->allowed_tools;
+
+        return $allowed === null || (is_array($allowed) && in_array($toolName, $allowed, true));
     }
 
     /**

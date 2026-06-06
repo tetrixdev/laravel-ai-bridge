@@ -146,7 +146,15 @@ class ToolRegistry
             return $this->tools;
         }
 
-        return array_intersect_key($this->tools, array_flip($only));
+        // `$only` is user-derived (a conversation's stored allowed_tools), so keep
+        // only non-empty string names before keying — array_flip would warn on
+        // non-scalar entries otherwise.
+        $names = array_filter($only, static fn ($name): bool => is_string($name) && $name !== '');
+        if ($names === []) {
+            return [];
+        }
+
+        return array_intersect_key($this->tools, array_fill_keys($names, true));
     }
 
     /**
