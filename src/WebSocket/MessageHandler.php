@@ -930,7 +930,7 @@ class MessageHandler
             'message' => is_array($current) ? (string) ($current['content'] ?? '') : '',
             'cli_session_id' => null,
             'history' => array_values($history),
-            'tools' => $this->toolRegistry->toArray(),
+            'tools' => $this->toolRegistry->toArray($conversation->allowed_tools),
             'options' => ! empty($conversation->model) ? ['model' => $conversation->model] : [],
         ];
 

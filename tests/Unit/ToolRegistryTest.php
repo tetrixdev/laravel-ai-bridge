@@ -223,3 +223,24 @@ test('toFunctionSchemas() returns multiple schemas in order', function () {
     expect($schemas[0]['function']['name'])->toBe('alpha');
     expect($schemas[1]['function']['name'])->toBe('beta');
 });
+
+test('toArray()/toFunctionSchemas() restrict to an allowed-tools subset', function () {
+    $this->registry->register('alpha', 'Alpha', ['type' => 'object'], fn ($p) => null);
+    $this->registry->register('beta', 'Beta', ['type' => 'object'], fn ($p) => null);
+    $this->registry->register('gamma', 'Gamma', ['type' => 'object'], fn ($p) => null);
+
+    // null = all (back-compat).
+    expect($this->registry->toArray())->toHaveCount(3);
+    expect($this->registry->toFunctionSchemas())->toHaveCount(3);
+
+    // A subset exposes only the named tools, ignoring unknown names.
+    $subset = $this->registry->toArray(['alpha', 'gamma', 'nonexistent']);
+    expect(array_column($subset, 'name'))->toBe(['alpha', 'gamma']);
+
+    $schemas = $this->registry->toFunctionSchemas(['beta']);
+    expect($schemas)->toHaveCount(1);
+    expect($schemas[0]['function']['name'])->toBe('beta');
+
+    // An empty list exposes nothing (a conversation with no tools).
+    expect($this->registry->toArray([]))->toBe([]);
+});

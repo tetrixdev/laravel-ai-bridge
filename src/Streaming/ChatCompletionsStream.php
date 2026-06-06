@@ -114,8 +114,8 @@ class ChatCompletionsStream implements StreamableProvider
             $body['temperature'] = $this->options['temperature'];
         }
 
-        // Tools
-        $tools = $this->toolRegistry->toFunctionSchemas();
+        // Tools — only those this conversation exposes (null = all registered).
+        $tools = $this->toolRegistry->toFunctionSchemas($this->options['allowed_tools'] ?? null);
         if (! empty($tools)) {
             $body['tools'] = $tools;
             $body['tool_choice'] = 'auto';

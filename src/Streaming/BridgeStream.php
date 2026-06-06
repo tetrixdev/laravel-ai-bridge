@@ -178,8 +178,8 @@ class BridgeStream implements StreamableProvider
             $payload['history'] = $this->options['messages'];
         }
 
-        // Include registered tools so the bridge knows what's available
-        $tools = $this->toolRegistry->toArray();
+        // Include the tools this conversation exposes (null = all registered).
+        $tools = $this->toolRegistry->toArray($this->options['allowed_tools'] ?? null);
         if (! empty($tools)) {
             $payload['tools'] = $tools;
         }
