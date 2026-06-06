@@ -222,6 +222,8 @@ class AiBridgeManager
         $mode = ProviderMode::from($conversation->mode);
         $options['mode'] = $mode;
         $options['messages'] = $history;
+        // Which registered tools this conversation exposes (null = all).
+        $options['allowed_tools'] = $conversation->allowed_tools;
 
         if (! empty($conversation->system_prompt)) {
             $options['system_prompt'] = $conversation->system_prompt;

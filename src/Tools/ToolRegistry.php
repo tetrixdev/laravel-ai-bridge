@@ -107,27 +107,54 @@ class ToolRegistry
     }
 
     /**
-     * Get all tools as function schemas (for Chat Completions API).
+     * Get tools as function schemas (for Chat Completions API).
      *
+     * @param  list<string>|null  $only  Restrict to these tool names; null = all.
      * @return array<int, array<string, mixed>>
      */
-    public function toFunctionSchemas(): array
+    public function toFunctionSchemas(?array $only = null): array
     {
         return array_values(
-            array_map(fn (ToolDefinition $tool) => $tool->toFunctionSchema(), $this->tools)
+            array_map(fn (ToolDefinition $tool) => $tool->toFunctionSchema(), $this->select($only))
         );
     }
 
     /**
-     * Get all tools as plain arrays (for WebSocket transmission to bridge).
+     * Get tools as plain arrays (for WebSocket transmission to bridge).
      *
+     * @param  list<string>|null  $only  Restrict to these tool names; null = all.
      * @return array<int, array<string, mixed>>
      */
-    public function toArray(): array
+    public function toArray(?array $only = null): array
     {
         return array_values(
-            array_map(fn (ToolDefinition $tool) => $tool->toArray(), $this->tools)
+            array_map(fn (ToolDefinition $tool) => $tool->toArray(), $this->select($only))
         );
+    }
+
+    /**
+     * The tools a conversation may use: all of them when `$only` is null, otherwise
+     * just the named subset (unknown names ignored). Lets one app expose different
+     * tool sets per conversation off the single global registry.
+     *
+     * @param  list<string>|null  $only
+     * @return array<string, ToolDefinition>
+     */
+    private function select(?array $only): array
+    {
+        if ($only === null) {
+            return $this->tools;
+        }
+
+        // `$only` is user-derived (a conversation's stored allowed_tools), so keep
+        // only non-empty string names before keying — array_flip would warn on
+        // non-scalar entries otherwise.
+        $names = array_filter($only, static fn ($name): bool => is_string($name) && $name !== '');
+        if ($names === []) {
+            return [];
+        }
+
+        return array_intersect_key($this->tools, array_fill_keys($names, true));
     }
 
     /**

@@ -26,6 +26,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property string|null $session_provider
  * @property string|null $session_model
  * @property string|null $tools_hash
+ * @property list<string>|null $allowed_tools
  * @property array<string, mixed>|null $metadata
  * @property-read \Illuminate\Database\Eloquent\Collection<int, Message> $messages
  * @property-read Connection|null $connection
@@ -46,10 +47,12 @@ class Conversation extends Model
         'session_provider',
         'session_model',
         'tools_hash',
+        'allowed_tools',
         'metadata',
     ];
 
     protected $casts = [
+        'allowed_tools' => 'array',
         'metadata' => 'array',
     ];
 

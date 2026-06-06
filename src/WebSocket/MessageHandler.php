@@ -634,6 +634,25 @@ class MessageHandler
             ];
         }
 
+        // Enforce the conversation's tool allowlist at execution time. Advertising
+        // a filtered tool set is not enough on its own — a forged or compromised
+        // bridge client could send a tool_call for a tool this conversation never
+        // exposed, so the runtime guard is the actual boundary.
+        if (! $this->toolAllowedForConversation($handler, $toolName)) {
+            Log::warning('AI Bridge: tool call rejected by conversation allowlist', [
+                'request_id' => $requestId,
+                'conversation_id' => $handler->getConversationId(),
+                'tool' => $toolName,
+            ]);
+
+            return [
+                'type' => MessageTypes::TOOL_ERROR,
+                'request_id' => $requestId,
+                'tool_call_id' => $callId,
+                'error' => "Tool '{$toolName}' is not allowed for this conversation.",
+            ];
+        }
+
         // Tool execution is synchronous and runs on the ReactPHP event loop
         // thread — a slow tool blocks all WebSocket events for every connected
         // user. Tool handlers registered via AiBridge::registerTool() must be
@@ -701,6 +720,32 @@ class MessageHandler
             'tool_call_id' => $callId,
             'error' => "Tool '{$toolName}' is not registered.",
         ];
+    }
+
+    /**
+     * Whether a conversation may execute a given tool — the runtime side of the
+     * advertised allowlist. A conversation with `allowed_tools = null` (or a
+     * non-persisted / direct stream whose id isn't a conversation key) allows
+     * everything, preserving prior behaviour; otherwise the tool must be listed.
+     *
+     * The allowlist is resolved from the DB at most once per request and memoized
+     * on the StreamHandler, so a multi-tool turn doesn't re-query on every call
+     * (tool execution runs on the shared event loop).
+     */
+    private function toolAllowedForConversation(StreamHandler $handler, string $toolName): bool
+    {
+        if (! $handler->hasResolvedAllowedTools()) {
+            $conversationId = $handler->getConversationId();
+            $allowed = ($conversationId === '' || ! is_numeric($conversationId))
+                ? null
+                : Conversation::query()->whereKey($conversationId)->first(['allowed_tools'])?->allowed_tools;
+
+            $handler->cacheAllowedTools(is_array($allowed) ? array_values($allowed) : null);
+        }
+
+        $allowed = $handler->getAllowedTools();
+
+        return $allowed === null || in_array($toolName, $allowed, true);
     }
 
     /**
@@ -930,7 +975,7 @@ class MessageHandler
             'message' => is_array($current) ? (string) ($current['content'] ?? '') : '',
             'cli_session_id' => null,
             'history' => array_values($history),
-            'tools' => $this->toolRegistry->toArray(),
+            'tools' => $this->toolRegistry->toArray($conversation->allowed_tools),
             'options' => ! empty($conversation->model) ? ['model' => $conversation->model] : [],
         ];
 
