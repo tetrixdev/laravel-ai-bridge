@@ -87,3 +87,15 @@ test('a conversation with null allowed_tools runs any registered tool', function
 
     expect(toolCall($this->messageHandler, 'secret')['type'])->toBe(MessageTypes::TOOL_RESOLVE);
 });
+
+test('a conversation with an empty allowed_tools list runs no tool', function () {
+    // [] is distinct from null: an explicit "this conversation exposes no tools".
+    $conversation = Conversation::create(['mode' => 'byok', 'allowed_tools' => []]);
+
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->manager->registerPendingRequest('req-1', handlerForConversation($this->manager, (string) $conversation->id), 'user-1');
+
+    $denied = toolCall($this->messageHandler, 'echo');
+    expect($denied['type'])->toBe(MessageTypes::TOOL_ERROR);
+    expect($denied['error'])->toContain('not allowed');
+});

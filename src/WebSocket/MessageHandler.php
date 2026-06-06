@@ -638,7 +638,7 @@ class MessageHandler
         // a filtered tool set is not enough on its own — a forged or compromised
         // bridge client could send a tool_call for a tool this conversation never
         // exposed, so the runtime guard is the actual boundary.
-        if (! $this->toolAllowedForConversation($handler->getConversationId(), $toolName)) {
+        if (! $this->toolAllowedForConversation($handler, $toolName)) {
             Log::warning('AI Bridge: tool call rejected by conversation allowlist', [
                 'request_id' => $requestId,
                 'conversation_id' => $handler->getConversationId(),
@@ -727,16 +727,25 @@ class MessageHandler
      * advertised allowlist. A conversation with `allowed_tools = null` (or a
      * non-persisted / direct stream whose id isn't a conversation key) allows
      * everything, preserving prior behaviour; otherwise the tool must be listed.
+     *
+     * The allowlist is resolved from the DB at most once per request and memoized
+     * on the StreamHandler, so a multi-tool turn doesn't re-query on every call
+     * (tool execution runs on the shared event loop).
      */
-    private function toolAllowedForConversation(string $conversationId, string $toolName): bool
+    private function toolAllowedForConversation(StreamHandler $handler, string $toolName): bool
     {
-        if ($conversationId === '' || ! is_numeric($conversationId)) {
-            return true;
+        if (! $handler->hasResolvedAllowedTools()) {
+            $conversationId = $handler->getConversationId();
+            $allowed = ($conversationId === '' || ! is_numeric($conversationId))
+                ? null
+                : Conversation::query()->whereKey($conversationId)->first(['allowed_tools'])?->allowed_tools;
+
+            $handler->cacheAllowedTools(is_array($allowed) ? array_values($allowed) : null);
         }
 
-        $allowed = Conversation::query()->whereKey($conversationId)->first(['allowed_tools'])?->allowed_tools;
+        $allowed = $handler->getAllowedTools();
 
-        return $allowed === null || (is_array($allowed) && in_array($toolName, $allowed, true));
+        return $allowed === null || in_array($toolName, $allowed, true);
     }
 
     /**

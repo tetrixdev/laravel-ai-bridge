@@ -14,6 +14,12 @@ use Illuminate\Support\Facades\Schema;
  * an array of tool names means "only these". This lets one app run several
  * conversations off the same global ToolRegistry, each with its own tool set
  * (e.g. distinct agents), without a per-conversation registry.
+ *
+ * Security note: `allowed_tools` is meant to be assigned server-side (e.g. when
+ * the app creates the conversation), NOT supplied by the client — the package's
+ * own conversation-create endpoint does not accept it. A client must not be able
+ * to widen its own tool access; the runtime guard in MessageHandler enforces the
+ * stored list regardless of what a bridge client requests.
  */
 return new class extends Migration
 {

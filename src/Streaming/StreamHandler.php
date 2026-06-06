@@ -87,6 +87,16 @@ class StreamHandler
     /** The conversation ID, set when start() is called for StreamCompleted dispatch. */
     private string $conversationId = '';
 
+    /**
+     * Per-request memo of the conversation's tool allowlist (null = all tools),
+     * resolved once on the first tool call so the runtime guard doesn't re-query
+     * the DB for every tool call on the shared event loop. See `cacheAllowedTools`.
+     */
+    private bool $allowedToolsResolved = false;
+
+    /** @var list<string>|null */
+    private ?array $allowedTools = null;
+
     public readonly string $requestId;
 
     public function __construct(
@@ -240,6 +250,31 @@ class StreamHandler
     public function getConversationId(): string
     {
         return $this->conversationId;
+    }
+
+    /** Whether this request's tool allowlist has been resolved yet (see cacheAllowedTools). */
+    public function hasResolvedAllowedTools(): bool
+    {
+        return $this->allowedToolsResolved;
+    }
+
+    /**
+     * Memoize this request's tool allowlist (null = all tools). Set once per
+     * request so the runtime tool guard resolves the conversation's allowlist a
+     * single time rather than re-querying the DB on every tool call.
+     *
+     * @param  list<string>|null  $allowedTools
+     */
+    public function cacheAllowedTools(?array $allowedTools): void
+    {
+        $this->allowedTools = $allowedTools;
+        $this->allowedToolsResolved = true;
+    }
+
+    /** @return list<string>|null */
+    public function getAllowedTools(): ?array
+    {
+        return $this->allowedTools;
     }
 
     /**
