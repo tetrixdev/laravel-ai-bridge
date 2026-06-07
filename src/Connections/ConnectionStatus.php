@@ -74,12 +74,21 @@ class ConnectionStatus
                 ->get($this->internalApiBase().'/api/status');
 
             if ($response->successful()) {
-                $providers = $response->json('providers') ?? [];
                 $connected = (bool) $response->json('connected');
+
+                // /api/status only includes `providers`/`connected_at` while a CLI is
+                // attached. On a successful-but-disconnected poll keep the cached snapshot
+                // rather than erasing it, and prefer the relay's own connect time.
+                $providers = $connected
+                    ? ($response->json('providers') ?? [])
+                    : ($connection->last_providers ?? []);
+                $connectedAt = $response->json('connected_at');
 
                 $connection->forceFill([
                     'last_providers' => $providers,
-                    'last_connected_at' => $connected ? now() : $connection->last_connected_at,
+                    'last_connected_at' => $connected && $connectedAt !== null
+                        ? $connectedAt
+                        : $connection->last_connected_at,
                 ])->save();
 
                 return ['connected' => $connected, 'providers' => $providers];

@@ -12,6 +12,7 @@ uses(RefreshDatabase::class);
 it('reports a bridge connection live from the server status, refreshing the cache', function () {
     Http::fake(['*/api/status' => Http::response([
         'connected' => true,
+        'connected_at' => now()->timestamp,
         'providers' => [['name' => 'claude', 'models' => [['id' => 'sonnet']]]],
     ])]);
 
@@ -29,6 +30,26 @@ it('reports a bridge connection live from the server status, refreshing the cach
     expect($status['providers'][0]['name'])->toBe('claude');
     // Cache write-through: capabilities + last_connected_at refreshed.
     expect($connection->fresh()->last_connected_at->isToday())->toBeTrue();
+});
+
+it('keeps the cached capabilities when a reachable poll reports disconnected', function () {
+    // /api/status omits providers/connected_at while no CLI is attached — a successful
+    // poll must not erase the cached snapshot.
+    Http::fake(['*/api/status' => Http::response(['connected' => false])]);
+
+    $connection = Connection::create([
+        'type' => Connection::TYPE_BRIDGE,
+        'name' => 'box',
+        'connection_key' => 'key-1',
+        'last_providers' => [['name' => 'claude', 'models' => [['id' => 'sonnet']]]],
+        'last_connected_at' => now()->subDay(),
+    ]);
+
+    $status = app(ConnectionStatus::class)->for($connection);
+
+    expect($status['connected'])->toBeFalse();
+    expect($status['providers'][0]['name'])->toBe('claude');                // not erased
+    expect($connection->fresh()->last_providers[0]['name'])->toBe('claude'); // cache preserved
 });
 
 it('reports a bridge offline (cached providers) when the server is unreachable', function () {
