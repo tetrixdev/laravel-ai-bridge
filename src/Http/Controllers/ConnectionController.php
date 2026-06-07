@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Tetrix\AiBridge\AiBridgeManager;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Connections\ConnectionStatus;
 use Tetrix\AiBridge\Models\Connection;
 
 /**
@@ -26,6 +27,7 @@ class ConnectionController extends Controller
     public function __construct(
         private readonly AiBridgeManager $manager,
         private readonly TokenManager $tokenManager,
+        private readonly ConnectionStatus $status,
     ) {}
 
     /**
@@ -38,14 +40,12 @@ class ConnectionController extends Controller
         $payload = $connections->map(function (Connection $connection) {
             $data = $connection->only(['id', 'type', 'name', 'last_connected_at']);
 
+            // Live capabilities (and, for a bridge, whether a CLI is currently attached)
+            // so the UI can show an accurate status indicator.
+            $status = $this->status->for($connection);
+            $data['providers'] = $status['providers'];
             if ($connection->isBridge()) {
-                // Live capabilities + whether a CLI process is currently
-                // attached, so the UI can show an accurate status indicator.
-                $status = $this->bridgeLiveStatus($connection);
-                $data['providers'] = $status['providers'];
                 $data['connected'] = $status['connected'];
-            } else {
-                $data['providers'] = $this->byokProviders($connection);
             }
 
             return $data;
@@ -257,84 +257,6 @@ class ConnectionController extends Controller
         event(new \Tetrix\AiBridge\Events\ConnectionDeleted($connection, $request));
 
         return response()->json(['status' => 'deleted']);
-    }
-
-    /**
-     * Live status (providers + whether a CLI process is attached) for a bridge.
-     *
-     * Queries the bridge WebSocket server's internal /api/status endpoint with
-     * an internal_relay token scoped to the connection key. Falls back to the
-     * cached last_providers (and connected=false) when the server is unreachable.
-     *
-     * @return array{providers: array<int, mixed>, connected: bool}
-     */
-    private function bridgeLiveStatus(Connection $connection): array
-    {
-        if (empty($connection->connection_key)) {
-            return ['providers' => $connection->last_providers ?? [], 'connected' => false];
-        }
-
-        try {
-            $relayToken = $this->tokenManager->generate(
-                $connection->connection_key,
-                ['scope' => TokenManager::INTERNAL_RELAY_SCOPE],
-                60,
-            );
-
-            $response = Http::withToken($relayToken)
-                ->timeout((int) config('ai-bridge.server.relay_timeout', 5))
-                ->acceptJson()
-                ->get($this->internalApiBase().'/api/status');
-
-            if ($response->successful()) {
-                $providers = $response->json('providers') ?? [];
-                $connected = (bool) $response->json('connected');
-
-                // Refresh the cache so capabilities survive a server restart.
-                $connection->forceFill([
-                    'last_providers' => $providers,
-                    'last_connected_at' => $connected ? now() : $connection->last_connected_at,
-                ])->save();
-
-                return ['providers' => $providers, 'connected' => $connected];
-            }
-        } catch (\Throwable $e) {
-            Log::info('AI Bridge: bridge status unreachable for capabilities', [
-                'connection_id' => $connection->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
-
-        return ['providers' => $connection->last_providers ?? [], 'connected' => false];
-    }
-
-    /**
-     * Synthetic provider capabilities for a BYOK connection.
-     *
-     * @return array<int, mixed>
-     */
-    private function byokProviders(Connection $connection): array
-    {
-        $allowed = (array) config('ai-bridge.chat_completions.allowed_models', []);
-        $configured = config('ai-bridge.chat_completions.model');
-
-        $modelIds = $allowed !== [] ? $allowed : array_filter([$configured]);
-
-        $models = array_map(fn ($id) => [
-            'id' => $id,
-            'name' => $id,
-            'is_default' => $id === $configured,
-        ], array_values($modelIds));
-
-        return [[
-            'name' => 'chat_completions',
-            'available' => true,
-            'supports_streaming' => true,
-            'supports_tools' => true,
-            'supports_thinking' => false,
-            'supports_session_resume' => false,
-            'models' => $models,
-        ]];
     }
 
     /**
