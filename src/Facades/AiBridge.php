@@ -29,6 +29,10 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * @method static BridgeConnectionManager connections()
  * @method static bool hasBridge(int|string $userId)
  * @method static ProviderMode mode()
+ * @method static AiBridgeManager resolveConversationsUsing(Closure $resolver)
+ * @method static AiBridgeManager resolveConnectionsUsing(Closure $resolver)
+ * @method static AiBridgeManager resolveAttachmentsUsing(Closure $resolver)
+ * @method static AiBridgeManager storeAttachmentUsing(Closure $store)
  *
  * @see AiBridgeManager
  */

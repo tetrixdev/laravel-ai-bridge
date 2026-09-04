@@ -1,0 +1,406 @@
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
+use Tetrix\AiBridge\AiBridgeManager;
+use Tetrix\AiBridge\Http\Controllers\AttachmentController;
+use Tetrix\AiBridge\Models\Conversation;
+
+uses(RefreshDatabase::class);
+
+/*
+|--------------------------------------------------------------------------
+| Attachments
+|--------------------------------------------------------------------------
+|
+| The package stores nothing itself — where the bytes live is the app's
+| business, registered through two resolvers. What is tested here is the part
+| the package DOES own: that nothing is served without a resolver, that the
+| lookup is scoped to the bridge's own user, and that the references handed to
+| the bridge describe the file the server would actually serve.
+|
+*/
+
+/** A request that has already passed the bridge-token middleware. */
+function bridgeRequest(string $method = 'GET', string $uri = '/ai-bridge/attachments/att_1', array $params = [], string $userId = 'key-1'): Request
+{
+    $request = Request::create($uri, $method, $params);
+    $request->attributes->set('bridge_user_id', $userId);
+
+    return $request;
+}
+
+function tempAttachment(string $contents = 'the file contents', string $name = 'invoice.pdf'): string
+{
+    $dir = sys_get_temp_dir().'/ai-bridge-attach-'.bin2hex(random_bytes(4));
+    mkdir($dir, 0700, true);
+    $path = $dir.'/'.$name;
+    file_put_contents($path, $contents);
+
+    return $path;
+}
+
+afterEach(function () {
+    app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
+});
+
+describe('serving an attachment to the bridge', function () {
+    it('serves nothing when the app registered no resolver', function () {
+        // Secure by default: the package will not invent a storage location
+        // and read from it.
+        $manager = app(AiBridgeManager::class);
+        $reflection = new ReflectionProperty($manager, 'attachmentResolver');
+        $reflection->setValue($manager, null);
+
+        $response = app(AttachmentController::class)->show(bridgeRequest(), 'att_1');
+
+        expect($response->getStatusCode())->toBe(404);
+    });
+
+    it('serves the file the resolver returns', function () {
+        $path = tempAttachment();
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(
+            fn (string $id, $userId) => $id === 'att_1' ? new SplFileInfo($path) : null
+        );
+
+        $response = app(AttachmentController::class)->show(bridgeRequest(), 'att_1');
+
+        expect($response->getStatusCode())->toBe(200)
+            ->and($response->headers->get('content-disposition'))->toContain('attachment');
+    });
+
+    it('hands the resolver the user the token was issued for, never the request', function () {
+        $seen = [];
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(function (string $id, $userId) use (&$seen) {
+            $seen[] = [$id, $userId];
+
+            return null;
+        });
+
+        // A competing user_id in the request body — the cross-user read this
+        // route exists to prevent. Asserting only that the token subject
+        // arrives would leave the "never the request" half of the claim
+        // unproven, and it is the half that matters.
+        $request = bridgeRequest('GET', '/ai-bridge/attachments/att_5', ['user_id' => 'key-other'], 'key-9');
+
+        app(AttachmentController::class)->show($request, 'att_5');
+
+        expect($seen)->toBe([['att_5', 'key-9']]);
+    });
+
+    it('answers 404 identically for missing and for not-yours', function () {
+        // Telling the two apart would make this route an oracle for which
+        // attachment ids exist.
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
+
+        $missing = app(AttachmentController::class)->show(bridgeRequest(), 'att_does_not_exist');
+        $notMine = app(AttachmentController::class)->show(bridgeRequest(), 'att_someone_elses');
+
+        expect($missing->getStatusCode())->toBe(404)
+            ->and($notMine->getStatusCode())->toBe(404)
+            ->and($missing->getContent())->toBe($notMine->getContent());
+    });
+
+    it('404s when the resolver returns a path that is not a readable file', function () {
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(
+            fn () => new SplFileInfo('/tmp/definitely-not-here-'.bin2hex(random_bytes(4)))
+        );
+
+        expect(app(AttachmentController::class)->show(bridgeRequest(), 'att_1')->getStatusCode())->toBe(404);
+    });
+});
+
+describe('accepting a file from the assistant', function () {
+    it('answers 501 when the app never opted into the return direction', function () {
+        // Nothing is broken — the app simply has no store. The bridge surfaces
+        // the message to the model, which can then say so rather than retry.
+        $manager = app(AiBridgeManager::class);
+        (new ReflectionProperty($manager, 'attachmentStore'))->setValue($manager, null);
+
+        $response = app(AttachmentController::class)->store(bridgeRequest('POST', '/ai-bridge/attachments'));
+
+        expect($response->getStatusCode())->toBe(501);
+    });
+
+    it('rejects a request with no file', function () {
+        app(AiBridgeManager::class)->storeAttachmentUsing(fn () => ['id' => 'att_new']);
+
+        $response = app(AttachmentController::class)->store(bridgeRequest('POST', '/ai-bridge/attachments'));
+
+        expect($response->getStatusCode())->toBe(422);
+    });
+
+    it('stores the file and returns what the app said about it', function () {
+        $seen = [];
+        app(AiBridgeManager::class)->storeAttachmentUsing(function (UploadedFile $file, $userId) use (&$seen) {
+            $seen = [$file->getClientOriginalName(), $userId];
+
+            return ['id' => 'att_new', 'url' => 'https://studio.test/a/att_new'];
+        });
+
+        $request = bridgeRequest('POST', '/ai-bridge/attachments', [], 'key-3');
+        $request->files->set('file', UploadedFile::fake()->createWithContent('report.md', '# report'));
+
+        $response = app(AttachmentController::class)->store($request);
+
+        expect($response->getStatusCode())->toBe(201)
+            ->and(json_decode($response->getContent(), true)['id'])->toBe('att_new')
+            ->and($seen)->toBe(['report.md', 'key-3']);
+    });
+
+    it('returns only the protocol fields, not whatever the app store hands back', function () {
+        // The app's store may return a disk name, an absolute path, a whole
+        // model. None of that is the bridge's business.
+        app(AiBridgeManager::class)->storeAttachmentUsing(fn () => [
+            'id' => 'att_new',
+            'url' => 'https://studio.test/a/att_new',
+            'absolute_path' => '/var/www/storage/app/private/att_new.md',
+            'disk' => 'local',
+        ]);
+
+        $request = bridgeRequest('POST', '/ai-bridge/attachments');
+        $request->files->set('file', UploadedFile::fake()->createWithContent('a.txt', 'x'));
+
+        $body = json_decode(app(AttachmentController::class)->store($request)->getContent(), true);
+
+        expect($body)->toHaveKey('id')
+            ->and($body)->not->toHaveKey('absolute_path')
+            ->and($body)->not->toHaveKey('disk');
+    });
+
+    it('reports a failure in the app store as a 500, not as a success', function () {
+        app(AiBridgeManager::class)->storeAttachmentUsing(function () {
+            throw new RuntimeException('disk full');
+        });
+
+        $request = bridgeRequest('POST', '/ai-bridge/attachments');
+        $request->files->set('file', UploadedFile::fake()->createWithContent('a.txt', 'x'));
+
+        expect(app(AttachmentController::class)->store($request)->getStatusCode())->toBe(500);
+    });
+
+    it('refuses a store that does not return an id', function () {
+        app(AiBridgeManager::class)->storeAttachmentUsing(fn () => ['url' => 'https://x.test/a']);
+
+        $request = bridgeRequest('POST', '/ai-bridge/attachments');
+        $request->files->set('file', UploadedFile::fake()->createWithContent('a.txt', 'x'));
+
+        // Surfaces as a 500: the bridge needs an id to put on its stream event,
+        // and without one the file would arrive nowhere.
+        expect(app(AttachmentController::class)->store($request)->getStatusCode())->toBe(500);
+    });
+});
+
+describe('building the references sent to the bridge', function () {
+    it('describes the file the server would actually serve', function () {
+        $path = tempAttachment('the file contents', 'invoice.pdf');
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo($path));
+
+        $refs = app(AiBridgeManager::class)->buildAttachmentRefs(['att_1'], 'key-1');
+
+        expect($refs[0]['id'])->toBe('att_1')
+            ->and($refs[0]['name'])->toBe('invoice.pdf')
+            ->and($refs[0]['size'])->toBe(strlen('the file contents'))
+            // Computed from the bytes, so the bridge's verification compares
+            // against the same file rather than against a claim beside it.
+            ->and($refs[0]['sha256'])->toBe(hash('sha256', 'the file contents'));
+    });
+
+    it('builds the URL from the CONFIGURED app url, not the incoming request', function () {
+        // url() takes scheme and host from the current request, and Laravel does
+        // not validate Host by default — so a user could hand the bridge a URL
+        // on a host they chose, which it would fetch with its own connection
+        // token. It also emits http:// behind a TLS proxy without TrustProxies,
+        // and the bridge then refuses every attachment as non-HTTPS.
+        config(['app.url' => 'https://configured.test']);
+        $path = tempAttachment();
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo($path));
+
+        // A request from a host the caller chose.
+        $hostile = Request::create('http://evil.test/ai-bridge/conversations/1/stream', 'POST');
+        $hostile->headers->set('Host', 'evil.test');
+        app()->instance('request', $hostile);
+
+        $refs = app(AiBridgeManager::class)->buildAttachmentRefs(['att_1'], 'key-1');
+
+        expect($refs[0]['url'])->toBe('https://configured.test/ai-bridge/attachments/att_1')
+            ->and($refs[0]['url'])->not->toContain('evil.test');
+    });
+
+    it('refuses an id that is only dots, which is a directory not an identifier', function () {
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo(tempAttachment()));
+
+        foreach (['..', '.', '...'] as $id) {
+            expect(fn () => app(AiBridgeManager::class)->buildAttachmentRefs([$id], 'key-1'))
+                ->toThrow(InvalidArgumentException::class);
+        }
+    });
+
+    it('refuses an id that does not resolve', function () {
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
+
+        expect(fn () => app(AiBridgeManager::class)->buildAttachmentRefs(['att_nope'], 'key-1'))
+            ->toThrow(InvalidArgumentException::class, 'att_nope');
+    });
+
+    it('scopes the lookup to the bridge user, so ids cannot be borrowed', function () {
+        $path = tempAttachment();
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(
+            fn (string $id, $userId) => $userId === 'key-1' ? new SplFileInfo($path) : null
+        );
+
+        expect(app(AiBridgeManager::class)->buildAttachmentRefs(['att_1'], 'key-1'))->toHaveCount(1);
+        expect(fn () => app(AiBridgeManager::class)->buildAttachmentRefs(['att_1'], 'key-2'))
+            ->toThrow(InvalidArgumentException::class);
+    });
+});
+
+describe('attaching files to a turn', function () {
+    /** A bridge conversation with a connection, so it has a user to scope by. */
+    function bridgeConversationWithConnection(): Conversation
+    {
+        app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
+
+        $connection = \Tetrix\AiBridge\Models\Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+        ]);
+
+        return Conversation::create([
+            'mode' => 'bridge', 'provider' => 'claude', 'connection_id' => $connection->id,
+        ]);
+    }
+
+    it('rejects the turn when an attachment id does not resolve', function () {
+        // The conversation has a connection, so it HAS a bridge user — the 422
+        // must come from the resolver returning nothing, not from the
+        // "no bridge user to scope them to" guard, which is a different bug.
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
+        $conversation = bridgeConversationWithConnection();
+
+        $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'what does this say?',
+                'attachments' => ['att_nope'],
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('att_nope');
+    });
+
+    it('refuses when there is no bridge user to scope the files to', function () {
+        // The other 422, told apart from the one above. A resolver that filters
+        // by owner finds nothing for '' and answers "not found", which reads as
+        // a broken attachment rather than a turn with nobody to attribute it to.
+        app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo(tempAttachment()));
+
+        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+
+        $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'attachments' => ['att_1'],
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('no bridge user');
+    });
+
+    it('refuses attachments outside bridge mode rather than silently dropping them', function () {
+        // BYOK and managed have no notion of attachments; accepting them would
+        // resolve every file, answer 200, and never show the model any of it.
+        app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
+        $conversation = Conversation::create(['mode' => 'byok']);
+
+        $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'what does this say?', 'attachments' => ['att_1'],
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('only supported in bridge mode');
+    });
+});
+
+describe('the attachment stream event', function () {
+    it('reaches a registered callback', function () {
+        // Without a consumer the bridge uploads the file, the app stores it,
+        // and the id reaches nothing — the return direction would be dead
+        // end-to-end while both halves individually worked.
+        $seen = [];
+        $handler = makeStreamHandlerForAttachments();
+        $handler->onAttachment(function (array $attachment) use (&$seen) {
+            $seen = $attachment;
+        });
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            'req-1',
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new', 'name' => 'report.md', 'mime_type' => 'text/markdown', 'size' => 8],
+        ));
+
+        expect($seen['id'])->toBe('att_new')
+            ->and($seen['name'])->toBe('report.md');
+    });
+
+    it('is buffered, so the browser SSE tail replays it', function () {
+        $store = app(\Tetrix\AiBridge\Contracts\StreamStoreContract::class);
+        $handler = makeStreamHandlerForAttachments();
+        $store->start($handler->requestId, []);
+        \Tetrix\AiBridge\Streaming\BufferingSink::attach($handler, $store);
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            $handler->requestId,
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new', 'name' => 'report.md'],
+        ));
+
+        $events = $store->range($handler->requestId);
+        $types = array_map(fn ($e) => $e['event'] ?? null, $events);
+
+        expect($types)->toContain(\Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT);
+    });
+
+    it('does not terminate the turn', function () {
+        // It is an ordinary mid-turn event; a `done` still follows.
+        $done = false;
+        $handler = makeStreamHandlerForAttachments();
+        $handler->onDone(function () use (&$done) {
+            $done = true;
+        });
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            'req-1',
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new'],
+        ));
+        $handler->dispatchDone(null);
+
+        expect($done)->toBeTrue();
+    });
+});
+
+function makeStreamHandlerForAttachments(): \Tetrix\AiBridge\Streaming\StreamHandler
+{
+    $provider = Mockery::mock(\Tetrix\AiBridge\Contracts\StreamableProvider::class);
+    $provider->shouldReceive('start')->byDefault();
+    $provider->shouldReceive('cancel')->byDefault();
+    $provider->shouldReceive('markCompleted')->byDefault();
+
+    $handler = new \Tetrix\AiBridge\Streaming\StreamHandler($provider);
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Bridge);
+    $handler->setConversationId('conv-1');
+
+    return $handler;
+}

@@ -32,15 +32,31 @@ class ConnectionStatus
     /**
      * Live status for any connection.
      *
-     * @return array{connected: bool, providers: array<int, mixed>}
+     * `workspaces` is the directories a CLI bridge will work in, as the
+     * operator allowed them with `--allow-dir`. Always empty for BYOK, which
+     * has no machine to work on, and empty for a bridge whose operator allowed
+     * none — which is also what an older bridge looks like, and means the same
+     * thing: naming a working directory is refused.
+     *
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>}
      */
     public function for(Connection $connection): array
     {
         if ($connection->isByok()) {
-            return ['connected' => true, 'providers' => $this->byokProviders()];
+            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => []];
         }
 
         return $this->bridgeLiveStatus($connection);
+    }
+
+    /**
+     * The directories this connection's bridge will work in.
+     *
+     * @return array<int, mixed>
+     */
+    public function workspaces(Connection $connection): array
+    {
+        return $this->for($connection)['workspaces'];
     }
 
     /** Whether the connection is currently usable. */
@@ -53,12 +69,16 @@ class ConnectionStatus
      * Query the bridge server for a bridge connection's live status, refreshing the cached
      * capabilities. Falls back to cached providers + connected=false when unreachable.
      *
-     * @return array{connected: bool, providers: array<int, mixed>}
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>}
      */
     private function bridgeLiveStatus(Connection $connection): array
     {
         if (empty($connection->connection_key)) {
-            return ['connected' => false, 'providers' => $connection->last_providers ?? []];
+            return [
+                'connected' => false,
+                'providers' => $connection->last_providers ?? [],
+                'workspaces' => $connection->last_workspaces ?? [],
+            ];
         }
 
         try {
@@ -82,16 +102,29 @@ class ConnectionStatus
                 $providers = $connected
                     ? ($response->json('providers') ?? [])
                     : ($connection->last_providers ?? []);
+                // Same rule as providers: /api/status only reports workspaces
+                // while a CLI is attached, so a successful-but-disconnected
+                // poll must keep the cached snapshot rather than erase it.
+                // Absent is NOT empty. A serve process running an older build
+                // of this package does not report `workspaces` at all, and
+                // treating that as "the bridge allows none" would blank the
+                // cache on every poll for the whole of a rolling deploy — the
+                // same failure that had to be fixed for providers.
+                $reportedWorkspaces = $response->json('workspaces');
+                $workspaces = $connected && is_array($reportedWorkspaces)
+                    ? $reportedWorkspaces
+                    : ($connection->last_workspaces ?? []);
                 $connectedAt = $response->json('connected_at');
 
                 $connection->forceFill([
                     'last_providers' => $providers,
+                    'last_workspaces' => $workspaces,
                     'last_connected_at' => $connected && $connectedAt !== null
                         ? $connectedAt
                         : $connection->last_connected_at,
                 ])->save();
 
-                return ['connected' => $connected, 'providers' => $providers];
+                return ['connected' => $connected, 'providers' => $providers, 'workspaces' => $workspaces];
             }
         } catch (\Throwable $e) {
             Log::info('AI Bridge: bridge status unreachable', [
@@ -100,7 +133,11 @@ class ConnectionStatus
             ]);
         }
 
-        return ['connected' => false, 'providers' => $connection->last_providers ?? []];
+        return [
+            'connected' => false,
+            'providers' => $connection->last_providers ?? [],
+            'workspaces' => $connection->last_workspaces ?? [],
+        ];
     }
 
     /**

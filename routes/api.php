@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use Tetrix\AiBridge\Http\Controllers\AssetController;
+use Tetrix\AiBridge\Http\Controllers\AttachmentController;
 use Tetrix\AiBridge\Http\Controllers\BridgeController;
 use Tetrix\AiBridge\Http\Controllers\ConnectionController;
 use Tetrix\AiBridge\Http\Controllers\ConversationController;
@@ -14,6 +15,31 @@ Route::middleware('api')->prefix('ai-bridge')->group(function () {
     Route::get('/assets/{file}', [AssetController::class, 'show'])
         ->where('file', '[A-Za-z0-9._-]+');
 });
+
+/*
+|--------------------------------------------------------------------------
+| Attachments — spoken to by a bridge, not by a browser
+|--------------------------------------------------------------------------
+|
+| Guarded by the bridge connection token rather than the app's session
+| middleware: the caller here is the CLI bridge on someone's machine, using
+| the same credential it holds the WebSocket open with. Deliberately outside
+| the `route_middleware` group below, which is the browser's auth.
+|
+| Where the bytes live is the app's business — see
+| AiBridge::resolveAttachmentsUsing() and AiBridge::storeAttachmentUsing().
+| Without those registered, downloads 404 and uploads 501.
+|
+| Throttled generously: one chat turn can legitimately carry several
+| attachments, and each is a separate request.
+*/
+Route::middleware(['api', 'ai-bridge.token', 'throttle:60,1'])
+    ->prefix('ai-bridge')
+    ->group(function () {
+        Route::get('/attachments/{id}', [AttachmentController::class, 'show'])
+            ->where('id', '[A-Za-z0-9._-]+');
+        Route::post('/attachments', [AttachmentController::class, 'store']);
+    });
 
 /*
 |--------------------------------------------------------------------------

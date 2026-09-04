@@ -209,6 +209,38 @@ class BridgeConnectionManager
     }
 
     /**
+     * Store the directories the bridge said it will work in.
+     *
+     * Arrives on `hello` as `workspaces`, built entirely from what the operator
+     * passed to `--allow-dir`. The server cannot add to it: sending a
+     * `working_dir` outside these roots is refused by the bridge. Absent means
+     * the operator allowed none — which is also what an older bridge looks
+     * like, and the two are the same thing from here.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @param  array<int, array<string, mixed>>  $workspaces  Workspace refs from the hello message.
+     */
+    public function setWorkspaces(int|string $userId, array $workspaces): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['workspaces'] = $workspaces;
+        }
+    }
+
+    /**
+     * Get the workspaces this user's bridge advertised.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @return array<int, array<string, mixed>>  Empty when the bridge allowed none.
+     */
+    public function getWorkspaces(int|string $userId): array
+    {
+        return $this->connections[(string) $userId]['workspaces'] ?? [];
+    }
+
+    /**
      * Get the provider capabilities for a user's bridge connection.
      *
      * @param  int|string  $userId  The user ID.

@@ -10,6 +10,7 @@ use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Enums\BlockType;
 use Tetrix\AiBridge\Models\Conversation;
+use Tetrix\AiBridge\Protocol\AiRequestPayload;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\RelayStream;
@@ -164,8 +165,9 @@ class MessageHandler
 
         if ($existingUserId !== null) {
             // Already authenticated — store providers from hello and return welcome
-            $providers = $message['providers'] ?? [];
+            $providers = self::asList($message['providers'] ?? null);
             $this->connectionManager->setProviders($existingUserId, $providers);
+            $this->connectionManager->setWorkspaces($existingUserId, self::asList($message['workspaces'] ?? null));
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
@@ -200,7 +202,7 @@ class MessageHandler
         }
 
         // Register the connection with provider capabilities
-        $providers = $message['providers'] ?? [];
+        $providers = self::asList($message['providers'] ?? null);
         $this->connectionManager->addConnection(
             $userId,
             $connectionId,
@@ -209,6 +211,10 @@ class MessageHandler
             isset($decoded->exp) ? (int) $decoded->exp : null,
             isset($decoded->cid) ? (int) $decoded->cid : null,
         );
+
+        // Recorded after addConnection(), which is what creates the entry the
+        // setter writes into.
+        $this->connectionManager->setWorkspaces($userId, self::asList($message['workspaces'] ?? null));
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
@@ -239,12 +245,29 @@ class MessageHandler
             return null;
         }
 
-        $providers = $message['providers'] ?? [];
+        $providers = self::asList($message['providers'] ?? null);
         $this->connectionManager->setProviders($userId, $providers);
 
         $this->logBridgeConnection($userId, $connectionId, 'n/a', $providers, 'providers updated');
 
         return null;
+    }
+
+    /**
+     * Coerce a hello/providers_update field to a list.
+     *
+     * These arrive as parsed JSON from a client, and they are handed straight
+     * to methods declaring `array`. Under `strict_types=1` a string where an
+     * array is declared is a TypeError — raised inside the ReactPHP message
+     * callback, which has no try/catch of its own, so it does not fail one
+     * handshake, it exits the process and drops every connected bridge.
+     *
+     * @param  mixed  $value
+     * @return array<int, mixed>
+     */
+    private static function asList(mixed $value): array
+    {
+        return is_array($value) ? $value : [];
     }
 
     /**
@@ -289,16 +312,27 @@ class MessageHandler
     /**
      * Resolve the `cli_isolation` posture for outgoing welcome messages.
      *
-     * Reads `ai-bridge.cli.isolation` and normalizes anything other than the
-     * literal `"native"` back to `"isolated"`. This makes typos or unexpected
-     * values default-safe rather than default-leaky — the explicit opt-in is
-     * what counts.
+     * Reads `ai-bridge.cli.isolation` and normalizes anything not explicitly
+     * recognised back to `"isolated"`. Typos and unexpected values are then
+     * default-safe rather than default-leaky — only an exact opt-in counts.
+     *
+     * The three postures:
+     *   - `isolated` (default): the CLI reaches server-declared tools only.
+     *   - `workspace`: the CLI also gets its own file and shell tools, inside
+     *     the directory the request named, while the operator's own MCP
+     *     servers, hooks and plugins stay out. This is what a chat that edits
+     *     a repository needs, and it is NOT a sandbox — the bridge's README
+     *     says so at length. Pointless without a bridge started with
+     *     `--allow-dir` and a `working_dir` on the request; the CLI simply
+     *     works in the empty scratch directory instead.
+     *   - `native`: everything on, including the operator's environment. Never
+     *     appropriate when the server is reachable by end users.
      */
     private function resolveCliIsolation(): string
     {
         $value = config('ai-bridge.cli.isolation', 'isolated');
 
-        return $value === 'native' ? 'native' : 'isolated';
+        return in_array($value, ['native', 'workspace'], true) ? $value : 'isolated';
     }
 
     /**
@@ -967,23 +1001,25 @@ class MessageHandler
         $history = $conversation->historyFor();
         $current = array_pop($history); // the latest (user) turn to respond to
 
-        $payload = [
-            'type' => MessageTypes::AI_REQUEST,
+        return AiRequestPayload::build([
             'request_id' => $requestId,
             'conversation_id' => (string) $conversation->id,
             'provider' => (string) ($conversation->provider ?? ''),
             'message' => is_array($current) ? (string) ($current['content'] ?? '') : '',
+            'system_prompt' => $conversation->system_prompt ?: null,
+            'options' => ['model' => $conversation->model ?: null],
             'cli_session_id' => null,
             'history' => array_values($history),
             'tools' => $this->toolRegistry->toArray($conversation->allowed_tools),
-            'options' => ! empty($conversation->model) ? ['model' => $conversation->model] : [],
-        ];
-
-        if (! empty($conversation->system_prompt)) {
-            $payload['system_prompt'] = $conversation->system_prompt;
-        }
-
-        return $payload;
+            // The reason this method goes through the shared builder rather
+            // than assembling its own array: it used to, and it never learned
+            // about `working_dir`. A recovered turn then ran in the bridge's
+            // empty scratch directory and answered confidently about a
+            // repository the CLI could not see — and the fresh session it
+            // created was bound to that scratch directory, so every later turn
+            // was refused `working_dir_changed` and the conversation was dead.
+            'working_dir' => $conversation->working_dir,
+        ]);
     }
 
     /**

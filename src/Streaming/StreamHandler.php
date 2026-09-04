@@ -59,6 +59,9 @@ class StreamHandler
     /** @var Closure[] */
     private array $toolResultCallbacks = [];
 
+    /** @var Closure[] */
+    private array $attachmentCallbacks = [];
+
     private bool $cancelled = false;
 
     /**
@@ -198,6 +201,21 @@ class StreamHandler
     public function onToolResult(Closure $callback): static
     {
         $this->toolResultCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Register a callback for attachment events — a file the assistant sent back.
+     *
+     * The callback receives the event's data array: `id`, `name`, `mime_type`,
+     * `size`, and `description` when the model gave one. The `id` is the one
+     * the app's own `storeAttachmentUsing()` returned, so the UI can render
+     * the file straight from the app's attachment store.
+     */
+    public function onAttachment(Closure $callback): static
+    {
+        $this->attachmentCallbacks[] = $callback;
 
         return $this;
     }
@@ -410,6 +428,39 @@ class StreamHandler
     }
 
     /**
+     * Dispatch an attachment event to all registered callbacks.
+     *
+     * Not terminal: a `done` still follows, and this must not end the turn.
+     *
+     * It IS dropped after a cancel or a terminal event, like every other
+     * non-terminal event — and that is a known rough edge rather than a
+     * decision. The file is already stored server-side by the time this
+     * arrives, so a turn cancelled in the window between the upload and the
+     * event leaves an attachment in the app's store that nothing links to. In
+     * practice the envelope rarely gets this far: an aborted turn has already
+     * had its pending request removed, so the event is dropped upstream in
+     * MessageHandler as belonging to an unknown request. Worth cleaning up
+     * with an orphan sweep on the app side if it ever matters.
+     *
+     * @param  array<string, mixed>  $attachment
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchAttachment(array $attachment): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        Log::debug('AI Bridge: attachment received', [
+            'request_id' => $this->requestId,
+            'attachment_id' => $attachment['id'] ?? null,
+        ]);
+
+        $this->dispatchCallbacks($this->attachmentCallbacks, [$attachment], 'attachment');
+    }
+
+    /**
      * Dispatch a cancelled event to all registered callbacks.
      *
      * Unlike error, this emits event type 'cancelled' so consumers can
@@ -451,6 +502,7 @@ class StreamHandler
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
                 $event->data['result'] ?? null,
             ),
+            MessageTypes::ATTACHMENT => $this->dispatchAttachment($event->data),
             MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
             MessageTypes::ERROR => $this->dispatchError(
                 $event->data['code'] ?? 'unknown',

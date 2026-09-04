@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Server;
 
+use Illuminate\Support\Facades\Log;
 use GuzzleHttp\Psr7\Message;
 use Psr\Http\Message\RequestInterface;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -19,6 +20,8 @@ use React\EventLoop\LoopInterface;
 use React\Socket\ConnectionInterface;
 use React\Socket\SocketServer;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Protocol\AiRequestPayload;
+use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -486,6 +489,9 @@ class BridgeWebSocketServer
             $response['connection_id'] = $data['connection_id'] ?? null;
             $response['connected_at'] = $data['connected_at'] ?? null;
             $response['providers'] = $providers;
+            // The directories this bridge will work in. The app needs them to
+            // render a workspace picker, and only this process knows them.
+            $response['workspaces'] = $this->connectionManager->getWorkspaces($userId);
         }
 
         $this->httpResponse($tcpConnection, 200, $response);
@@ -523,9 +529,11 @@ class BridgeWebSocketServer
     /**
      * POST /api/request — Send an ai_request to a user's connected bridge.
      *
-     * This method constructs the ai_request payload inline. A second payload
-     * builder exists in BridgeStream::buildRequestBody() — keep both in sync
-     * when adding fields to the ai_request protocol.
+     * The payload is shaped by AiRequestPayload, the same builder
+     * BridgeStream::buildRequestBody() uses, so this relay path and the direct
+     * WebSocket path cannot drift apart. They used to be two hand-maintained
+     * copies, and a field added to one and missed here would work under Octane
+     * and silently do nothing under PHP-FPM.
      *
      * Expected body:
      * {
@@ -555,9 +563,28 @@ class BridgeWebSocketServer
         // SEC: user_id is always derived from the JWT sub claim, not the request body.
         // This prevents users from impersonating other users' bridge connections.
         $userId = (string) ($decoded->sub ?? '');
-        $provider = $body['provider'] ?? '';
-        $message = $body['message'] ?? '';
-        $conversationId = $body['conversation_id'] ?? '';
+
+        // Shape-check the fields this method handles ITSELF, before anything
+        // touches them. `strict_types=1` is on, so a numeric `request_id`
+        // passed to a `string` parameter is a TypeError, and `(string) []` is
+        // an Error — raised in a ReactPHP data callback that has no try/catch,
+        // which exits the process and drops every connected bridge rather than
+        // failing this one request. The payload builder guards its own fields;
+        // these three are handled here and were still unguarded.
+        foreach (['request_id', 'provider', 'message', 'conversation_id', 'cli_session_id'] as $field) {
+            if (isset($body[$field]) && ! is_string($body[$field]) && ! is_numeric($body[$field])) {
+                $this->httpResponse($tcpConnection, 400, [
+                    'error' => 'invalid_request',
+                    'message' => "Field \"{$field}\" must be a string.",
+                ]);
+
+                return;
+            }
+        }
+
+        $provider = isset($body['provider']) ? (string) $body['provider'] : '';
+        $message = isset($body['message']) ? (string) $body['message'] : '';
+        $conversationId = isset($body['conversation_id']) ? (string) $body['conversation_id'] : '';
 
         // Only 'message' is required. 'provider' is optional routing metadata —
         // the bridge client can fall back to its configured default when omitted.
@@ -585,7 +612,7 @@ class BridgeWebSocketServer
         // Validate that a caller-supplied request_id is not already registered as
         // a pending request owned by a different user, to prevent stream event
         // hijacking. If it is, generate a fresh one.
-        $callerRequestId = ! empty($body['request_id']) ? $body['request_id'] : null;
+        $callerRequestId = ! empty($body['request_id']) ? (string) $body['request_id'] : null;
         if ($callerRequestId !== null) {
             $pendingOwner = $this->connectionManager->getPendingRequestUserId($callerRequestId);
             if ($pendingOwner !== null && $pendingOwner !== $userId) {
@@ -599,31 +626,35 @@ class BridgeWebSocketServer
             }
         }
         $requestId = $callerRequestId ?? 'req-' . bin2hex(random_bytes(8));
-        $payload = [
-            'type' => MessageTypes::AI_REQUEST,
-            'request_id' => $requestId,
-            'provider' => $provider,
-            'conversation_id' => $conversationId,
-            'message' => $message,
-            'options' => $body['options'] ?? [],
-        ];
 
-        if (isset($body['system_prompt'])) {
-            $payload['system_prompt'] = $body['system_prompt'];
+        try {
+            $payload = AiRequestPayload::fromRelayBody($body, $requestId);
+        } catch (\Throwable $e) {
+            // \Throwable, not \InvalidArgumentException. This runs inside the
+            // ReactPHP connection callback, which has no try/catch of its own:
+            // anything that escapes here does not fail one request, it exits
+            // the serve process and drops every connected bridge. A malformed
+            // relay body must never be able to do that.
+            // BridgeLog, not Log: this is the catch that exists to stop an
+            // exception escaping the event loop, and a Monolog write failure
+            // (full disk, permissions) inside it would do exactly that.
+            // BridgeLog swallows its own failures. Same reasoning as the
+            // comment in BridgeStream::relayViaHttpApi().
+            BridgeLog::warning('rejected a malformed relay request', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+
+            // Generic to the caller, detailed in the log. The caller here holds
+            // an internal relay token, so this is not an exposure so much as a
+            // habit worth keeping.
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'invalid_request',
+                'message' => 'The request body could not be understood.',
+            ]);
+
+            return;
         }
-
-        // The CLI session the bridge should resume (null = start fresh). The
-        // server owns this mapping — always forwarded so the bridge need not
-        // guess whether the conversation is new.
-        $payload['cli_session_id'] = $body['cli_session_id'] ?? null;
-
-        // Prior history — present only when starting a fresh session.
-        if (isset($body['history'])) {
-            $payload['history'] = $body['history'];
-        }
-
-        // Forward tools from relay body so the bridge knows which tools are available
-        $payload['tools'] = $body['tools'] ?? [];
 
         // Register the relayed request as pending so incoming tool calls and
         // stream events from the bridge can be verified and buffered for the

@@ -258,6 +258,32 @@ return [
         |     - Use this for any deployment where end users send chat messages
         |       to the bridge (e.g. DungeonMeister players).
         |
+        |   workspace  (the posture for a chat that edits code)
+        |     - Everything `isolated` does to keep the OPERATOR's environment
+        |       out still applies: `--strict-mcp-config`, no other MCP servers,
+        |       the neutral fallback system prompt.
+        |     - What changes is what the CLI may DO: its built-in file and
+        |       shell tools are enabled, so it can read a checkout, edit it,
+        |       run the tests and commit. That is the whole point of driving a
+        |       local CLI rather than calling an API.
+        |     - Per provider: Claude keeps `--strict-mcp-config` and adds
+        |       `--permission-mode bypassPermissions` (in headless `-p` mode
+        |       `acceptEdits` still stalls on the first shell command, and
+        |       running the tests IS a shell command); Codex gets
+        |       `sandbox_mode=workspace-write`, deliberately not
+        |       `danger-full-access`; Gemini gets `--yolo`, which is the only
+        |       lever it offers, so Gemini in this mode is broader than the
+        |       other two.
+        |     - Needs a bridge started with `--allow-dir` and a `working_dir`
+        |       on the request. Without both, the CLI just works in an empty
+        |       scratch directory and there is nothing for it to edit.
+        |     - THIS IS NOT A SANDBOX. Once the CLI has a shell, `cd ..` and
+        |       `~/.ssh` are one command away, whatever directory it started
+        |       in. What bounds it is that `--allow-dir` is opt-in and empty by
+        |       default, and that the connection token is per person and
+        |       revocable. Only point a bridge at a server you would give a
+        |       shell to.
+        |
         |   native  (legacy, unsafe with untrusted input)
         |     - The bridge ALSO passes the CLI-specific bypass flags
         |       (`bypassPermissions` / `danger-full-access` / `--yolo`), and

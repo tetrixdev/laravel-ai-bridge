@@ -43,6 +43,7 @@ class Conversation extends Model
         'system_prompt',
         'connection_id',
         'cli_session_id',
+        'working_dir',
         'streaming_request_id',
         'session_provider',
         'session_model',

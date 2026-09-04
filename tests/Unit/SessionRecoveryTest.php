@@ -177,8 +177,10 @@ test('session_lost wipes the dead session and re-issues the turn fresh', functio
     expect($sent[0]['request_id'])->toBe('req-1');
     expect($sent[0]['cli_session_id'])->toBeNull();
     expect($sent[0]['message'])->toBe('I enter the cave');
-    // The current turn is popped off — only prior turns ride along as history.
-    expect($sent[0]['history'])->toBe([]);
+    // The current turn is popped off, so there is no prior history — and an
+    // empty optional field is omitted rather than sent empty, which is the
+    // convention AiRequestPayload applies to every builder.
+    expect($sent[0])->not->toHaveKey('history');
 });
 
 test('session_lost recovery carries prior turns as history', function () {
@@ -271,4 +273,40 @@ test('session_lost recovery fails cleanly when the bridge re-send fails', functi
     // A failed re-send must end the turn, not leave it hanging.
     expect($errorCount)->toBe(1);
     expect($manager->getPendingRequest('req-1'))->toBeNull();
+});
+
+test('session_lost recovery carries the conversation working directory', function () {
+    // The recovery builder used to assemble its own array and never learned
+    // about working_dir. A recovered turn then ran in the bridge's empty
+    // scratch directory and answered confidently about a repository the CLI
+    // could not see — and the fresh session it created was bound to that
+    // scratch directory, so every later turn was refused working_dir_changed
+    // and the conversation was dead until the bridge restarted.
+    $conversation = Conversation::create([
+        'mode' => 'bridge',
+        'provider' => 'claude',
+        'cli_session_id' => 'dead-sess',
+        'working_dir' => '/repos/studio',
+    ]);
+    $conversation->appendMessage(Message::ROLE_USER, 'run the tests');
+
+    $sent = [];
+    $manager = new BridgeConnectionManager();
+    $manager->setSendCallback(function ($connection, $payload) use (&$sent) {
+        $sent[] = $payload;
+
+        return true;
+    });
+
+    $manager->addConnection('user-1', 'conn-1');
+    $manager->registerPendingRequest('req-1', recoveryHandler((string) $conversation->id), 'user-1');
+
+    recoveryMessageHandler($manager)->handleMessage('conn-1', null, streamMessage(
+        MessageTypes::ERROR,
+        ['code' => 'session_lost', 'message' => 'cannot resume'],
+    ));
+
+    expect($sent)->toHaveCount(1)
+        ->and($sent[0]['working_dir'])->toBe('/repos/studio')
+        ->and($sent[0]['cli_session_id'])->toBeNull();
 });
