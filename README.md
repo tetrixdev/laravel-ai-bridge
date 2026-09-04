@@ -345,7 +345,9 @@ deleting it. Note that only an empty *string* clears: a JSON `null` is ignored,
 so a client sending `working_dir: selectedDir` with nothing selected cannot
 silently unpin a workspace and throw away the session.
 
-> **`workspace` is not a sandbox, and the bridge's README says so at length.**
+> **`workspace` is not a sandbox, and the bridge documents this at length in
+> [docs/isolation.md](https://github.com/tetrixdev/ai-bridge/blob/main/docs/isolation.md) —
+> which also explains how `isolated` is enforced, and what it does not stop.**
 > Once the CLI has a shell it runs code chosen by your server, on the
 > developer's machine, as them — `cd ..` is one command away from wherever it
 > started. What bounds it is that `--allow-dir` is opt-in, that the connection
