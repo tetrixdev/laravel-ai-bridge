@@ -7,6 +7,7 @@ namespace Tetrix\AiBridge\Streaming;
 use Illuminate\Support\Facades\Http;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
+use Tetrix\AiBridge\Protocol\AiRequestPayload;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Support\BridgeLog;
@@ -129,62 +130,36 @@ class BridgeStream implements StreamableProvider
     /**
      * Build the ai_request payload to send to the bridge.
      *
-     * A second ai_request payload is built in BridgeWebSocketServer::apiRequest()
-     * (the PHP-FPM relay path) — keep both builders in sync when adding fields.
+     * The shape itself lives in AiRequestPayload, which the PHP-FPM relay path
+     * (BridgeWebSocketServer::apiRequest()) also calls. This method's job is
+     * only to turn THIS class's inputs into that builder's arguments — so a new
+     * protocol field is added in one place and both paths get it.
      *
      * @return array<string, mixed>
      */
     public function buildRequestBody(): array
     {
-        $payload = [
-            'type' => MessageTypes::AI_REQUEST,
+        return AiRequestPayload::build([
             'request_id' => $this->streamHandler->requestId,
             'conversation_id' => $this->conversationId,
             'provider' => $this->provider,
             'message' => $this->message,
-        ];
-
-        if (isset($this->options['system_prompt'])) {
-            $payload['system_prompt'] = $this->options['system_prompt'];
-        }
-
-        $requestOptions = [];
-        if (isset($this->options['temperature'])) {
-            $requestOptions['temperature'] = $this->options['temperature'];
-        }
-
-        if (isset($this->options['max_tokens'])) {
-            $requestOptions['max_tokens'] = $this->options['max_tokens'];
-        }
-
-        if (isset($this->options['model'])) {
-            $requestOptions['model'] = $this->options['model'];
-        }
-
-        if (! empty($requestOptions)) {
-            $payload['options'] = $requestOptions;
-        }
-
-        // The CLI session the bridge should resume (null = start fresh). The
-        // server owns this mapping; it is always sent so the bridge need not
-        // guess whether a conversation is new.
-        $cliSessionId = $this->options['cli_session_id'] ?? null;
-        $payload['cli_session_id'] = $cliSessionId;
-
-        // Prior history is sent ONLY when starting a fresh session — a resumed
-        // CLI session already holds its own context, so re-sending history
-        // there would be wasted bytes (and the bridge ignores it).
-        if ($cliSessionId === null && isset($this->options['messages'])) {
-            $payload['history'] = $this->options['messages'];
-        }
-
-        // Include the tools this conversation exposes (null = all registered).
-        $tools = $this->toolRegistry->toArray($this->options['allowed_tools'] ?? null);
-        if (! empty($tools)) {
-            $payload['tools'] = $tools;
-        }
-
-        return $payload;
+            'system_prompt' => $this->options['system_prompt'] ?? null,
+            'options' => [
+                'temperature' => $this->options['temperature'] ?? null,
+                'max_tokens' => $this->options['max_tokens'] ?? null,
+                'model' => $this->options['model'] ?? null,
+            ],
+            'cli_session_id' => $this->options['cli_session_id'] ?? null,
+            'history' => $this->options['messages'] ?? null,
+            // Tools this conversation exposes (null = all registered).
+            'tools' => $this->toolRegistry->toArray($this->options['allowed_tools'] ?? null),
+            // Where the assistant should work. Persisted on the conversation by
+            // the caller, so a resumed turn sends the same one — the bridge
+            // refuses a resume that names somewhere else.
+            'working_dir' => $this->options['working_dir'] ?? null,
+            'attachments' => $this->options['attachments'] ?? null,
+        ]);
     }
 
     /**
@@ -333,6 +308,18 @@ class BridgeStream implements StreamableProvider
             // Prior history — present only for a fresh session (see buildRequestBody()).
             if (isset($payload['history'])) {
                 $relayBody['history'] = $payload['history'];
+            }
+
+            // Forwarded so the relay path reaches the bridge with the same
+            // frame the direct path would have sent. Omitted when absent,
+            // matching AiRequestPayload's convention: the relay rebuilds the
+            // payload through that same builder at the other end.
+            if (isset($payload['working_dir'])) {
+                $relayBody['working_dir'] = $payload['working_dir'];
+            }
+
+            if (isset($payload['attachments'])) {
+                $relayBody['attachments'] = $payload['attachments'];
             }
 
             BridgeLog::verbose('relay request payload', [

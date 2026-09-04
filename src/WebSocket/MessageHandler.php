@@ -166,6 +166,7 @@ class MessageHandler
             // Already authenticated — store providers from hello and return welcome
             $providers = $message['providers'] ?? [];
             $this->connectionManager->setProviders($existingUserId, $providers);
+            $this->connectionManager->setWorkspaces($existingUserId, $message['workspaces'] ?? []);
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
@@ -209,6 +210,10 @@ class MessageHandler
             isset($decoded->exp) ? (int) $decoded->exp : null,
             isset($decoded->cid) ? (int) $decoded->cid : null,
         );
+
+        // Recorded after addConnection(), which is what creates the entry the
+        // setter writes into.
+        $this->connectionManager->setWorkspaces($userId, $message['workspaces'] ?? []);
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
@@ -289,16 +294,27 @@ class MessageHandler
     /**
      * Resolve the `cli_isolation` posture for outgoing welcome messages.
      *
-     * Reads `ai-bridge.cli.isolation` and normalizes anything other than the
-     * literal `"native"` back to `"isolated"`. This makes typos or unexpected
-     * values default-safe rather than default-leaky — the explicit opt-in is
-     * what counts.
+     * Reads `ai-bridge.cli.isolation` and normalizes anything not explicitly
+     * recognised back to `"isolated"`. Typos and unexpected values are then
+     * default-safe rather than default-leaky — only an exact opt-in counts.
+     *
+     * The three postures:
+     *   - `isolated` (default): the CLI reaches server-declared tools only.
+     *   - `workspace`: the CLI also gets its own file and shell tools, inside
+     *     the directory the request named, while the operator's own MCP
+     *     servers, hooks and plugins stay out. This is what a chat that edits
+     *     a repository needs, and it is NOT a sandbox — the bridge's README
+     *     says so at length. Pointless without a bridge started with
+     *     `--allow-dir` and a `working_dir` on the request; the CLI simply
+     *     works in the empty scratch directory instead.
+     *   - `native`: everything on, including the operator's environment. Never
+     *     appropriate when the server is reachable by end users.
      */
     private function resolveCliIsolation(): string
     {
         $value = config('ai-bridge.cli.isolation', 'isolated');
 
-        return $value === 'native' ? 'native' : 'isolated';
+        return in_array($value, ['native', 'workspace'], true) ? $value : 'isolated';
     }
 
     /**

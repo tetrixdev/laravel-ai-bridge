@@ -44,6 +44,10 @@ class ConnectionController extends Controller
             // so the UI can show an accurate status indicator.
             $status = $this->status->for($connection);
             $data['providers'] = $status['providers'];
+            // The checkouts this bridge will work in, for the app's workspace
+            // picker. Empty for BYOK and for a bridge started without
+            // --allow-dir.
+            $data['workspaces'] = $status['workspaces'] ?? [];
             if ($connection->isBridge()) {
                 $data['connected'] = $status['connected'];
             }

@@ -268,6 +268,100 @@ $stream->onBlockDelta(fn ($event) => echo $event->data['content']);
 $stream->start();
 ```
 
+#### Letting the assistant work in a repository
+
+By default the bridge spawns every CLI in an empty directory, so a chat can talk
+about code but cannot touch any. Two things turn that into a chat that does the
+work.
+
+**On the developer's machine**, the bridge is started with `--allow-dir`. It is
+opt-in and empty by default, so nothing your server sends can point a bridge
+somewhere its operator did not permit:
+
+```bash
+npx @tetrixdev/ai-bridge --server=wss://yourapp.com/ai-bridge/ws --token=<JWT> \
+  --allow-dir ~/zp-studio=Studio
+```
+
+**In your app**, set the CLI isolation posture and give the conversation a
+working directory:
+
+```env
+AI_BRIDGE_CLI_ISOLATION=workspace
+```
+
+```php
+$conversation = Conversation::create([
+    'mode' => 'bridge',
+    'provider' => 'claude',
+    // One of the paths the bridge advertised — see below.
+    'working_dir' => '/Users/jasper/zp-studio/zeroplex-studio',
+]);
+```
+
+The bridge advertises the directories it will accept when it connects, and they
+arrive on the connection alongside its providers — so the app shows a picker
+rather than asking anyone to type an absolute path:
+
+```php
+$status = app(ConnectionStatus::class)->for($connection);
+$status['workspaces'];  // [['path' => '/Users/jasper/zp-studio', 'label' => 'Studio'], ...]
+```
+
+The working directory is chosen once and then fixed: the bridge ties it to the
+CLI session, and a later turn naming a different one is refused. `working_dir`
+is therefore stored on the conversation and sent on every turn from there.
+
+> **`workspace` is not a sandbox, and the bridge's README says so at length.**
+> Once the CLI has a shell it runs code chosen by your server, on the
+> developer's machine, as them — `cd ..` is one command away from wherever it
+> started. What bounds it is that `--allow-dir` is opt-in, that the connection
+> token is per person and revocable, and that a developer should only connect a
+> bridge to a server they would give a shell to. Read
+> [the bridge's security note](https://github.com/tetrixdev/ai-bridge#read-this-before-using-it)
+> before enabling it.
+
+#### Attachments
+
+A file attached in the chat does not travel over the WebSocket — the message cap
+is 1 MB, so a screenshot would not fit, and would not fit as a dropped frame
+rather than an error. The server hands the bridge a reference and the bridge
+fetches it over HTTPS from this server, with its own connection token.
+
+**The package stores nothing.** Where the bytes live is your app's business,
+registered the same way conversations and connections are scoped:
+
+```php
+use Illuminate\Http\UploadedFile;
+use Tetrix\AiBridge\Facades\AiBridge;
+
+AiBridge::resolveAttachmentsUsing(
+    fn (string $id, int|string $userId): ?\SplFileInfo =>
+        Attachment::where('id', $id)->whereBelongsToBridgeUser($userId)->first()?->file()
+);
+
+AiBridge::storeAttachmentUsing(
+    fn (UploadedFile $file, int|string $userId): array =>
+        ['id' => Attachment::storeFor($userId, $file)->id]
+);
+```
+
+The `$userId` is the subject of the bridge's connection token — for a managed
+connection, its `connection_key`. **Scoping the lookup to that user is your
+job and it matters**: returning a file merely because the id exists would let
+any connected bridge fetch anyone's uploads.
+
+Attach files to a turn by id. The server builds the URL from its own route, so
+a browser never nominates what the bridge fetches:
+
+```php
+POST /ai-bridge/conversations/{id}/stream
+{ "message": "what does this invoice say?", "attachments": ["att_9f3c"] }
+```
+
+Without a resolver registered, downloads 404; without a store, files the
+assistant tries to send back are refused with a 501 and the model is told why.
+
 ## Configuration
 
 Full reference for `config/ai-bridge.php`:
@@ -296,6 +390,7 @@ Full reference for `config/ai-bridge.php`:
 | `stream_store.max_connection_s` | `AI_BRIDGE_STREAM_MAX_CONNECTION_S` | `600` | Per-SSE-connection lifetime ceiling; the browser auto-reconnects via `Last-Event-ID` after. |
 | `logging.channel` | `AI_BRIDGE_LOG_CHANNEL` | `null` | Log channel for the bridge relay path. `null` uses the app's default channel; point it at a dedicated channel (e.g. a `daily` channel with its own retention) to keep bridge logs separate. Falls back to the default channel if the named one is undefined. |
 | `logging.verbose` | `AI_BRIDGE_LOG_VERBOSE` | `false` | When `true`, also log per-event detail (every stream event, relayed payloads) at `debug` level. Useful in development; noisy in production. |
+| `cli.isolation` | `AI_BRIDGE_CLI_ISOLATION` | `isolated` | How much the CLI on the developer's machine may do. `isolated` — server-declared tools only, no shell, no edits; the right posture when end users can send chat messages. `workspace` — the CLI also gets its own file and shell tools, inside the directory the request named, while the operator's own MCP servers, hooks and plugins stay out. `native` — everything on, including the operator's environment; never appropriate when the server is reachable by end users. Anything unrecognised falls back to `isolated`. `workspace` needs a bridge started with `--allow-dir` and a `working_dir` on the conversation, and **is not a sandbox** — see [Letting the assistant work in a repository](#letting-the-assistant-work-in-a-repository). |
 | `cli.local_path` | `AI_BRIDGE_CLI_LOCAL_PATH` | `null` | Absolute path to an `ai-bridge` repo checkout. When set **and `APP_ENV=local`**, the "Add a CLI bridge" command runs that checkout's build (`node <path>/dist/cli.js`) instead of `npx @tetrixdev/ai-bridge@latest` — for testing CLI changes without an npm publish. Build the checkout first (`npm run build`). |
 | `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE output and the per-turn buffer. Set to `false` only when intentionally displaying AI reasoning to users. |
 
@@ -683,6 +778,8 @@ Eloquent `deleting` event on `Tetrix\AiBridge\Models\Connection`.
 | `PATCH /ai-bridge/connections/{id}` | Rename a connection |
 | `POST /ai-bridge/connections/{id}/regenerate` | Rotate a bridge's token (revokes the old one, disconnects any live bridge) |
 | `DELETE /ai-bridge/connections/{id}` | Delete a connection (disconnects any live bridge) |
+| `GET /ai-bridge/attachments/{id}` | Stream one attachment **to a connected bridge**. Guarded by the bridge connection token, not the browser session; served through `AiBridge::resolveAttachmentsUsing()` |
+| `POST /ai-bridge/attachments` | Accept a file the assistant produced, same guard, stored through `AiBridge::storeAttachmentUsing()` |
 
 History injection retains prior text and tool calls/results but excludes
 thinking blocks; switching provider/model/mode mid-conversation is supported.

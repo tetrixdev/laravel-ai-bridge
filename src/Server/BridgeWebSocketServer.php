@@ -19,6 +19,7 @@ use React\EventLoop\LoopInterface;
 use React\Socket\ConnectionInterface;
 use React\Socket\SocketServer;
 use Tetrix\AiBridge\Auth\TokenManager;
+use Tetrix\AiBridge\Protocol\AiRequestPayload;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
@@ -486,6 +487,9 @@ class BridgeWebSocketServer
             $response['connection_id'] = $data['connection_id'] ?? null;
             $response['connected_at'] = $data['connected_at'] ?? null;
             $response['providers'] = $providers;
+            // The directories this bridge will work in. The app needs them to
+            // render a workspace picker, and only this process knows them.
+            $response['workspaces'] = $this->connectionManager->getWorkspaces($userId);
         }
 
         $this->httpResponse($tcpConnection, 200, $response);
@@ -523,9 +527,11 @@ class BridgeWebSocketServer
     /**
      * POST /api/request — Send an ai_request to a user's connected bridge.
      *
-     * This method constructs the ai_request payload inline. A second payload
-     * builder exists in BridgeStream::buildRequestBody() — keep both in sync
-     * when adding fields to the ai_request protocol.
+     * The payload is shaped by AiRequestPayload, the same builder
+     * BridgeStream::buildRequestBody() uses, so this relay path and the direct
+     * WebSocket path cannot drift apart. They used to be two hand-maintained
+     * copies, and a field added to one and missed here would work under Octane
+     * and silently do nothing under PHP-FPM.
      *
      * Expected body:
      * {
@@ -599,31 +605,29 @@ class BridgeWebSocketServer
             }
         }
         $requestId = $callerRequestId ?? 'req-' . bin2hex(random_bytes(8));
-        $payload = [
-            'type' => MessageTypes::AI_REQUEST,
-            'request_id' => $requestId,
-            'provider' => $provider,
-            'conversation_id' => $conversationId,
-            'message' => $message,
-            'options' => $body['options'] ?? [],
-        ];
 
-        if (isset($body['system_prompt'])) {
-            $payload['system_prompt'] = $body['system_prompt'];
+        try {
+            $payload = AiRequestPayload::build([
+                'request_id' => $requestId,
+                'conversation_id' => $conversationId,
+                'provider' => $provider,
+                'message' => $message,
+                'system_prompt' => $body['system_prompt'] ?? null,
+                'options' => $body['options'] ?? [],
+                'cli_session_id' => $body['cli_session_id'] ?? null,
+                'history' => $body['history'] ?? null,
+                'tools' => $body['tools'] ?? null,
+                'working_dir' => $body['working_dir'] ?? null,
+                'attachments' => $body['attachments'] ?? null,
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            $this->httpResponse($tcpConnection, 400, [
+                'error' => 'invalid_attachment',
+                'message' => $e->getMessage(),
+            ]);
+
+            return;
         }
-
-        // The CLI session the bridge should resume (null = start fresh). The
-        // server owns this mapping — always forwarded so the bridge need not
-        // guess whether the conversation is new.
-        $payload['cli_session_id'] = $body['cli_session_id'] ?? null;
-
-        // Prior history — present only when starting a fresh session.
-        if (isset($body['history'])) {
-            $payload['history'] = $body['history'];
-        }
-
-        // Forward tools from relay body so the bridge knows which tools are available
-        $payload['tools'] = $body['tools'] ?? [];
 
         // Register the relayed request as pending so incoming tool calls and
         // stream events from the bridge can be verified and buffered for the

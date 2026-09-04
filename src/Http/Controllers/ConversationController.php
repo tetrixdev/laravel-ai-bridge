@@ -53,17 +53,29 @@ class ConversationController extends Controller
             'model' => ['nullable', 'string', 'max:128'],
             'system_prompt' => ['nullable', 'string', 'max:'.(int) config('ai-bridge.streaming.max_system_prompt_length', 10000)],
             'connection_id' => ['nullable', 'integer'],
+            'working_dir' => ['nullable', 'string', 'max:1024'],
         ]);
 
         // A supplied connection must be one the request is allowed to see.
+        $connection = null;
         if (! empty($validated['connection_id'])) {
-            $owns = $this->manager->connectionsQuery($request)
-                ->whereKey($validated['connection_id'])->exists();
-            if (! $owns) {
+            $connection = $this->manager->connectionsQuery($request)
+                ->whereKey($validated['connection_id'])->first();
+            if ($connection === null) {
                 return response()->json([
                     'error' => 'validation_error',
                     'message' => 'The selected connection is not available.',
                 ], 422);
+            }
+        }
+
+        // The workspace is chosen once, when the chat starts, because the
+        // bridge fixes it for the life of the CLI session and refuses a later
+        // turn that names a different one.
+        if (! empty($validated['working_dir'])) {
+            $rejection = $this->rejectUnknownWorkspace($validated['working_dir'], $connection);
+            if ($rejection !== null) {
+                return $rejection;
             }
         }
 
@@ -74,6 +86,7 @@ class ConversationController extends Controller
             'model' => $validated['model'] ?? null,
             'system_prompt' => $validated['system_prompt'] ?? null,
             'connection_id' => $validated['connection_id'] ?? null,
+            'working_dir' => $validated['working_dir'] ?? null,
             'tools_hash' => $this->toolRegistry->hash(),
         ]);
 
@@ -174,12 +187,101 @@ class ConversationController extends Controller
         // Optional per-turn provider/model override (e.g. switching mid-conversation).
         $this->applyOverrides($request, $conversation);
 
-        $requestId = $this->manager->startConversationStream($conversation, $message);
+        // A workspace may still be chosen on the FIRST message, for apps that
+        // create the conversation before the developer has picked one. After
+        // that it is fixed: silently switching it would produce a
+        // `working_dir_changed` refusal from the bridge mid-chat, which is a
+        // confusing way to learn that the directory is part of the session.
+        if ($request->filled('working_dir')) {
+            $requested = (string) $request->input('working_dir');
+            if ($conversation->working_dir === null) {
+                $conversation->loadMissing('connection');
+                $rejection = $this->rejectUnknownWorkspace($requested, $conversation->connection);
+                if ($rejection !== null) {
+                    return $rejection;
+                }
+                $conversation->fill(['working_dir' => $requested])->save();
+            } elseif ($conversation->working_dir !== $requested) {
+                return response()->json([
+                    'error' => 'validation_error',
+                    'message' => 'This conversation is already working in "'.$conversation->working_dir
+                        .'". A conversation cannot change working directory — start a new one.',
+                ], 422);
+            }
+        }
+
+        // Files attached to THIS message, as ids. Per turn rather than per
+        // conversation: the bridge downloads them, tells the model where they
+        // landed, and deletes them when the turn ends.
+        //
+        // Ids, not URLs — the server builds the URL from its own route, so a
+        // browser cannot nominate what the bridge fetches. See
+        // AiBridgeManager::buildAttachmentRefs().
+        $options = [];
+        $attachmentIds = $request->input('attachments');
+
+        try {
+            if (is_array($attachmentIds) && $attachmentIds !== []) {
+                $conversation->loadMissing('connection');
+                $options['attachments'] = $this->manager->buildAttachmentRefs(
+                    $attachmentIds,
+                    $conversation->connection?->connection_key ?? '',
+                );
+            }
+
+            $requestId = $this->manager->startConversationStream($conversation, $message, $options);
+        } catch (\InvalidArgumentException $e) {
+            // An id that does not resolve, or an attachment missing a field the
+            // bridge needs. A 422 naming the problem beats a turn that starts
+            // and then fails somewhere the user cannot see.
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => $e->getMessage(),
+            ], 422);
+        }
 
         return response()->json([
             'status' => 'started',
             'request_id' => $requestId,
         ]);
+    }
+
+    /**
+     * Refuse a working directory the connected bridge has not advertised.
+     *
+     * The bridge is the authority — it refuses anything outside its own
+     * `--allow-dir` roots whatever the server sends — so this is a courtesy,
+     * not the control. But it is a worthwhile one: without it a mistyped path
+     * is only discovered after the turn starts, arriving as a stream error in
+     * the middle of a chat rather than as a validation failure on the request
+     * that caused it.
+     *
+     * When the bridge advertised no workspaces the check is skipped rather
+     * than failed: it may simply be between reconnects, and the bridge will
+     * give the authoritative answer either way.
+     */
+    private function rejectUnknownWorkspace(string $workingDir, ?\Tetrix\AiBridge\Models\Connection $connection): ?JsonResponse
+    {
+        $workspaces = $connection?->last_workspaces ?? [];
+        if ($workspaces === []) {
+            return null;
+        }
+
+        foreach ($workspaces as $workspace) {
+            $root = is_array($workspace) ? ($workspace['path'] ?? null) : null;
+            if (! is_string($root) || $root === '') {
+                continue;
+            }
+            if ($workingDir === $root || str_starts_with($workingDir, rtrim($root, '/').'/')) {
+                return null;
+            }
+        }
+
+        return response()->json([
+            'error' => 'validation_error',
+            'message' => 'That working directory is not one this bridge allows. '
+                .'Choose one of the workspaces the connection advertises.',
+        ], 422);
     }
 
     /**

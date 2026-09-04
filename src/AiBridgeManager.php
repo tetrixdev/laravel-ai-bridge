@@ -243,6 +243,17 @@ class AiBridgeManager
             // see BridgeStream::buildRequestBody() for how it shapes the
             // request (history is sent only when this is null).
             $options['cli_session_id'] = $conversation->cli_session_id;
+            // Where the assistant works, for the life of this conversation.
+            // Sent on every turn from the conversation rather than from the
+            // caller, because the bridge fixes the directory for a CLI
+            // session's life: a resume naming a different one is refused with
+            // `working_dir_changed`. Taking it from one place removes the
+            // opportunity for the second turn to disagree with the first.
+            // A caller may still set it explicitly for the FIRST turn (see
+            // ConversationController::stream), which is what persists it.
+            if (! empty($conversation->working_dir)) {
+                $options['working_dir'] = $conversation->working_dir;
+            }
             if ($connection !== null && ! empty($connection->connection_key)) {
                 $options['user_id'] = $connection->connection_key;
             }
@@ -580,6 +591,200 @@ class AiBridgeManager
         \Illuminate\Support\Facades\Log::warning('AI Bridge: no connections resolver registered — denying all access. Call AiBridge::resolveConnectionsUsing() in a service provider.');
 
         return \Tetrix\AiBridge\Models\Connection::query()->whereRaw('1 = 0');
+    }
+
+    // ── Attachment resolvers ──────────────────────────────────────────
+
+    /**
+     * Project-supplied lookup returning the file behind an attachment id.
+     *
+     * @var Closure|null
+     */
+    private ?Closure $attachmentResolver = null;
+
+    /**
+     * Project-supplied writer that stores a file the assistant sent back.
+     *
+     * @var Closure|null
+     */
+    private ?Closure $attachmentStore = null;
+
+    /**
+     * Register how an attachment id is turned into a file on disk.
+     *
+     * The package deliberately owns no file storage. Studio and `zeroplex/ai`
+     * already have attachment stores of their own, and so will anything else
+     * that uses this package — a storage opinion baked in here would have to
+     * be fought in every consumer. Same pattern as the conversation and
+     * connection resolvers above.
+     *
+     * The closure receives the attachment id and the user the bridge token was
+     * issued for, and returns an SplFileInfo or null:
+     *
+     *   AiBridge::resolveAttachmentsUsing(
+     *       fn (string $id, int|string $userId): ?\SplFileInfo => ...
+     *   );
+     *
+     * **Scoping is the app's job and it matters.** The id comes from a bridge
+     * that a person controls, so the lookup must be constrained to attachments
+     * belonging to that user's own conversations — returning a file just
+     * because the id exists would let any bridge fetch anyone's uploads.
+     */
+    public function resolveAttachmentsUsing(Closure $resolver): static
+    {
+        $this->attachmentResolver = $resolver;
+
+        return $this;
+    }
+
+    /**
+     * Register how a file the assistant produced is stored.
+     *
+     * The closure receives the uploaded file and the user the bridge token was
+     * issued for, and returns at least an `id`, plus optionally `url`, `name`,
+     * `mime_type` and `size`:
+     *
+     *   AiBridge::storeAttachmentUsing(
+     *       fn (UploadedFile $file, int|string $userId): array => ['id' => ..., 'url' => ...]
+     *   );
+     */
+    public function storeAttachmentUsing(Closure $store): static
+    {
+        $this->attachmentStore = $store;
+
+        return $this;
+    }
+
+    /**
+     * Resolve an attachment id to a file, scoped to the requesting bridge's user.
+     *
+     * Secure-by-default: with no resolver registered nothing is served, rather
+     * than the package inventing a storage location and reading from it.
+     */
+    public function resolveAttachment(string $id, int|string $userId): ?\SplFileInfo
+    {
+        if ($this->attachmentResolver === null) {
+            \Illuminate\Support\Facades\Log::warning('AI Bridge: no attachments resolver registered — denying all access. Call AiBridge::resolveAttachmentsUsing() in a service provider.');
+
+            return null;
+        }
+
+        return ($this->attachmentResolver)($id, $userId);
+    }
+
+    /** Whether the app registered somewhere to put files the assistant sends back. */
+    public function canStoreAttachments(): bool
+    {
+        return $this->attachmentStore !== null;
+    }
+
+    /**
+     * Store a file the assistant sent back, returning at least its id.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws InvalidArgumentException When no store is registered, or it did not return an id.
+     */
+    public function storeAttachment(\Illuminate\Http\UploadedFile $file, int|string $userId): array
+    {
+        if ($this->attachmentStore === null) {
+            throw new InvalidArgumentException(
+                'No attachment store is registered. Call AiBridge::storeAttachmentUsing() in a service '
+                .'provider to accept files the assistant sends back.'
+            );
+        }
+
+        $result = ($this->attachmentStore)($file, $userId);
+
+        if (! is_array($result) || ! isset($result['id'])) {
+            throw new InvalidArgumentException(
+                'The registered attachment store must return an array containing at least an "id".'
+            );
+        }
+
+        return $result;
+    }
+
+    /**
+     * Turn attachment ids into the references an `ai_request` carries.
+     *
+     * The caller supplies ids, never URLs, and this builds the rest. That
+     * asymmetry is deliberate: a URL taken from client input and handed to the
+     * bridge would be a URL the bridge then fetches, with its own connection
+     * token attached. The bridge already refuses anything off its server's
+     * origin — but "any path on this application, authenticated as the bridge"
+     * is still a wider door than anyone needs, and closing it here costs
+     * nothing because the server knows its own attachment route.
+     *
+     * Size and SHA-256 are computed from the file the app's resolver returns,
+     * so the bridge's verification is checking the bytes against the same file
+     * the server would have served, rather than against a claim that travelled
+     * alongside them.
+     *
+     * @param  array<int, mixed>  $ids  Attachment ids from the request.
+     * @param  int|string  $userId  The user the bridge's token is issued for.
+     * @return array<int, array<string, mixed>>
+     *
+     * @throws InvalidArgumentException When an id does not resolve to a readable file.
+     */
+    public function buildAttachmentRefs(array $ids, int|string $userId): array
+    {
+        $refs = [];
+
+        foreach ($ids as $id) {
+            if (! is_string($id) && ! is_int($id)) {
+                throw new InvalidArgumentException('Each attachment must be an id.');
+            }
+            $id = (string) $id;
+
+            $file = $this->resolveAttachment($id, $userId);
+
+            if ($file === null || ! $file->isFile() || ! $file->isReadable()) {
+                throw new InvalidArgumentException("Attachment \"{$id}\" was not found.");
+            }
+
+            $path = $file->getPathname();
+
+            $refs[] = [
+                'id' => $id,
+                'name' => $file->getFilename(),
+                'mime_type' => $this->guessMimeType($file),
+                'size' => (int) $file->getSize(),
+                'sha256' => hash_file('sha256', $path),
+                // Built here, from the package's own route, so the bridge is
+                // only ever pointed at the endpoint that serves attachments.
+                'url' => url('/ai-bridge/attachments/'.rawurlencode($id)),
+            ];
+        }
+
+        return $refs;
+    }
+
+    /**
+     * Best guess at an attachment's content type.
+     *
+     * The model uses this to decide how to read the file, and the CLI's own
+     * file tools do too, so a wrong answer is worse than a vague one —
+     * `application/octet-stream` is the honest fallback.
+     */
+    private function guessMimeType(\SplFileInfo $file): string
+    {
+        if ($file instanceof \Symfony\Component\HttpFoundation\File\File) {
+            $guessed = $file->getMimeType();
+            if (is_string($guessed) && $guessed !== '') {
+                return $guessed;
+            }
+        }
+
+        if (class_exists(\finfo::class)) {
+            $finfo = new \finfo(FILEINFO_MIME_TYPE);
+            $guessed = $finfo->file($file->getPathname());
+            if (is_string($guessed) && $guessed !== '') {
+                return $guessed;
+            }
+        }
+
+        return 'application/octet-stream';
     }
 
     /**
