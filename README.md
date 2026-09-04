@@ -308,6 +308,16 @@ $status = app(ConnectionStatus::class)->for($connection);
 $status['workspaces'];  // [['path' => '/Users/jasper/zp-studio', 'label' => 'Studio'], ...]
 ```
 
+The list is empty for a bridge whose operator passed no `--allow-dir`, and for
+one running a version that predates workspaces. Those mean the same thing:
+naming a working directory will be refused, and so will `workspace` isolation —
+the bridge gates the posture on the allow-list, precisely so that a server
+cannot switch a shell on by sending a field.
+
+Attachment URLs are built from `config('app.url')`, and the bridge only fetches
+from the origin it is connected to. If your `APP_URL` is not the host the bridge
+connects to, start the bridge with `--api <that origin>`.
+
 The working directory is chosen once and then fixed: the bridge ties it to the
 CLI session, and a later turn naming a different one is refused. `working_dir`
 is therefore stored on the conversation and sent on every turn from there.
@@ -360,7 +370,22 @@ POST /ai-bridge/conversations/{id}/stream
 ```
 
 Without a resolver registered, downloads 404; without a store, files the
-assistant tries to send back are refused with a 501 and the model is told why.
+assistant tries to send back are refused with a 501, and the message travels
+back to the model so it can say so rather than retry.
+
+A file the assistant sends back arrives as an `attachment` stream event
+carrying the id your store returned, so the UI renders it from your own
+attachment store:
+
+```php
+$stream->onAttachment(function (array $attachment) {
+    // ['id' => 'att_new', 'name' => 'report.md', 'mime_type' => …, 'size' => …,
+    //  'description' => 'what the model said it is']
+});
+```
+
+It is buffered like any other event, so a browser tailing the SSE stream —
+including one that reconnected after a refresh — replays it too.
 
 ## Configuration
 

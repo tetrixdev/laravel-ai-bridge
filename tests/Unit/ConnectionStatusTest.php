@@ -100,3 +100,66 @@ it('treats a BYOK connection as always connected with config-derived providers',
     expect($status['providers'][0]['name'])->toBe('chat_completions');
     expect(collect($status['providers'][0]['models'])->pluck('id')->all())->toBe(['gpt-5.5', 'gpt-5.4']);
 });
+
+test('a successful-but-disconnected poll keeps the cached workspaces', function () {
+    $connection = Connection::create([
+        'type' => 'bridge',
+        'name' => 'laptop',
+        'connection_key' => 'key-1',
+        'last_workspaces' => [['path' => '/repos', 'label' => 'Repos']],
+    ]);
+
+    Http::fake(['*/api/status' => Http::response(['connected' => false], 200)]);
+
+    $status = app(ConnectionStatus::class)->for($connection);
+
+    expect($status['workspaces'])->toBe([['path' => '/repos', 'label' => 'Repos']]);
+    expect($connection->fresh()->last_workspaces)->toBe([['path' => '/repos', 'label' => 'Repos']]);
+});
+
+test('a serve process that does not report workspaces does not blank the cache', function () {
+    // The rolling-deploy case: this package is updated, `ai-bridge:serve` has
+    // not been restarted, so /api/status has no `workspaces` key at all.
+    // Absent is not empty — treating it as empty would erase the picker's data
+    // on every poll for the whole of the deploy.
+    $connection = Connection::create([
+        'type' => 'bridge',
+        'name' => 'laptop',
+        'connection_key' => 'key-1',
+        'last_workspaces' => [['path' => '/repos', 'label' => 'Repos']],
+    ]);
+
+    Http::fake(['*/api/status' => Http::response([
+        'connected' => true,
+        'providers' => [['name' => 'claude', 'available' => true]],
+    ], 200)]);
+
+    $status = app(ConnectionStatus::class)->for($connection);
+
+    expect($status['workspaces'])->toBe([['path' => '/repos', 'label' => 'Repos']]);
+    expect($connection->fresh()->last_workspaces)->toBe([['path' => '/repos', 'label' => 'Repos']]);
+});
+
+test('a connected poll adopts the workspaces the bridge now advertises', function () {
+    $connection = Connection::create([
+        'type' => 'bridge',
+        'name' => 'laptop',
+        'connection_key' => 'key-1',
+        'last_workspaces' => [['path' => '/old', 'label' => 'Old']],
+    ]);
+
+    Http::fake(['*/api/status' => Http::response([
+        'connected' => true,
+        'providers' => [],
+        'workspaces' => [['path' => '/repos', 'label' => 'Repos']],
+    ], 200)]);
+
+    expect(app(ConnectionStatus::class)->for($connection)['workspaces'])
+        ->toBe([['path' => '/repos', 'label' => 'Repos']]);
+});
+
+test('a BYOK connection reports no workspaces, having no machine to work on', function () {
+    $connection = Connection::create(['type' => Connection::TYPE_BYOK, 'name' => 'openai']);
+
+    expect(app(ConnectionStatus::class)->for($connection)['workspaces'])->toBe([]);
+});

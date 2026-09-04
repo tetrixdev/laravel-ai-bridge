@@ -233,3 +233,75 @@ describe('attaching files to a turn', function () {
         expect($response->getStatusCode())->toBe(422);
     });
 });
+
+describe('the attachment stream event', function () {
+    it('reaches a registered callback', function () {
+        // Without a consumer the bridge uploads the file, the app stores it,
+        // and the id reaches nothing — the return direction would be dead
+        // end-to-end while both halves individually worked.
+        $seen = [];
+        $handler = makeStreamHandlerForAttachments();
+        $handler->onAttachment(function (array $attachment) use (&$seen) {
+            $seen = $attachment;
+        });
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            'req-1',
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new', 'name' => 'report.md', 'mime_type' => 'text/markdown', 'size' => 8],
+        ));
+
+        expect($seen['id'])->toBe('att_new')
+            ->and($seen['name'])->toBe('report.md');
+    });
+
+    it('is buffered, so the browser SSE tail replays it', function () {
+        $store = app(\Tetrix\AiBridge\Contracts\StreamStoreContract::class);
+        $handler = makeStreamHandlerForAttachments();
+        $store->start($handler->requestId, []);
+        \Tetrix\AiBridge\Streaming\BufferingSink::attach($handler, $store);
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            $handler->requestId,
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new', 'name' => 'report.md'],
+        ));
+
+        $events = $store->range($handler->requestId);
+        $types = array_map(fn ($e) => $e['event'] ?? null, $events);
+
+        expect($types)->toContain(\Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT);
+    });
+
+    it('does not terminate the turn', function () {
+        // It is an ordinary mid-turn event; a `done` still follows.
+        $done = false;
+        $handler = makeStreamHandlerForAttachments();
+        $handler->onDone(function () use (&$done) {
+            $done = true;
+        });
+
+        $handler->dispatchEvent(new \Tetrix\AiBridge\Protocol\StreamEvent(
+            'req-1',
+            \Tetrix\AiBridge\Protocol\MessageTypes::ATTACHMENT,
+            ['id' => 'att_new'],
+        ));
+        $handler->dispatchDone(null);
+
+        expect($done)->toBeTrue();
+    });
+});
+
+function makeStreamHandlerForAttachments(): \Tetrix\AiBridge\Streaming\StreamHandler
+{
+    $provider = Mockery::mock(\Tetrix\AiBridge\Contracts\StreamableProvider::class);
+    $provider->shouldReceive('start')->byDefault();
+    $provider->shouldReceive('cancel')->byDefault();
+    $provider->shouldReceive('markCompleted')->byDefault();
+
+    $handler = new \Tetrix\AiBridge\Streaming\StreamHandler($provider);
+    $handler->setMode(\Tetrix\AiBridge\Enums\ProviderMode::Bridge);
+    $handler->setConversationId('conv-1');
+
+    return $handler;
+}

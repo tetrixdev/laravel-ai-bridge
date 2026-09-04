@@ -193,6 +193,129 @@ describe('choosing a workspace for a conversation', function () {
     });
 });
 
+describe('the shape of a working directory', function () {
+    it('refuses a traversal segment rather than leaving it to the bridge', function () {
+        // The bridge realpaths and would catch it — but the answer would arrive
+        // as a stream error mid-chat instead of a 422 on the request that
+        // caused it, which is the whole reason this check exists.
+        $connection = Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+            'last_workspaces' => [['path' => '/repos', 'label' => 'Repos']],
+        ]);
+
+        foreach (['/repos/../../root/.ssh', '/repos//../etc', '/repos/./../../etc/shadow'] as $bad) {
+            $response = app(ConversationController::class)->store(
+                Request::create('/ai-bridge/conversations', 'POST', [
+                    'mode' => 'bridge',
+                    'connection_id' => $connection->id,
+                    'working_dir' => $bad,
+                ])
+            );
+            expect($response->getStatusCode())->toBe(422);
+        }
+    });
+
+    it('refuses a relative path', function () {
+        $response = app(ConversationController::class)->store(
+            Request::create('/ai-bridge/conversations', 'POST', [
+                'mode' => 'bridge',
+                'working_dir' => 'repos/studio',
+            ])
+        );
+
+        expect($response->getStatusCode())->toBe(422);
+    });
+
+    it('matches an advertised root that carries a trailing slash', function () {
+        // "/repos/" and "/repos" are the same directory; rejecting the exact
+        // choice the picker offered would be absurd.
+        $connection = Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+            'last_workspaces' => [['path' => '/repos/', 'label' => 'Repos']],
+        ]);
+
+        $response = app(ConversationController::class)->store(
+            Request::create('/ai-bridge/conversations', 'POST', [
+                'mode' => 'bridge',
+                'connection_id' => $connection->id,
+                'working_dir' => '/repos',
+            ])
+        );
+
+        expect($response->getStatusCode())->toBe(201);
+    });
+
+    it('re-checks a directory chosen before the connection was known', function () {
+        // store() can be called with no connection_id, so there is no
+        // advertised list to check against yet. stream() is where the
+        // connection IS known, and the check must happen somewhere.
+        $connection = Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+            'last_workspaces' => [['path' => '/repos', 'label' => 'Repos']],
+        ]);
+
+        $created = app(ConversationController::class)->store(
+            Request::create('/ai-bridge/conversations', 'POST', [
+                'mode' => 'bridge', 'provider' => 'claude', 'working_dir' => '/etc',
+            ])
+        );
+        expect($created->getStatusCode())->toBe(201);
+
+        $conversation = Conversation::find(json_decode($created->getContent(), true)['id']);
+        $conversation->fill(['connection_id' => $connection->id])->save();
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', ['message' => 'hi']),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422);
+    });
+
+    it('refuses an over-long working directory on the stream path too', function () {
+        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi',
+                'working_dir' => '/'.str_repeat('a', 2000),
+            ]),
+            $conversation->id,
+        );
+
+        // Otherwise it reaches a varchar(1024) column and 500s on MySQL.
+        expect($response->getStatusCode())->toBe(422);
+    });
+});
+
+describe('choosing a workspace after the session exists', function () {
+    it('starts a fresh CLI session rather than wedging the conversation', function () {
+        // The bridge ties a directory to a session for its life. Turn 1 ran
+        // with no directory, so the session is bound to the scratch dir;
+        // sending a workspace on turn 2 with that session id would be refused
+        // as working_dir_changed — and so would every turn after it, while the
+        // directory could no longer be changed back. Dropping the session is
+        // exactly what the bridge asks the server to do.
+        $conversation = Conversation::create([
+            'mode' => 'bridge',
+            'provider' => 'claude',
+            'cli_session_id' => 'sess-1',
+        ]);
+
+        app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'now work in the repo',
+                'working_dir' => '/repos/studio',
+            ]),
+            $conversation->id,
+        );
+
+        $conversation->refresh();
+        expect($conversation->working_dir)->toBe('/repos/studio')
+            ->and($conversation->cli_session_id)->toBeNull();
+    });
+});
+
 describe('a conversation keeps its working directory', function () {
     it('refuses a later turn that names a different one', function () {
         // The bridge fixes the directory for a CLI session's life and answers

@@ -108,6 +108,11 @@ class AttachmentController extends Controller
             ], 500);
         }
 
-        return response()->json($stored, 201);
+        // Only the fields the protocol defines. The app's store may return
+        // whatever it likes — a disk name, an absolute path, a model — and
+        // none of that is the bridge's business.
+        return response()->json(array_intersect_key($stored, array_flip([
+            'id', 'url', 'name', 'mime_type', 'size',
+        ])), 201);
     }
 }

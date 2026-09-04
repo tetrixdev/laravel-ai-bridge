@@ -187,6 +187,19 @@ class ConversationController extends Controller
         // Optional per-turn provider/model override (e.g. switching mid-conversation).
         $this->applyOverrides($request, $conversation);
 
+        // A working directory can be chosen at create time, when the
+        // conversation may not yet be linked to a connection — and therefore
+        // when there is no advertised list to check it against. Re-check it
+        // here, where the connection IS known, so the choice is validated
+        // before it goes on the wire rather than never.
+        if ($conversation->working_dir !== null) {
+            $conversation->loadMissing('connection');
+            $rejection = $this->rejectUnknownWorkspace($conversation->working_dir, $conversation->connection);
+            if ($rejection !== null) {
+                return $rejection;
+            }
+        }
+
         // A workspace may still be chosen on the FIRST message, for apps that
         // create the conversation before the developer has picked one. After
         // that it is fixed: silently switching it would produce a
@@ -194,13 +207,31 @@ class ConversationController extends Controller
         // confusing way to learn that the directory is part of the session.
         if ($request->filled('working_dir')) {
             $requested = (string) $request->input('working_dir');
+            if (mb_strlen($requested) > 1024) {
+                return $this->badWorkspace('A working directory may be at most 1024 characters.');
+            }
             if ($conversation->working_dir === null) {
                 $conversation->loadMissing('connection');
                 $rejection = $this->rejectUnknownWorkspace($requested, $conversation->connection);
                 if ($rejection !== null) {
                     return $rejection;
                 }
-                $conversation->fill(['working_dir' => $requested])->save();
+                // Drop the CLI session along with the change.
+                //
+                // The bridge ties a working directory to a session for that
+                // session's life. If turn 1 ran without a directory, the
+                // bridge recorded that session against its scratch directory —
+                // so sending a workspace on turn 2 with the stored session id
+                // is refused as `working_dir_changed`, and so is every turn
+                // after it, while the directory can no longer be changed back.
+                // The conversation would be dead until the bridge restarted.
+                // Starting a fresh session is exactly what the bridge asks the
+                // server to do here; history is re-seeded automatically because
+                // `cli_session_id` is null.
+                $conversation->fill([
+                    'working_dir' => $requested,
+                    'cli_session_id' => null,
+                ])->save();
             } elseif ($conversation->working_dir !== $requested) {
                 return response()->json([
                     'error' => 'validation_error',
@@ -222,10 +253,11 @@ class ConversationController extends Controller
 
         try {
             if (is_array($attachmentIds) && $attachmentIds !== []) {
-                $conversation->loadMissing('connection');
                 $options['attachments'] = $this->manager->buildAttachmentRefs(
                     $attachmentIds,
-                    $conversation->connection?->connection_key ?? '',
+                    // The same identifier the bridge's own token carries, so
+                    // the scoping here and the scoping on the fetch agree.
+                    $this->manager->bridgeUserIdFor($conversation),
                 );
             }
 
@@ -262,26 +294,58 @@ class ConversationController extends Controller
      */
     private function rejectUnknownWorkspace(string $workingDir, ?\Tetrix\AiBridge\Models\Connection $connection): ?JsonResponse
     {
+        // Shape checks first, and they apply whether or not the bridge has
+        // advertised anything. A `..` segment is refused here rather than left
+        // to the bridge: the bridge does resolve it correctly (it realpaths
+        // before comparing), but the answer then arrives as a stream error in
+        // the middle of a chat instead of as a 422 on the request that caused
+        // it, which is the entire reason this check exists.
+        if ($workingDir === '' || str_contains($workingDir, "\0") || ! str_starts_with($workingDir, '/')) {
+            return $this->badWorkspace('A working directory must be an absolute path.');
+        }
+
+        foreach (explode('/', $workingDir) as $segment) {
+            if ($segment === '..') {
+                return $this->badWorkspace(
+                    'A working directory must not contain ".." — give the resolved path.'
+                );
+            }
+        }
+
         $workspaces = $connection?->last_workspaces ?? [];
         if ($workspaces === []) {
+            // The bridge may simply be between reconnects. It gives the
+            // authoritative answer either way, so refusing here would only ever
+            // be wrong in one direction.
             return null;
         }
+
+        // Trailing slashes are normalised on BOTH sides: an advertised root of
+        // "/repos/" must still match the directory "/repos", and "/repos" must
+        // not match the sibling "/repos-other".
+        $candidate = rtrim($workingDir, '/');
 
         foreach ($workspaces as $workspace) {
             $root = is_array($workspace) ? ($workspace['path'] ?? null) : null;
             if (! is_string($root) || $root === '') {
                 continue;
             }
-            if ($workingDir === $root || str_starts_with($workingDir, rtrim($root, '/').'/')) {
+            $root = rtrim($root, '/');
+            if ($candidate === $root || str_starts_with($candidate, $root.'/')) {
                 return null;
             }
         }
 
-        return response()->json([
-            'error' => 'validation_error',
-            'message' => 'That working directory is not one this bridge allows. '
-                .'Choose one of the workspaces the connection advertises.',
-        ], 422);
+        return $this->badWorkspace(
+            'That working directory is not one this bridge allows. '
+            .'Choose one of the workspaces the connection advertises.'
+        );
+    }
+
+    /** A 422 naming a working directory the request cannot have. */
+    private function badWorkspace(string $message): JsonResponse
+    {
+        return response()->json(['error' => 'validation_error', 'message' => $message], 422);
     }
 
     /**

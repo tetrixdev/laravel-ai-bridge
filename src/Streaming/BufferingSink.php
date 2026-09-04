@@ -79,6 +79,10 @@ final class BufferingSink
             ]);
         });
 
+        $handler->onAttachment(function (array $attachment) use ($append): void {
+            $append(MessageTypes::ATTACHMENT, $attachment);
+        });
+
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage) use ($append, $store, $rid): void {

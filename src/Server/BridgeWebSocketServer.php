@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tetrix\AiBridge\Server;
 
+use Illuminate\Support\Facades\Log;
 use GuzzleHttp\Psr7\Message;
 use Psr\Http\Message\RequestInterface;
 use GuzzleHttp\Psr7\HttpFactory;
@@ -620,9 +621,19 @@ class BridgeWebSocketServer
                 'working_dir' => $body['working_dir'] ?? null,
                 'attachments' => $body['attachments'] ?? null,
             ]);
-        } catch (\InvalidArgumentException $e) {
+        } catch (\Throwable $e) {
+            // \Throwable, not \InvalidArgumentException. This runs inside the
+            // ReactPHP connection callback, which has no try/catch of its own:
+            // anything that escapes here does not fail one request, it exits
+            // the serve process and drops every connected bridge. A malformed
+            // relay body must never be able to do that.
+            Log::warning('AI Bridge: rejected a malformed relay request', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+
             $this->httpResponse($tcpConnection, 400, [
-                'error' => 'invalid_attachment',
+                'error' => 'invalid_request',
                 'message' => $e->getMessage(),
             ]);
 

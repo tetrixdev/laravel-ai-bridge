@@ -59,8 +59,13 @@ final class AiRequestPayload
             $payload['system_prompt'] = $input['system_prompt'];
         }
 
+        // Coerced rather than trusted. This builder is reached from the relay
+        // endpoint with a caller-supplied JSON body, and a bare
+        // `array_filter($notAnArray)` raises a TypeError — which escapes the
+        // ReactPHP data callback and takes the whole serve process down,
+        // dropping every connected bridge rather than failing one request.
         $options = array_filter(
-            $input['options'] ?? [],
+            is_array($input['options'] ?? null) ? $input['options'] : [],
             static fn ($value) => $value !== null,
         );
         if (! empty($options)) {
@@ -76,11 +81,11 @@ final class AiRequestPayload
         // History seeds a FRESH session only. A resumed CLI session already
         // holds its own context, so re-sending it there is wasted bytes the
         // bridge discards anyway.
-        if ($cliSessionId === null && ! empty($input['history'])) {
+        if ($cliSessionId === null && is_array($input['history'] ?? null) && $input['history'] !== []) {
             $payload['history'] = $input['history'];
         }
 
-        if (! empty($input['tools'])) {
+        if (is_array($input['tools'] ?? null) && $input['tools'] !== []) {
             $payload['tools'] = $input['tools'];
         }
 
@@ -89,7 +94,11 @@ final class AiRequestPayload
             $payload['working_dir'] = $workingDir;
         }
 
-        $attachments = self::normaliseAttachments($input['attachments'] ?? []);
+        $rawAttachments = $input['attachments'] ?? [];
+        if (! is_array($rawAttachments)) {
+            throw new InvalidArgumentException('"attachments" must be an array.');
+        }
+        $attachments = self::normaliseAttachments($rawAttachments);
         if (! empty($attachments)) {
             $payload['attachments'] = $attachments;
         }

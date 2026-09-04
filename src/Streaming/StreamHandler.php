@@ -59,6 +59,9 @@ class StreamHandler
     /** @var Closure[] */
     private array $toolResultCallbacks = [];
 
+    /** @var Closure[] */
+    private array $attachmentCallbacks = [];
+
     private bool $cancelled = false;
 
     /**
@@ -198,6 +201,21 @@ class StreamHandler
     public function onToolResult(Closure $callback): static
     {
         $this->toolResultCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Register a callback for attachment events — a file the assistant sent back.
+     *
+     * The callback receives the event's data array: `id`, `name`, `mime_type`,
+     * `size`, and `description` when the model gave one. The `id` is the one
+     * the app's own `storeAttachmentUsing()` returned, so the UI can render
+     * the file straight from the app's attachment store.
+     */
+    public function onAttachment(Closure $callback): static
+    {
+        $this->attachmentCallbacks[] = $callback;
 
         return $this;
     }
@@ -410,6 +428,31 @@ class StreamHandler
     }
 
     /**
+     * Dispatch an attachment event to all registered callbacks.
+     *
+     * Not terminal, and not suppressed by cancellation of a later turn: the
+     * file is already stored by the time this arrives, so dropping the event
+     * would leave an attachment in the app's store that nothing ever links to.
+     *
+     * @param  array<string, mixed>  $attachment
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchAttachment(array $attachment): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        Log::debug('AI Bridge: attachment received', [
+            'request_id' => $this->requestId,
+            'attachment_id' => $attachment['id'] ?? null,
+        ]);
+
+        $this->dispatchCallbacks($this->attachmentCallbacks, [$attachment], 'attachment');
+    }
+
+    /**
      * Dispatch a cancelled event to all registered callbacks.
      *
      * Unlike error, this emits event type 'cancelled' so consumers can
@@ -451,6 +494,7 @@ class StreamHandler
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
                 $event->data['result'] ?? null,
             ),
+            MessageTypes::ATTACHMENT => $this->dispatchAttachment($event->data),
             MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
             MessageTypes::ERROR => $this->dispatchError(
                 $event->data['code'] ?? 'unknown',

@@ -105,8 +105,14 @@ class ConnectionStatus
                 // Same rule as providers: /api/status only reports workspaces
                 // while a CLI is attached, so a successful-but-disconnected
                 // poll must keep the cached snapshot rather than erase it.
-                $workspaces = $connected
-                    ? ($response->json('workspaces') ?? [])
+                // Absent is NOT empty. A serve process running an older build
+                // of this package does not report `workspaces` at all, and
+                // treating that as "the bridge allows none" would blank the
+                // cache on every poll for the whole of a rolling deploy — the
+                // same failure that had to be fixed for providers.
+                $reportedWorkspaces = $response->json('workspaces');
+                $workspaces = $connected && is_array($reportedWorkspaces)
+                    ? $reportedWorkspaces
                     : ($connection->last_workspaces ?? []);
                 $connectedAt = $response->json('connected_at');
 

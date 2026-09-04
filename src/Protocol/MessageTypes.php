@@ -102,6 +102,16 @@ final class MessageTypes
     public const TOOL_RESULT = 'tool_result';
 
     /**
+     * A file the assistant produced and chose to hand back.
+     *
+     * Emitted by the bridge after it has uploaded the file to
+     * `POST /ai-bridge/attachments` and the app's store returned an id. The
+     * event carries that id, so the UI renders the file from the app's own
+     * attachment store rather than from anything the bridge holds.
+     */
+    public const ATTACHMENT = 'attachment';
+
+    /**
      * Server → bridge: sends the result of a tool execution back to the bridge.
      *
      * This is a top-level message type (NOT inside a stream envelope).
@@ -162,6 +172,7 @@ final class MessageTypes
             self::BLOCK_STOP,
             self::TOOL_CALL,
             self::TOOL_RESULT,
+            self::ATTACHMENT,
             self::TOOL_RESOLVE,
             self::TOOL_ERROR,
             self::DONE,
