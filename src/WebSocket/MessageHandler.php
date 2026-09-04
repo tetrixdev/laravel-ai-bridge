@@ -10,6 +10,7 @@ use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\Contracts\StreamStoreContract;
 use Tetrix\AiBridge\Enums\BlockType;
 use Tetrix\AiBridge\Models\Conversation;
+use Tetrix\AiBridge\Protocol\AiRequestPayload;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\RelayStream;
@@ -983,23 +984,25 @@ class MessageHandler
         $history = $conversation->historyFor();
         $current = array_pop($history); // the latest (user) turn to respond to
 
-        $payload = [
-            'type' => MessageTypes::AI_REQUEST,
+        return AiRequestPayload::build([
             'request_id' => $requestId,
             'conversation_id' => (string) $conversation->id,
             'provider' => (string) ($conversation->provider ?? ''),
             'message' => is_array($current) ? (string) ($current['content'] ?? '') : '',
+            'system_prompt' => $conversation->system_prompt ?: null,
+            'options' => ['model' => $conversation->model ?: null],
             'cli_session_id' => null,
             'history' => array_values($history),
             'tools' => $this->toolRegistry->toArray($conversation->allowed_tools),
-            'options' => ! empty($conversation->model) ? ['model' => $conversation->model] : [],
-        ];
-
-        if (! empty($conversation->system_prompt)) {
-            $payload['system_prompt'] = $conversation->system_prompt;
-        }
-
-        return $payload;
+            // The reason this method goes through the shared builder rather
+            // than assembling its own array: it used to, and it never learned
+            // about `working_dir`. A recovered turn then ran in the bridge's
+            // empty scratch directory and answered confidently about a
+            // repository the CLI could not see — and the fresh session it
+            // created was bound to that scratch directory, so every later turn
+            // was refused `working_dir_changed` and the conversation was dead.
+            'working_dir' => $conversation->working_dir,
+        ]);
     }
 
     /**

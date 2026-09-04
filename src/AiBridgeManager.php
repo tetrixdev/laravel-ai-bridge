@@ -630,7 +630,9 @@ class AiBridgeManager
      * connection resolvers above.
      *
      * The closure receives the attachment id and the user the bridge token was
-     * issued for, and returns an SplFileInfo or null:
+     * issued for — **always as a string**, on both the build and the fetch
+     * side, so a `===` comparison in the closure behaves the same in each —
+     * and returns an SplFileInfo or null:
      *
      *   AiBridge::resolveAttachmentsUsing(
      *       fn (string $id, int|string $userId): ?\SplFileInfo => ...
@@ -726,12 +728,21 @@ class AiBridgeManager
      * the build with one identifier and the fetch with another produces
      * "attachment not found" for a file the requester owns.
      */
-    public function bridgeUserIdFor(Conversation $conversation): int|string|null
+    public function bridgeUserIdFor(Conversation $conversation): ?string
     {
         $conversation->loadMissing('connection');
         $key = $conversation->connection?->connection_key;
 
-        return ! empty($key) ? $key : $this->resolveAuthUserId();
+        // `!== null && !== ''` rather than `! empty()`: a connection_key of
+        // "0" is a perfectly good key and `empty()` calls it absent.
+        $userId = ($key !== null && $key !== '') ? $key : $this->resolveAuthUserId();
+
+        // Cast, because the fetch side reads the JWT `sub` and casts it to a
+        // string. Handing the app's resolver an int here and a string there
+        // makes a `===` comparison in that closure succeed at build time and
+        // fail at fetch time: the turn validates, then the bridge gets a 404
+        // for a file the user owns.
+        return $userId === null ? null : (string) $userId;
     }
 
     /**
@@ -756,7 +767,7 @@ class AiBridgeManager
      *
      * @throws InvalidArgumentException When an id does not resolve to a readable file.
      */
-    public function buildAttachmentRefs(array $ids, int|string|null $userId): array
+    public function buildAttachmentRefs(array $ids, ?string $userId): array
     {
         // Refuse rather than scope by the empty string. An app resolver that
         // filters by owner finds nothing for '' and answers "not found", which
@@ -789,10 +800,14 @@ class AiBridgeManager
             // The same charset the attachment route accepts. An app whose ids
             // are base64 or composite keys would otherwise build a URL that
             // 404s at fetch time, with nothing having failed here.
-            if (! preg_match('/^[A-Za-z0-9._-]+$/', $id)) {
+            if (! preg_match('/^[A-Za-z0-9._-]+$/', $id) || trim($id, '.') === '') {
+                // The trim also refuses "." and "..", which the charset above
+                // permits and which an app resolver doing
+                // `storage_path("attachments/$id")` would happily turn into a
+                // directory. Refusing them here costs nothing.
                 throw new InvalidArgumentException(
-                    "Attachment id \"{$id}\" contains characters the attachment route does not accept "
-                    .'(allowed: letters, digits, dot, underscore, hyphen).'
+                    "Attachment id \"{$id}\" is not a usable identifier "
+                    .'(allowed: letters, digits, dot, underscore, hyphen; not "." or "..").'
                 );
             }
 

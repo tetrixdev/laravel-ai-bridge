@@ -41,6 +41,16 @@ class AttachmentController extends Controller
     {
         $userId = (string) $request->attributes->get('bridge_user_id');
 
+        // The route's charset permits "." and "..", which are directories
+        // rather than identifiers. Refused here so an app resolver that joins
+        // the id onto a path never sees one.
+        if (trim($id, '.') === '') {
+            return response()->json([
+                'error' => 'not_found',
+                'message' => 'Attachment not found.',
+            ], 404);
+        }
+
         $file = $this->manager->resolveAttachment($id, $userId);
 
         // One response for "no such attachment" and for "not yours". Telling

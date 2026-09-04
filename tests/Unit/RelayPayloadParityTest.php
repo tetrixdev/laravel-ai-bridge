@@ -28,27 +28,16 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 */
 
 /**
- * The mapping BridgeWebSocketServer::apiRequest() applies to a relay body.
+ * Replay the relay body exactly as the server does.
  *
- * Kept in step with that method deliberately: if someone adds a field to the
- * builder and to relayViaHttpApi() but forgets apiRequest(), this list still
- * reflects the server and the assertion below fails.
+ * Calls the SAME method BridgeWebSocketServer::apiRequest() calls, rather than
+ * re-implementing its mapping here — a test that re-implements the thing under
+ * test proves only that the test agrees with itself. Deleting a field from
+ * AiRequestPayload::fromRelayBody() now fails this file.
  */
 function replayRelayBody(array $body): array
 {
-    return AiRequestPayload::build([
-        'request_id' => $body['request_id'] ?? '',
-        'conversation_id' => $body['conversation_id'] ?? '',
-        'provider' => $body['provider'] ?? '',
-        'message' => $body['message'] ?? '',
-        'system_prompt' => $body['system_prompt'] ?? null,
-        'options' => $body['options'] ?? [],
-        'cli_session_id' => $body['cli_session_id'] ?? null,
-        'history' => $body['history'] ?? null,
-        'tools' => $body['tools'] ?? null,
-        'working_dir' => $body['working_dir'] ?? null,
-        'attachments' => $body['attachments'] ?? null,
-    ]);
+    return AiRequestPayload::fromRelayBody($body, $body['request_id'] ?? '');
 }
 
 function relayedBodyFor(array $options): array
@@ -155,4 +144,29 @@ test('a malformed options field is rejected rather than thrown past the loop', f
     expect(fn () => AiRequestPayload::build([
         'request_id' => 'r', 'message' => 'm', 'attachments' => 'nope',
     ]))->toThrow(InvalidArgumentException::class);
+});
+
+test('a non-string request_id is refused rather than thrown past the event loop', function () {
+    // apiRequest() shape-checks these itself before anything touches them.
+    // strict_types=1 makes a numeric request_id passed to a string parameter a
+    // TypeError, raised inside a ReactPHP data callback that has no try/catch —
+    // which exits the process and drops every connected bridge rather than
+    // failing this one request.
+    foreach ([['a'], true, ['x' => 1]] as $bad) {
+        expect(fn () => AiRequestPayload::fromRelayBody(
+            ['message' => 'hi', 'conversation_id' => $bad],
+            'req-1',
+        ))->toThrow(InvalidArgumentException::class);
+    }
+});
+
+test('numeric relay fields are coerced rather than refused', function () {
+    // An app that sends an integer conversation_id is being sloppy, not
+    // hostile; coercing is friendlier than a 400 and cannot throw.
+    $payload = AiRequestPayload::fromRelayBody(
+        ['message' => 'hi', 'conversation_id' => 42, 'provider' => 'claude'],
+        'req-1',
+    );
+
+    expect($payload['conversation_id'])->toBe('42');
 });

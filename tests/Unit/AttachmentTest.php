@@ -145,6 +145,26 @@ describe('accepting a file from the assistant', function () {
             ->and($seen)->toBe(['report.md', 'key-3']);
     });
 
+    it('returns only the protocol fields, not whatever the app store hands back', function () {
+        // The app's store may return a disk name, an absolute path, a whole
+        // model. None of that is the bridge's business.
+        app(AiBridgeManager::class)->storeAttachmentUsing(fn () => [
+            'id' => 'att_new',
+            'url' => 'https://studio.test/a/att_new',
+            'absolute_path' => '/var/www/storage/app/private/att_new.md',
+            'disk' => 'local',
+        ]);
+
+        $request = bridgeRequest('POST', '/ai-bridge/attachments');
+        $request->files->set('file', UploadedFile::fake()->createWithContent('a.txt', 'x'));
+
+        $body = json_decode(app(AttachmentController::class)->store($request)->getContent(), true);
+
+        expect($body)->toHaveKey('id')
+            ->and($body)->not->toHaveKey('absolute_path')
+            ->and($body)->not->toHaveKey('disk');
+    });
+
     it('reports a failure in the app store as a 500, not as a success', function () {
         app(AiBridgeManager::class)->storeAttachmentUsing(function () {
             throw new RuntimeException('disk full');
@@ -183,15 +203,34 @@ describe('building the references sent to the bridge', function () {
             ->and($refs[0]['sha256'])->toBe(hash('sha256', 'the file contents'));
     });
 
-    it('builds the URL itself rather than taking one from the caller', function () {
-        // A URL from client input is a URL the bridge then fetches with its own
-        // token attached. The server knows its own attachment route.
+    it('builds the URL from the CONFIGURED app url, not the incoming request', function () {
+        // url() takes scheme and host from the current request, and Laravel does
+        // not validate Host by default — so a user could hand the bridge a URL
+        // on a host they chose, which it would fetch with its own connection
+        // token. It also emits http:// behind a TLS proxy without TrustProxies,
+        // and the bridge then refuses every attachment as non-HTTPS.
+        config(['app.url' => 'https://configured.test']);
         $path = tempAttachment();
         app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo($path));
 
+        // A request from a host the caller chose.
+        $hostile = Request::create('http://evil.test/ai-bridge/conversations/1/stream', 'POST');
+        $hostile->headers->set('Host', 'evil.test');
+        app()->instance('request', $hostile);
+
         $refs = app(AiBridgeManager::class)->buildAttachmentRefs(['att_1'], 'key-1');
 
-        expect($refs[0]['url'])->toEndWith('/ai-bridge/attachments/att_1');
+        expect($refs[0]['url'])->toBe('https://configured.test/ai-bridge/attachments/att_1')
+            ->and($refs[0]['url'])->not->toContain('evil.test');
+    });
+
+    it('refuses an id that is only dots, which is a directory not an identifier', function () {
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo(tempAttachment()));
+
+        foreach (['..', '.', '...'] as $id) {
+            expect(fn () => app(AiBridgeManager::class)->buildAttachmentRefs([$id], 'key-1'))
+                ->toThrow(InvalidArgumentException::class);
+        }
     });
 
     it('refuses an id that does not resolve', function () {
@@ -214,11 +253,26 @@ describe('building the references sent to the bridge', function () {
 });
 
 describe('attaching files to a turn', function () {
-    it('rejects the turn when an attachment id does not resolve', function () {
+    /** A bridge conversation with a connection, so it has a user to scope by. */
+    function bridgeConversationWithConnection(): Conversation
+    {
         app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
-        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
 
-        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+        $connection = \Tetrix\AiBridge\Models\Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+        ]);
+
+        return Conversation::create([
+            'mode' => 'bridge', 'provider' => 'claude', 'connection_id' => $connection->id,
+        ]);
+    }
+
+    it('rejects the turn when an attachment id does not resolve', function () {
+        // The conversation has a connection, so it HAS a bridge user — the 422
+        // must come from the resolver returning nothing, not from the
+        // "no bridge user to scope them to" guard, which is a different bug.
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => null);
+        $conversation = bridgeConversationWithConnection();
 
         $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
             Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
@@ -228,9 +282,48 @@ describe('attaching files to a turn', function () {
             $conversation->id,
         );
 
-        // A 422 on the request that caused it, rather than a turn that starts
-        // and fails somewhere the user cannot see.
-        expect($response->getStatusCode())->toBe(422);
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('att_nope');
+    });
+
+    it('refuses when there is no bridge user to scope the files to', function () {
+        // The other 422, told apart from the one above. A resolver that filters
+        // by owner finds nothing for '' and answers "not found", which reads as
+        // a broken attachment rather than a turn with nobody to attribute it to.
+        app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
+        app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo(tempAttachment()));
+
+        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+
+        $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'attachments' => ['att_1'],
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('no bridge user');
+    });
+
+    it('refuses attachments outside bridge mode rather than silently dropping them', function () {
+        // BYOK and managed have no notion of attachments; accepting them would
+        // resolve every file, answer 200, and never show the model any of it.
+        app(AiBridgeManager::class)->resolveConversationsUsing(fn ($request) => Conversation::query());
+        $conversation = Conversation::create(['mode' => 'byok']);
+
+        $response = app(\Tetrix\AiBridge\Http\Controllers\ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'what does this say?', 'attachments' => ['att_1'],
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and(json_decode($response->getContent(), true)['message'])
+            ->toContain('only supported in bridge mode');
     });
 });
 

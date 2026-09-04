@@ -430,9 +430,17 @@ class StreamHandler
     /**
      * Dispatch an attachment event to all registered callbacks.
      *
-     * Not terminal, and not suppressed by cancellation of a later turn: the
-     * file is already stored by the time this arrives, so dropping the event
-     * would leave an attachment in the app's store that nothing ever links to.
+     * Not terminal: a `done` still follows, and this must not end the turn.
+     *
+     * It IS dropped after a cancel or a terminal event, like every other
+     * non-terminal event — and that is a known rough edge rather than a
+     * decision. The file is already stored server-side by the time this
+     * arrives, so a turn cancelled in the window between the upload and the
+     * event leaves an attachment in the app's store that nothing links to. In
+     * practice the envelope rarely gets this far: an aborted turn has already
+     * had its pending request removed, so the event is dropped upstream in
+     * MessageHandler as belonging to an unknown request. Worth cleaning up
+     * with an orphan sweep on the app side if it ever matters.
      *
      * @param  array<string, mixed>  $attachment
      *

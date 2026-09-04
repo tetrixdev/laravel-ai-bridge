@@ -107,6 +107,65 @@ final class AiRequestPayload
     }
 
     /**
+     * Build a payload from the internal relay's HTTP body.
+     *
+     * A named mapping rather than an inline one in BridgeWebSocketServer,
+     * because this is the half a test cannot otherwise reach: the relay path
+     * copies the payload into an HTTP body at one end and maps it back at the
+     * other, and a test that re-implements that mapping proves only that the
+     * test agrees with itself. Both the server and the parity test call this.
+     *
+     * Every value is coerced or defaulted here. The body is caller-supplied
+     * JSON arriving inside a ReactPHP callback that has no try/catch of its
+     * own, so a TypeError raised while shaping it does not fail one request —
+     * it exits the process and drops every connected bridge.
+     *
+     * @param  array<string, mixed>  $body
+     * @return array<string, mixed>
+     */
+    public static function fromRelayBody(array $body, string $requestId): array
+    {
+        return self::build([
+            'request_id' => $requestId,
+            'conversation_id' => self::asString($body['conversation_id'] ?? ''),
+            'provider' => self::asString($body['provider'] ?? ''),
+            'message' => self::asString($body['message'] ?? ''),
+            'system_prompt' => isset($body['system_prompt']) ? self::asString($body['system_prompt']) : null,
+            'options' => $body['options'] ?? [],
+            'cli_session_id' => isset($body['cli_session_id']) ? self::asString($body['cli_session_id']) : null,
+            'history' => $body['history'] ?? null,
+            'tools' => $body['tools'] ?? null,
+            'working_dir' => isset($body['working_dir']) ? self::asString($body['working_dir']) : null,
+            'attachments' => $body['attachments'] ?? null,
+        ]);
+    }
+
+    /**
+     * Coerce a relay-body value to a string, refusing shapes that cannot be one.
+     *
+     * `(string) []` is a warning-then-"Array" under one PHP configuration and a
+     * thrown Error under another, and `strict_types=1` makes an int where a
+     * string is declared a TypeError. Neither belongs anywhere near the
+     * WebSocket server's event loop.
+     */
+    private static function asString(mixed $value): string
+    {
+        if (is_string($value)) {
+            return $value;
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string) $value;
+        }
+        if ($value === null || $value === false) {
+            return '';
+        }
+
+        throw new InvalidArgumentException(
+            'Expected a string in the relay body, got '.get_debug_type($value).'.'
+        );
+    }
+
+    /**
      * Reduce each attachment to exactly the six fields the protocol defines.
      *
      * A malformed attachment throws rather than being skipped. Dropping one

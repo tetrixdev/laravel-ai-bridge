@@ -205,7 +205,19 @@ class ConversationController extends Controller
         // that it is fixed: silently switching it would produce a
         // `working_dir_changed` refusal from the bridge mid-chat, which is a
         // confusing way to learn that the directory is part of the session.
-        if ($request->filled('working_dir')) {
+        // An explicit empty value clears the workspace and returns the
+        // conversation to an ordinary chat. Without this there is no way back:
+        // a bridge restarted with a narrower --allow-dir, or a conversation
+        // relinked to another connection, would fail the re-check below on
+        // every subsequent turn with no recovery short of deleting the
+        // conversation.
+        if ($request->exists('working_dir') && ! $request->filled('working_dir')) {
+            if ($conversation->working_dir !== null) {
+                // The session is bound to the old directory, so it goes too —
+                // same reasoning as setting one.
+                $conversation->fill(['working_dir' => null, 'cli_session_id' => null])->save();
+            }
+        } elseif ($request->filled('working_dir')) {
             $requested = (string) $request->input('working_dir');
             if (mb_strlen($requested) > 1024) {
                 return $this->badWorkspace('A working directory may be at most 1024 characters.');
@@ -250,6 +262,18 @@ class ConversationController extends Controller
         // AiBridgeManager::buildAttachmentRefs().
         $options = [];
         $attachmentIds = $request->input('attachments');
+
+        if (is_array($attachmentIds) && $attachmentIds !== [] && $conversation->mode !== 'bridge') {
+            // Only the bridge path carries attachments; ChatCompletionsStream
+            // has no notion of them. Accepting them here would resolve every
+            // file, hash it, answer 200 — and the model would never see any of
+            // it, which reads as the assistant ignoring a file the user
+            // watched themselves attach.
+            return response()->json([
+                'error' => 'validation_error',
+                'message' => 'Attachments are only supported in bridge mode.',
+            ], 422);
+        }
 
         try {
             if (is_array($attachmentIds) && $attachmentIds !== []) {
