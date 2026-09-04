@@ -635,7 +635,7 @@ class AiBridgeManager
      * and returns an SplFileInfo or null:
      *
      *   AiBridge::resolveAttachmentsUsing(
-     *       fn (string $id, int|string $userId): ?\SplFileInfo => ...
+     *       fn (string $id, string $userId): ?\SplFileInfo => ...
      *   );
      *
      * **Scoping is the app's job and it matters.** The id comes from a bridge
@@ -658,7 +658,7 @@ class AiBridgeManager
      * `mime_type` and `size`:
      *
      *   AiBridge::storeAttachmentUsing(
-     *       fn (UploadedFile $file, int|string $userId): array => ['id' => ..., 'url' => ...]
+     *       fn (UploadedFile $file, string $userId): array => ['id' => ..., 'url' => ...]
      *   );
      */
     public function storeAttachmentUsing(Closure $store): static
@@ -762,7 +762,7 @@ class AiBridgeManager
      * alongside them.
      *
      * @param  array<int, mixed>  $ids  Attachment ids from the request.
-     * @param  int|string  $userId  The user the bridge's token is issued for.
+     * @param  string  $userId  The user the bridge's token is issued for, always as a string.
      * @return array<int, array<string, mixed>>
      *
      * @throws InvalidArgumentException When an id does not resolve to a readable file.

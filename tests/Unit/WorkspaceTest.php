@@ -77,6 +77,30 @@ describe('the hello handshake', function () {
     });
 });
 
+describe('a malformed hello', function () {
+    it('does not take the serve process down', function () {
+        // handleMessage runs in the WebSocket server's message callback, which
+        // has no try/catch: a TypeError here does not fail one handshake, it
+        // exits the process and drops every connected bridge.
+        $manager = new BridgeConnectionManager();
+        $token = app(TokenManager::class)->generate('user-1');
+
+        foreach (['oops', 42, true] as $bad) {
+            $welcome = workspaceMessageHandler($manager)->handleMessage('conn-1', null, json_encode([
+                'type' => MessageTypes::HELLO,
+                'version' => '0.1',
+                'token' => $token,
+                'providers' => $bad,
+                'workspaces' => $bad,
+            ]));
+
+            expect($welcome['type'])->toBe(MessageTypes::WELCOME);
+        }
+
+        expect($manager->getWorkspaces('user-1'))->toBe([]);
+    });
+});
+
 describe('the welcome message', function () {
     it('forwards workspace isolation when the app configured it', function () {
         config()->set('ai-bridge.cli.isolation', 'workspace');
@@ -284,6 +308,78 @@ describe('the shape of a working directory', function () {
         );
 
         // Otherwise it reaches a varchar(1024) column and 500s on MySQL.
+        expect($response->getStatusCode())->toBe(422);
+    });
+});
+
+describe('clearing a workspace', function () {
+    it('escapes a conversation pinned to a directory the bridge no longer allows', function () {
+        // The reason clearing exists. The bridge restarts with a narrower
+        // --allow-dir, so the re-check now refuses this conversation on every
+        // turn. If the re-check ran before the clear, the escape hatch would
+        // 422 before it could be used — which is exactly what it did.
+        $connection = Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+            'last_workspaces' => [['path' => '/other', 'label' => 'Other']],
+        ]);
+        $conversation = Conversation::create([
+            'mode' => 'bridge', 'provider' => 'claude',
+            'connection_id' => $connection->id,
+            'working_dir' => '/repos/studio',
+            'cli_session_id' => 'sess-1',
+        ]);
+
+        // Pinned and refused.
+        expect(app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', ['message' => 'hi']),
+            $conversation->id,
+        )->getStatusCode())->toBe(422);
+
+        // Cleared, and the session goes with it.
+        app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'working_dir' => '',
+            ]),
+            $conversation->id,
+        );
+
+        $conversation->refresh();
+        expect($conversation->working_dir)->toBeNull()
+            ->and($conversation->cli_session_id)->toBeNull();
+    });
+
+    it('does not treat a null working_dir as a clear', function () {
+        // A JS client doing JSON.stringify({message, working_dir: selectedDir})
+        // with nothing selected would otherwise silently unpin the workspace
+        // and throw away the CLI session, with a 200 and nothing in the log.
+        $conversation = Conversation::create([
+            'mode' => 'bridge', 'provider' => 'claude',
+            'working_dir' => '/repos/studio',
+            'cli_session_id' => 'sess-1',
+        ]);
+
+        app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'working_dir' => null,
+            ]),
+            $conversation->id,
+        );
+
+        $conversation->refresh();
+        expect($conversation->working_dir)->toBe('/repos/studio')
+            ->and($conversation->cli_session_id)->toBe('sess-1');
+    });
+
+    it('refuses a working_dir that is not a string rather than 500ing', function () {
+        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'working_dir' => ['/repos'],
+            ]),
+            $conversation->id,
+        );
+
         expect($response->getStatusCode())->toBe(422);
     });
 });

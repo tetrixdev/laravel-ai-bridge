@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Auth\TokenValidationException;
+use Tetrix\AiBridge\Models\Connection;
 
 /**
  * Middleware to validate bridge connection tokens.
@@ -54,6 +55,32 @@ class ValidateBridgeToken
                 'error' => 'token_invalid',
                 'message' => 'Bridge token validation failed.',
             ], 401);
+        }
+
+        // When the token names a specific connection (the `cid` claim on CLI
+        // bridge tokens), confirm that connection still exists and its key has
+        // not been rotated.
+        //
+        // The WebSocket handshake has always done this, so deleting a
+        // connection or regenerating its token drops the bridge. Without the
+        // same check here, a revoked bridge's token would keep working on
+        // these HTTP routes for the rest of its life — up to the configured
+        // bridge TTL, 30 days by default. Revocation should mean the same
+        // thing on both transports. Tokens without the claim (the legacy
+        // /ai-bridge/token endpoint) skip it, exactly as on the WebSocket side.
+        if (isset($decoded->cid)) {
+            $connection = Connection::find($decoded->cid);
+
+            if ($connection === null || (string) $connection->connection_key !== (string) $decoded->sub) {
+                \Illuminate\Support\Facades\Log::info('AI Bridge: stale connection token rejected', [
+                    'cid' => $decoded->cid,
+                ]);
+
+                return response()->json([
+                    'error' => 'token_invalid',
+                    'message' => 'Bridge token validation failed.',
+                ], 401);
+            }
         }
 
         // Set the validated user ID on the request for downstream use

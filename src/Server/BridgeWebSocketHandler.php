@@ -11,6 +11,7 @@ use Tetrix\AiBridge\Auth\TokenValidationException;
 use Tetrix\AiBridge\Contracts\SendableConnection;
 use Tetrix\AiBridge\Models\Connection;
 use Tetrix\AiBridge\Protocol\MessageTypes;
+use Tetrix\AiBridge\Support\BridgeLog;
 use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\WebSocket\MessageHandler;
 
@@ -173,8 +174,26 @@ class BridgeWebSocketHandler
 
         $connectionId = $meta['connection_id'];
 
-        // Route through the MessageHandler
-        $response = $this->messageHandler->handleMessage($connectionId, $from, $msg);
+        // Route through the MessageHandler.
+        //
+        // Wrapped because this runs inside the WebSocket server's message
+        // callback, which has no try/catch of its own: anything that escapes
+        // does not fail one message, it exits the process and drops EVERY
+        // connected bridge. The individual handlers coerce their own inputs,
+        // but a message shape nobody anticipated should cost one frame rather
+        // than the whole service. BridgeLog swallows its own failures, so the
+        // logging here cannot itself throw.
+        try {
+            $response = $this->messageHandler->handleMessage($connectionId, $from, $msg);
+        } catch (\Throwable $e) {
+            BridgeLog::error('unhandled error while handling a bridge message', [
+                'connection_id' => $connectionId,
+                'error' => $e->getMessage(),
+                'exception' => $e::class,
+            ]);
+
+            return;
+        }
 
         if ($response !== null) {
             $from->send(json_encode($response));

@@ -80,7 +80,13 @@ describe('serving an attachment to the bridge', function () {
             return null;
         });
 
-        app(AttachmentController::class)->show(bridgeRequest(userId: 'key-9'), 'att_5');
+        // A competing user_id in the request body — the cross-user read this
+        // route exists to prevent. Asserting only that the token subject
+        // arrives would leave the "never the request" half of the claim
+        // unproven, and it is the half that matters.
+        $request = bridgeRequest('GET', '/ai-bridge/attachments/att_5', ['user_id' => 'key-other'], 'key-9');
+
+        app(AttachmentController::class)->show($request, 'att_5');
 
         expect($seen)->toBe([['att_5', 'key-9']]);
     });

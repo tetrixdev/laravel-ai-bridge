@@ -187,19 +187,6 @@ class ConversationController extends Controller
         // Optional per-turn provider/model override (e.g. switching mid-conversation).
         $this->applyOverrides($request, $conversation);
 
-        // A working directory can be chosen at create time, when the
-        // conversation may not yet be linked to a connection — and therefore
-        // when there is no advertised list to check it against. Re-check it
-        // here, where the connection IS known, so the choice is validated
-        // before it goes on the wire rather than never.
-        if ($conversation->working_dir !== null) {
-            $conversation->loadMissing('connection');
-            $rejection = $this->rejectUnknownWorkspace($conversation->working_dir, $conversation->connection);
-            if ($rejection !== null) {
-                return $rejection;
-            }
-        }
-
         // A workspace may still be chosen on the FIRST message, for apps that
         // create the conversation before the developer has picked one. After
         // that it is fixed: silently switching it would produce a
@@ -211,14 +198,27 @@ class ConversationController extends Controller
         // relinked to another connection, would fail the re-check below on
         // every subsequent turn with no recovery short of deleting the
         // conversation.
-        if ($request->exists('working_dir') && ! $request->filled('working_dir')) {
+        //
+        // Clearing comes FIRST, before the re-check below. The whole point of
+        // being able to clear is to escape a conversation pinned to a directory
+        // the bridge no longer allows — and the re-check is exactly what
+        // refuses such a conversation. Running it first meant the escape hatch
+        // 422'd before it could be used.
+        if ($this->isClearingWorkspace($request)) {
             if ($conversation->working_dir !== null) {
                 // The session is bound to the old directory, so it goes too —
                 // same reasoning as setting one.
                 $conversation->fill(['working_dir' => null, 'cli_session_id' => null])->save();
             }
         } elseif ($request->filled('working_dir')) {
-            $requested = (string) $request->input('working_dir');
+            $raw = $request->input('working_dir');
+            // Checked as a type, not cast. `filled()` is true for an array, and
+            // `(string) []` raises an ErrorException that lands outside the
+            // InvalidArgumentException catch below — a 500 where a 422 belongs.
+            if (! is_string($raw)) {
+                return $this->badWorkspace('A working directory must be a string.');
+            }
+            $requested = $raw;
             if (mb_strlen($requested) > 1024) {
                 return $this->badWorkspace('A working directory may be at most 1024 characters.');
             }
@@ -250,6 +250,18 @@ class ConversationController extends Controller
                     'message' => 'This conversation is already working in "'.$conversation->working_dir
                         .'". A conversation cannot change working directory — start a new one.',
                 ], 422);
+            }
+        }
+
+        // Validate the directory this turn will actually send. A workspace can
+        // be chosen at create time, when the conversation may not yet be linked
+        // to a connection and there is no advertised list to check against, so
+        // the check has to happen somewhere the connection is known.
+        if ($conversation->working_dir !== null) {
+            $conversation->loadMissing('connection');
+            $rejection = $this->rejectUnknownWorkspace($conversation->working_dir, $conversation->connection);
+            if ($rejection !== null) {
+                return $rejection;
             }
         }
 
@@ -300,6 +312,21 @@ class ConversationController extends Controller
             'status' => 'started',
             'request_id' => $requestId,
         ]);
+    }
+
+    /**
+     * Is this request explicitly clearing the conversation's workspace?
+     *
+     * Only an empty STRING counts. Accepting `null` as well would be friendlier
+     * right up until a client does `JSON.stringify({message, working_dir:
+     * selectedDir})` with nothing selected — which silently unpins the
+     * workspace and throws away the CLI session, with a 200 and nothing in the
+     * log. An empty string is a thing somebody typed; a null is a thing that
+     * happened.
+     */
+    private function isClearingWorkspace(Request $request): bool
+    {
+        return $request->input('working_dir') === '';
     }
 
     /**

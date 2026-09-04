@@ -165,9 +165,9 @@ class MessageHandler
 
         if ($existingUserId !== null) {
             // Already authenticated — store providers from hello and return welcome
-            $providers = $message['providers'] ?? [];
+            $providers = self::asList($message['providers'] ?? null);
             $this->connectionManager->setProviders($existingUserId, $providers);
-            $this->connectionManager->setWorkspaces($existingUserId, $message['workspaces'] ?? []);
+            $this->connectionManager->setWorkspaces($existingUserId, self::asList($message['workspaces'] ?? null));
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
@@ -202,7 +202,7 @@ class MessageHandler
         }
 
         // Register the connection with provider capabilities
-        $providers = $message['providers'] ?? [];
+        $providers = self::asList($message['providers'] ?? null);
         $this->connectionManager->addConnection(
             $userId,
             $connectionId,
@@ -214,7 +214,7 @@ class MessageHandler
 
         // Recorded after addConnection(), which is what creates the entry the
         // setter writes into.
-        $this->connectionManager->setWorkspaces($userId, $message['workspaces'] ?? []);
+        $this->connectionManager->setWorkspaces($userId, self::asList($message['workspaces'] ?? null));
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
@@ -245,12 +245,29 @@ class MessageHandler
             return null;
         }
 
-        $providers = $message['providers'] ?? [];
+        $providers = self::asList($message['providers'] ?? null);
         $this->connectionManager->setProviders($userId, $providers);
 
         $this->logBridgeConnection($userId, $connectionId, 'n/a', $providers, 'providers updated');
 
         return null;
+    }
+
+    /**
+     * Coerce a hello/providers_update field to a list.
+     *
+     * These arrive as parsed JSON from a client, and they are handed straight
+     * to methods declaring `array`. Under `strict_types=1` a string where an
+     * array is declared is a TypeError — raised inside the ReactPHP message
+     * callback, which has no try/catch of its own, so it does not fail one
+     * handshake, it exits the process and drops every connected bridge.
+     *
+     * @param  mixed  $value
+     * @return array<int, mixed>
+     */
+    private static function asList(mixed $value): array
+    {
+        return is_array($value) ? $value : [];
     }
 
     /**

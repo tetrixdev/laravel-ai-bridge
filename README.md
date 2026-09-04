@@ -356,10 +356,16 @@ AiBridge::storeAttachmentUsing(
 );
 ```
 
-The `$userId` is the subject of the bridge's connection token — for a managed
-connection, its `connection_key`. **Scoping the lookup to that user is your
-job and it matters**: returning a file merely because the id exists would let
-any connected bridge fetch anyone's uploads.
+The `$userId` is the subject of the bridge's connection token, **always as a
+string** — the `connection_key` of the `Connection` row the conversation is
+linked to, or the authenticated user's id when it is linked to none. The same
+value is used when the references are built and when the bridge comes back to
+fetch the file, so a `===` comparison inside your closure behaves the same on
+both sides.
+
+**Scoping the lookup to that user is your job and it matters**: returning a
+file merely because the id exists would let any connected bridge fetch
+anyone's uploads.
 
 Attach files to a turn by id. The server builds the URL from its own route, so
 a browser never nominates what the bridge fetches:
