@@ -20,15 +20,27 @@ uses(RefreshDatabase::class);
 |
 */
 
+/** Temp directories this file made, cleaned up after each test. */
+$GLOBALS['aiBridgeRouteTempDirs'] = [];
+
 function attachmentFile(string $contents = 'x'): string
 {
     $dir = sys_get_temp_dir().'/ai-bridge-route-'.bin2hex(random_bytes(4));
     mkdir($dir, 0700, true);
+    $GLOBALS['aiBridgeRouteTempDirs'][] = $dir;
     $path = $dir.'/doc.pdf';
     file_put_contents($path, $contents);
 
     return $path;
 }
+
+afterEach(function () {
+    foreach ($GLOBALS['aiBridgeRouteTempDirs'] as $dir) {
+        array_map('unlink', glob("{$dir}/*") ?: []);
+        @rmdir($dir);
+    }
+    $GLOBALS['aiBridgeRouteTempDirs'] = [];
+});
 
 beforeEach(function () {
     app(AiBridgeManager::class)->resolveAttachmentsUsing(fn () => new SplFileInfo(attachmentFile()));

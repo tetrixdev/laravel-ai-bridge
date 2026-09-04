@@ -322,6 +322,29 @@ The working directory is chosen once and then fixed: the bridge ties it to the
 CLI session, and a later turn naming a different one is refused. `working_dir`
 is therefore stored on the conversation and sent on every turn from there.
 
+The stream endpoint also accepts it, for apps that create the conversation
+before the developer has picked a workspace:
+
+```php
+POST /ai-bridge/conversations/{id}/stream
+{ "message": "run the tests", "working_dir": "/Users/jasper/zp-studio/zeroplex-studio" }
+```
+
+That works on the **first** turn only. Afterwards, naming a different directory
+is a 422 — and an **explicit empty string** clears the workspace, returning the
+conversation to an ordinary chat and starting a fresh CLI session:
+
+```php
+{ "message": "never mind the repo", "working_dir": "" }
+```
+
+Clearing is the recovery path when a bridge comes back with a narrower
+`--allow-dir` and a conversation is pinned to a directory it no longer allows —
+without it, every turn on that conversation would 422 with no way out but
+deleting it. Note that only an empty *string* clears: a JSON `null` is ignored,
+so a client sending `working_dir: selectedDir` with nothing selected cannot
+silently unpin a workspace and throw away the session.
+
 > **`workspace` is not a sandbox, and the bridge's README says so at length.**
 > Once the CLI has a shell it runs code chosen by your server, on the
 > developer's machine, as them — `cd ..` is one command away from wherever it

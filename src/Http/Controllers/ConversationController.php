@@ -73,6 +73,9 @@ class ConversationController extends Controller
         // bridge fixes it for the life of the CLI session and refuses a later
         // turn that names a different one.
         if (! empty($validated['working_dir'])) {
+            if ($validated['mode'] !== 'bridge') {
+                return $this->badWorkspace('A working directory is only supported in bridge mode.');
+            }
             $rejection = $this->rejectUnknownWorkspace($validated['working_dir'], $connection);
             if ($rejection !== null) {
                 return $rejection;
@@ -184,8 +187,14 @@ class ConversationController extends Controller
             }
         }
 
-        // Optional per-turn provider/model override (e.g. switching mid-conversation).
-        $this->applyOverrides($request, $conversation);
+        // Same argument as attachments further down: only the bridge path can
+        // act on a working directory, so accepting one anywhere else stores a
+        // value the conversation displays and no turn ever uses — and the user
+        // reads the assistant's "I can't see that repo" as a broken bridge.
+        // Checked before anything reads or writes the field.
+        if ($request->exists('working_dir') && $conversation->mode !== 'bridge') {
+            return $this->badWorkspace('A working directory is only supported in bridge mode.');
+        }
 
         // A workspace may still be chosen on the FIRST message, for apps that
         // create the conversation before the developer has picked one. After
@@ -210,8 +219,16 @@ class ConversationController extends Controller
                 // same reasoning as setting one.
                 $conversation->fill(['working_dir' => null, 'cli_session_id' => null])->save();
             }
-        } elseif ($request->filled('working_dir')) {
+        } elseif ($request->exists('working_dir')) {
             $raw = $request->input('working_dir');
+            // `filled()` is trim-based, so "   " would fall through all three
+            // branches: not a clear, not a set, 200 and no workspace — while a
+            // relative path correctly 422s. Refuse it instead of ignoring it.
+            if (is_string($raw) && trim($raw) === '') {
+                return $this->badWorkspace(
+                    'A working directory must be an absolute path, or an empty string to clear it.'
+                );
+            }
             // Checked as a type, not cast. `filled()` is true for an array, and
             // `(string) []` raises an ErrorException that lands outside the
             // InvalidArgumentException catch below — a 500 where a 422 belongs.
@@ -264,6 +281,13 @@ class ConversationController extends Controller
                 return $rejection;
             }
         }
+
+        // Optional per-turn provider/model override (e.g. switching mid-conversation).
+        //
+        // After the workspace branches, not before: those can now return 422,
+        // and a rejected turn that had already persisted a model switch would
+        // leave the conversation changed by a request that did nothing.
+        $this->applyOverrides($request, $conversation);
 
         // Files attached to THIS message, as ids. Per turn rather than per
         // conversation: the bridge downloads them, tells the model where they

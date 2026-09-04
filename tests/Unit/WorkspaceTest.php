@@ -312,6 +312,33 @@ describe('the shape of a working directory', function () {
     });
 });
 
+describe('a working directory outside bridge mode', function () {
+    it('is refused at create time', function () {
+        // Only the bridge path can act on one. Storing it anywhere else gives
+        // the conversation a value it displays and no turn ever uses.
+        $response = app(ConversationController::class)->store(
+            Request::create('/ai-bridge/conversations', 'POST', [
+                'mode' => 'byok', 'working_dir' => '/repos/studio',
+            ])
+        );
+
+        expect($response->getStatusCode())->toBe(422);
+    });
+
+    it('is refused on a turn', function () {
+        $conversation = Conversation::create(['mode' => 'byok']);
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'working_dir' => '/repos/studio',
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422);
+    });
+});
+
 describe('clearing a workspace', function () {
     it('escapes a conversation pinned to a directory the bridge no longer allows', function () {
         // The reason clearing exists. The bridge restarts with a narrower
@@ -370,6 +397,23 @@ describe('clearing a workspace', function () {
             ->and($conversation->cli_session_id)->toBe('sess-1');
     });
 
+    it('refuses a whitespace-only working_dir rather than ignoring it', function () {
+        // `filled()` is trim-based, so "   " would fall through every branch:
+        // not a clear, not a set, 200 and no workspace — while a relative path
+        // correctly 422s.
+        $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'working_dir' => '   ',
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and($conversation->fresh()->working_dir)->toBeNull();
+    });
+
     it('refuses a working_dir that is not a string rather than 500ing', function () {
         $conversation = Conversation::create(['mode' => 'bridge', 'provider' => 'claude']);
 
@@ -409,6 +453,31 @@ describe('choosing a workspace after the session exists', function () {
         $conversation->refresh();
         expect($conversation->working_dir)->toBe('/repos/studio')
             ->and($conversation->cli_session_id)->toBeNull();
+    });
+});
+
+describe('a refused turn', function () {
+    it('does not persist a model switch the request never got to use', function () {
+        // applyOverrides runs after the workspace branches, which can 422.
+        $connection = Connection::create([
+            'type' => 'bridge', 'name' => 'laptop', 'connection_key' => 'key-1',
+            'last_workspaces' => [['path' => '/other', 'label' => 'Other']],
+        ]);
+        $conversation = Conversation::create([
+            'mode' => 'bridge', 'provider' => 'claude', 'model' => 'sonnet',
+            'connection_id' => $connection->id,
+            'working_dir' => '/repos/studio',
+        ]);
+
+        $response = app(ConversationController::class)->stream(
+            Request::create("/ai-bridge/conversations/{$conversation->id}/stream", 'POST', [
+                'message' => 'hi', 'model' => 'opus',
+            ]),
+            $conversation->id,
+        );
+
+        expect($response->getStatusCode())->toBe(422)
+            ->and($conversation->fresh()->model)->toBe('sonnet');
     });
 });
 
