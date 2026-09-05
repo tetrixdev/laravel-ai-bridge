@@ -16,12 +16,44 @@ jobs:
     strategy:
       matrix:
         include:
+          # testbench is pinned per leg on purpose. The install step below only
+          # constrains illuminate/support, so a Laravel 13 leg left on the
+          # testbench that pairs with 12 would quietly resolve Laravel 12 back
+          # in and pass while testing the wrong framework.
           - php: '8.2'
             laravel: '12.*'
+            testbench: '10.*'
           - php: '8.3'
             laravel: '12.*'
+            testbench: '10.*'
           - php: '8.4'
             laravel: '12.*'
+            testbench: '10.*'
+          # Laravel 13 requires PHP ^8.3, so there is no 8.2 leg for it.
+          - php: '8.3'
+            laravel: '13.*'
+            testbench: '11.*'
+          - php: '8.4'
+            laravel: '13.*'
+            testbench: '11.*'
+
+    # Every leg gets a PostgreSQL, so the migrations are exercised against a
+    # real driver on both framework majors. The rest of the suite stays on
+    # SQLite, which accepts plenty that PostgreSQL does not — an unconditional
+    # MySQL collation being the classic way to discover that in production.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_PASSWORD: probe
+          POSTGRES_DB: aibridge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -30,16 +62,43 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: mbstring, json, openssl
+          # pdo_pgsql is what lets the migration tests actually run rather
+          # than skip themselves.
+          extensions: mbstring, json, openssl, pdo_pgsql
           coverage: none
 
       - name: Install dependencies
         run: |
           composer require "illuminate/support:${{ matrix.laravel }}" --no-interaction --no-update
-          composer install --prefer-dist --no-interaction --no-progress
+          composer require --dev "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
+          # `update`, not `install`. The two lines above change composer.json
+          # without touching composer.lock, and `install` resolves from the
+          # lock — so it ignores the pin, and on a leg the lock cannot satisfy
+          # it fails outright with a confusing "replaced as self.version"
+          # error. A library wants each leg resolved fresh anyway.
+          composer update --prefer-dist --no-interaction --no-progress
+
+      # Proves the leg tested the framework it claims to. Without this, a
+      # mis-resolved matrix is a green tick against the wrong Laravel — which
+      # is precisely what an unpinned testbench would cause.
+      #
+      # Checks laravel/framework, not illuminate/support: the framework
+      # *replaces* the illuminate packages, so `composer show illuminate/support`
+      # errors with "not found" on a real install.
+      - name: Confirm the resolved framework matches the leg
+        run: |
+          WANT="${{ matrix.laravel }}"; WANT="${WANT%%.*}"
+          GOT=$(composer show laravel/framework --format=json | php -r 'echo json_decode(file_get_contents("php://stdin"), true)["versions"][0];')
+          echo "laravel/framework resolved to $GOT (leg wants major $WANT)"
+          case "${GOT#v}" in
+            "$WANT".*) ;;
+            *) echo "::error::resolved $GOT, expected Laravel $WANT"; exit 1 ;;
+          esac
 
       - name: Run tests
         run: vendor/bin/pest --colors=always
+        env:
+          AI_BRIDGE_TEST_PGSQL_HOST: 127.0.0.1
 
   lint:
     name: Syntax check
