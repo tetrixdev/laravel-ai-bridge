@@ -114,6 +114,7 @@ class MessageHandler
             MessageTypes::PROVIDERS_UPDATE => $this->handleProvidersUpdate($connectionId, $message),
             MessageTypes::PING => $this->handlePing($connectionId, $message),
             MessageTypes::AI_REQUEST_ACK => $this->handleAiRequestAck($connectionId, $message),
+            MessageTypes::POSTURE => $this->handlePosture($connectionId, $message),
             MessageTypes::STREAM => $this->handleStreamEnvelope($connectionId, $message),
             MessageTypes::TOOL_CALL => $this->handleToolCall($connectionId, $message),
             MessageTypes::ERROR => $this->handleError($connectionId, $message),
@@ -219,6 +220,66 @@ class MessageHandler
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
         return $this->buildWelcomeResponse($connectionId, $userId);
+    }
+
+    /**
+     * Handle a 'posture' message — the bridge reporting the CLI isolation it
+     * actually adopted for this connection.
+     *
+     * Recorded rather than acted on. The bridge is the authority: it has
+     * already decided, and a server cannot argue with a refusal that exists
+     * precisely to stop servers overriding the machine's owner. What this
+     * buys is that the app can SHOW it, so "the assistant has no tools" stops
+     * being a mystery only visible in a log on the operator's laptop.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function handlePosture(string $connectionId, array $message): ?array
+    {
+        $userId = $this->connectionManager->getUserIdByConnectionId($connectionId);
+
+        if ($userId === null) {
+            // A posture frame before the handshake completed — ignore.
+            Log::warning('AI Bridge: posture from unauthenticated connection', [
+                'connection_id' => $connectionId,
+            ]);
+
+            return null;
+        }
+
+        $adopted = is_string($message['cli_isolation'] ?? null) ? $message['cli_isolation'] : null;
+
+        if ($adopted === null) {
+            Log::warning('AI Bridge: posture frame without a cli_isolation', [
+                'connection_id' => $connectionId,
+            ]);
+
+            return null;
+        }
+
+        $posture = ['cli_isolation' => $adopted];
+
+        foreach (['requested', 'reason', 'message'] as $field) {
+            $value = $message[$field] ?? null;
+            if (is_string($value) || $value === null) {
+                $posture[$field] = $value;
+            }
+        }
+
+        $this->connectionManager->setPosture($userId, $posture);
+
+        if (($posture['reason'] ?? null) !== null) {
+            // Worth a log line of its own: this is the case where the app is
+            // configured for one thing and the bridge is doing another.
+            Log::info('AI Bridge: bridge declined the requested CLI isolation', [
+                'user_id' => $userId,
+                'requested' => $posture['requested'] ?? null,
+                'adopted' => $adopted,
+                'reason' => $posture['reason'],
+            ]);
+        }
+
+        return null;
     }
 
     /**

@@ -562,7 +562,8 @@ test('MessageTypes::all() contains all expected message type constants (EFF-006)
     expect($all)->toContain(MessageTypes::TOKEN_REFRESH);
     expect($all)->toContain(MessageTypes::PROVIDERS_UPDATE);
     expect($all)->toContain(MessageTypes::ATTACHMENT);
-    expect($all)->toHaveCount(23);
+    expect($all)->toContain(MessageTypes::POSTURE);
+    expect($all)->toHaveCount(24);
 });
 
 test('MessageTypes::isValid() accepts known types and rejects unknown (EFF-006)', function () {

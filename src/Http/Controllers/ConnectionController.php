@@ -48,6 +48,10 @@ class ConnectionController extends Controller
             // picker. Empty for BYOK and for a bridge started without
             // --allow-dir.
             $data['workspaces'] = $status['workspaces'] ?? [];
+            // What the bridge is actually running as. A `reason` here means it
+            // declined what the server asked for, and `message` says what the
+            // bridge operator would have to change.
+            $data['posture'] = $status['posture'] ?? [];
             if ($connection->isBridge()) {
                 $data['connected'] = $status['connected'];
             }

@@ -64,6 +64,7 @@ it('creates every table and column the package needs', function () {
         ->and(Schema::hasColumn('ai_bridge_connections', 'last_workspaces'))->toBeTrue()
         ->and(Schema::hasColumn('ai_bridge_conversations', 'allowed_tools'))->toBeTrue()
         ->and(Schema::hasColumn('ai_bridge_conversations', 'working_dir'))->toBeTrue()
+        ->and(Schema::hasColumn('ai_bridge_connections', 'last_posture'))->toBeTrue()
         ->and(Schema::hasColumn('ai_bridge_messages', 'blocks'))->toBeTrue();
 });
 

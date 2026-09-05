@@ -38,12 +38,16 @@ class ConnectionStatus
      * none — which is also what an older bridge looks like, and means the same
      * thing: naming a working directory is refused.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>}
+     * `posture` is the CLI isolation the bridge reported it actually adopted.
+     * Empty for BYOK, and empty for a bridge that predates the report — which
+     * means unknown, not agreement.
+     *
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>}
      */
     public function for(Connection $connection): array
     {
         if ($connection->isByok()) {
-            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => []];
+            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => [], 'posture' => []];
         }
 
         return $this->bridgeLiveStatus($connection);
@@ -59,6 +63,19 @@ class ConnectionStatus
         return $this->for($connection)['workspaces'];
     }
 
+    /**
+     * The CLI isolation posture this connection's bridge reported.
+     *
+     * A `reason` key means the bridge declined what the server asked for, and
+     * the accompanying `message` names the operator flag that would change it.
+     *
+     * @return array<string, mixed>
+     */
+    public function posture(Connection $connection): array
+    {
+        return $this->for($connection)['posture'];
+    }
+
     /** Whether the connection is currently usable. */
     public function isConnected(Connection $connection): bool
     {
@@ -69,7 +86,7 @@ class ConnectionStatus
      * Query the bridge server for a bridge connection's live status, refreshing the cached
      * capabilities. Falls back to cached providers + connected=false when unreachable.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>}
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>}
      */
     private function bridgeLiveStatus(Connection $connection): array
     {
@@ -78,6 +95,7 @@ class ConnectionStatus
                 'connected' => false,
                 'providers' => $connection->last_providers ?? [],
                 'workspaces' => $connection->last_workspaces ?? [],
+                'posture' => $connection->last_posture ?? [],
             ];
         }
 
@@ -114,17 +132,25 @@ class ConnectionStatus
                 $workspaces = $connected && is_array($reportedWorkspaces)
                     ? $reportedWorkspaces
                     : ($connection->last_workspaces ?? []);
+                // Same absent-is-not-empty rule: a serve process that predates
+                // this field reports nothing, and blanking the cache on every
+                // poll for the length of a rolling deploy is not an improvement.
+                $reportedPosture = $response->json('posture');
+                $posture = $connected && is_array($reportedPosture)
+                    ? $reportedPosture
+                    : ($connection->last_posture ?? []);
                 $connectedAt = $response->json('connected_at');
 
                 $connection->forceFill([
                     'last_providers' => $providers,
                     'last_workspaces' => $workspaces,
+                    'last_posture' => $posture,
                     'last_connected_at' => $connected && $connectedAt !== null
                         ? $connectedAt
                         : $connection->last_connected_at,
                 ])->save();
 
-                return ['connected' => $connected, 'providers' => $providers, 'workspaces' => $workspaces];
+                return ['connected' => $connected, 'providers' => $providers, 'workspaces' => $workspaces, 'posture' => $posture];
             }
         } catch (\Throwable $e) {
             Log::info('AI Bridge: bridge status unreachable', [
@@ -137,6 +163,7 @@ class ConnectionStatus
             'connected' => false,
             'providers' => $connection->last_providers ?? [],
             'workspaces' => $connection->last_workspaces ?? [],
+            'posture' => $connection->last_posture ?? [],
         ];
     }
 
