@@ -492,6 +492,9 @@ class BridgeWebSocketServer
             // The directories this bridge will work in. The app needs them to
             // render a workspace picker, and only this process knows them.
             $response['workspaces'] = $this->connectionManager->getWorkspaces($userId);
+            // What the bridge is actually running as, which only this process
+            // knows and which a PHP-FPM worker otherwise cannot see.
+            $response['posture'] = $this->connectionManager->getPosture($userId);
         }
 
         $this->httpResponse($tcpConnection, 200, $response);

@@ -241,6 +241,33 @@ class BridgeConnectionManager
     }
 
     /**
+     * Store the CLI isolation posture the bridge reported it adopted.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @param  array<string, mixed>  $posture  The `posture` frame's fields.
+     */
+    public function setPosture(int|string $userId, array $posture): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['posture'] = $posture;
+        }
+    }
+
+    /**
+     * Get the posture this user's bridge reported.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @return array<string, mixed>  Empty when the bridge never said — which
+     *                               means an older bridge, not agreement.
+     */
+    public function getPosture(int|string $userId): array
+    {
+        return $this->connections[(string) $userId]['posture'] ?? [];
+    }
+
+    /**
      * Get the provider capabilities for a user's bridge connection.
      *
      * @param  int|string  $userId  The user ID.

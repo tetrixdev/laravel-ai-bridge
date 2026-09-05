@@ -112,6 +112,21 @@ final class MessageTypes
     public const ATTACHMENT = 'attachment';
 
     /**
+     * The CLI isolation posture the bridge actually adopted.
+     *
+     * The server asks for one in `welcome`, and the bridge may decline it:
+     * `workspace` and `native` are gated on flags the bridge operator passes,
+     * and a bridge started without them runs `isolated` instead. Without this
+     * frame that refusal is visible only in a log on someone else's machine —
+     * so an operator who forgot `--allow-native` sees a connection that looks
+     * healthy in every screen while the assistant silently has no tools.
+     *
+     * Sent once per handshake whether or not it matches the request. Absence
+     * means an older bridge, not agreement.
+     */
+    public const POSTURE = 'posture';
+
+    /**
      * Server → bridge: sends the result of a tool execution back to the bridge.
      *
      * This is a top-level message type (NOT inside a stream envelope).
@@ -173,6 +188,7 @@ final class MessageTypes
             self::TOOL_CALL,
             self::TOOL_RESULT,
             self::ATTACHMENT,
+            self::POSTURE,
             self::TOOL_RESOLVE,
             self::TOOL_ERROR,
             self::DONE,
@@ -209,6 +225,7 @@ final class MessageTypes
         return [
             self::HELLO,
             self::PROVIDERS_UPDATE,
+            self::POSTURE,
             self::PING,
             self::AI_REQUEST_ACK,
             self::STREAM,

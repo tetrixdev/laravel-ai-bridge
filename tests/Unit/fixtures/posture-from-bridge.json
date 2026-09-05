@@ -1,0 +1,1 @@
+{"type":"posture","cli_isolation":"isolated","requested":"native","reason":"requires_allow_native","message":"Server asked for `native` isolation, which hands this machine's full CLI environment — shell, your MCP servers, hooks and plugins — to whatever the server sends. Running `isolated` instead. Pass --allow-native if the server is one you would give a shell to."}
