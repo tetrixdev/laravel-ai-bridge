@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8">
+<style>html,body{margin:0;height:100%} ai-bridge-chat{display:block;height:600px}</style>
+<script>
+// Stub the network so the component boots without a server. Only the two
+// endpoints init() touches need to answer.
+window.fetch = async (url) => ({
+  ok: true, status: 200,
+  headers: { get: () => 'application/json' },
+  json: async () => (String(url).includes('/connections') ? { connections: [] } : { data: [] }),
+});
+</script>
+<script src="../../resources/dist/ai-bridge-chat.js"></script>
+<ai-bridge-chat api="/stub"></ai-bridge-chat>
