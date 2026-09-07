@@ -11,3 +11,6 @@ composer.lock
 .env
 .env.*
 !.env.example
+
+# Playwright output from tests/Browser (manual, see tests/Browser/README.md)
+test-results/

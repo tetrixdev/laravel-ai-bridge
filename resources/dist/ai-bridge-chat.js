@@ -160,6 +160,8 @@
         connectedCallback() {
             if (this._booted) return;
             this._booted = true;
+            // Handle for the coalesced stream render (see scheduleRender).
+            this._renderPending = 0;
 
             this.api = this.getAttribute('api') || '/ai-bridge';
             this.assets = this.getAttribute('assets') || (this.api + '/assets');
@@ -211,6 +213,10 @@
         }
 
         disconnectedCallback() {
+            if (this._renderPending) {
+                cancelAnimationFrame(this._renderPending);
+                this._renderPending = 0;
+            }
             if (this._onVisible) {
                 document.removeEventListener('visibilitychange', this._onVisible);
                 this._onVisible = null;
@@ -279,8 +285,22 @@
         esc(t) { return String(t == null ? '' : t).replace(/[&<>"]/g, (c) =>
             ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-        renderAll() {
+        // opts.stick forces the transcript to the bottom regardless of where the
+        // reader was — for renders where the new content IS the point (sending a
+        // message, opening a conversation).
+        renderAll(opts) {
+            if (this._renderPending) {
+                cancelAnimationFrame(this._renderPending);
+                this._renderPending = 0;
+            }
             const live = this._captureInputs();
+            // Both of these have to be read BEFORE innerHTML is replaced.
+            // Replacing it destroys and re-creates .messages — the scroller —
+            // so afterwards scrollTop is 0 and scrollHeight has changed, and
+            // every render would look like "the reader is at the bottom".
+            const scroller = this.root.querySelector('.messages');
+            const stick = (opts && opts.stick === true) || this._atBottom();
+            const keepTop = scroller ? scroller.scrollTop : 0;
             const rootClass = 'root' + (this.s.sidebarOpen ? ' sidebar-open' : '');
             // .sidebar-backdrop sits under the drawer; it is display:none on
             // desktop and only catches taps (to close the drawer) on mobile.
@@ -289,7 +309,34 @@
                 `<div class="sidebar-backdrop" data-act="togglesidebar"></div></div>` +
                 `${this.modalHtml()}`;
             this._restoreInputs(live);
-            this.scrollDown();
+            this.scrollDown(stick, keepTop);
+        }
+
+        // Coalesce renders during a stream to at most one per animation frame.
+        //
+        // handleEvent used to render once per block; with partial streaming it
+        // fires once per chunk — roughly 35 times for a long answer instead of
+        // 3. Each render is a full innerHTML teardown of the whole transcript,
+        // so without this the cost grows with conversation length on every
+        // chunk, and the input refocus below runs often enough to disturb a
+        // soft keyboard on mobile.
+        scheduleRender() {
+            if (this._renderPending) return;
+            this._renderPending = requestAnimationFrame(() => {
+                this._renderPending = 0;
+                this.renderAll();
+            });
+        }
+
+        // Is the transcript scrolled to (or very near) the bottom?
+        //
+        // 40px of slack so that "close enough" still counts as following along.
+        // No .messages element yet means the first render, which should start
+        // at the bottom.
+        _atBottom() {
+            const m = this.root.querySelector('.messages');
+            if (!m) return true;
+            return m.scrollHeight - m.scrollTop - m.clientHeight < 40;
         }
 
         // Capture in-progress text input before a re-render so an unrelated
@@ -618,7 +665,10 @@
                         : [{ type: 'text', text: m.content || '' }],
                 }));
             } catch (e) { this.s.error = e.message; }
-            this.renderAll();
+            // Forced: _atBottom() would be measuring the PREVIOUS
+            // conversation's scroller here, and a conversation is opened to
+            // read its newest message, not its oldest.
+            this.renderAll({ stick: true });
 
             // If a turn is currently in flight on this conversation, attach an
             // EventSource to its event buffer and replay from the beginning so
@@ -629,7 +679,7 @@
                 this.s.messages.push(this.assistant);
                 this.s.streaming = true;
                 this.s.pulse = true;
-                this.renderAll();
+                this.renderAll({ stick: true });
                 this.attachStreamSource(streamingRequestId, { fromIndex: -1 });
                 this.armWatchdog(this.WATCHDOG_FIRST_MS);
             }
@@ -776,7 +826,10 @@
             this.current = null;
             this.s.streaming = true;
             this.s.pulse = true;
-            this.renderAll();
+            // Forced: the message the reader just sent, and the "Thinking"
+            // pulse under it, are the whole point of this render. Leaving it
+            // conditional appends both off-screen for anyone who had scrolled up.
+            this.renderAll({ stick: true });
             // Backstop: if nothing comes back at all the UI must not sit on
             // "Thinking" forever. armWatchdog() ends the turn; every received
             // event resets it (see handleEvent). The FIRST event gets a wider
@@ -805,7 +858,10 @@
                         if (draftBack) draftBack.value = text;
                         this.s.error = 'Another window is already responding in this conversation. '
                             + 'Your message was not sent — re-send it once the current turn finishes.';
-                        this.renderAll();
+                        // Forced: this notice renders at the bottom of the
+                        // transcript, so unforced it can be the one thing the
+                        // reader never sees about a message that did not send.
+                        this.renderAll({ stick: true });
                         return;
                     }
                 }
@@ -944,7 +1000,7 @@
                 case 'error': this.s.error = d.message || d.code || 'Stream error'; this.finish(); return;
                 case 'cancelled': this.finish(); return;
             }
-            this.renderAll();
+            this.scheduleRender();
         }
         finish() {
             this.clearWatchdog();
@@ -954,9 +1010,20 @@
             this.renderAll();
         }
 
-        scrollDown() {
+        scrollDown(stick = true, keepTop = 0) {
+            // Follow the stream only while the reader is already at the bottom.
+            // Pinning unconditionally drags a reader who scrolled up back down
+            // on the next chunk — survivable at 3 renders per answer, unusable
+            // at 35.
+            //
+            // Restoring is NOT optional in the other branch. innerHTML re-made
+            // the scroller, so its scrollTop is 0: doing nothing here does not
+            // leave the reader where they were, it throws them to the very top
+            // of the conversation — worse than the pinning this replaced.
+            // Raw scrollTop is the right thing to restore, because during a
+            // stream the transcript grows below the viewport.
             const m = this.root.querySelector('.messages');
-            if (m) m.scrollTop = m.scrollHeight;
+            if (m) m.scrollTop = stick ? m.scrollHeight : keepTop;
             // (re)bind inputs after each full render
             this.bindFormInputs();
         }
