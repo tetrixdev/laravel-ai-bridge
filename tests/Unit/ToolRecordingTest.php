@@ -435,6 +435,99 @@ test('internal reconciliation bookkeeping does not reach a consumer', function (
     expect(collect($blocks)->firstWhere('type', 'tool_call'))->not->toHaveKey('_from_stream');
 });
 
+test('a frame supplies the arguments when the block could not parse its own', function () {
+    // The block is usually richer — it has the id results are keyed by — but
+    // its arguments are raw delta text and can arrive truncated or unparsed,
+    // where the frame carries them already parsed. Dropping the frame outright
+    // then persisted a call with no usable arguments at all.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => 'toolu_1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"notation":"1d2']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchToolCall('roll_dice', ['notation' => '1d20+5'], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $call = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($call['parameters'])->toBe(['notation' => '1d20+5'])
+        // …and it keeps the id a tool_result is matched by.
+        ->and($call['tool_call_id'])->toBe('toolu_1');
+});
+
+test('a block with no deltas at all takes the frame\'s arguments', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => 'toolu_1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchToolCall('roll_dice', ['notation' => '1d20'], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->firstWhere('type', 'tool_call')['parameters'])->toBe(['notation' => '1d20']);
+});
+
+test('arguments are not copied when two parallel calls make the pairing ambiguous', function () {
+    // With two calls to one tool there is no way to tell which frame belongs to
+    // which block. Where it is ambiguous nothing moves, and each block keeps
+    // what it has — the same reasoning this file applies to tool_results.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        foreach ([['toolu_A', '{"n":"trunc'], ['toolu_B', '{"n":"B"}']] as $i => [$id, $args]) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => $id,
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $args]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+        }
+        $h->dispatchToolCall('roll_dice', ['n' => 'A'], 'mcp-A');
+        $h->dispatchToolCall('roll_dice', ['n' => 'B'], 'mcp-B');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $calls = collect($blocks)->where('type', 'tool_call')->values();
+
+    expect($calls[0]['parameters_raw'])->toBe('{"n":"trunc')
+        ->and($calls[1]['parameters'])->toBe(['n' => 'B']);
+});
+
+test('a nameless unclosed tool block does not swallow the next block', function () {
+    // The tool-call suppression flag was never reset on the text path, so the
+    // assistant's prose was consumed by a block that had already been dropped.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'tool_call']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{}']));
+        // no block_stop
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 1, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => 'Here is my answer.']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->pluck('text')->filter()->values()->all())->toBe(['Here is my answer.']);
+});
+
+test('a frame carrying enormous arguments is capped like a block is', function () {
+    // In BYOK and Managed modes every tool call is a frame and no stream block
+    // is ever emitted, so a cap that only covered blocks was absent entirely
+    // there.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchToolCall('write_file', ['content' => str_repeat('x', 200000)], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $call = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($call['parameters'])->toBe([])
+        ->and(strlen($call['parameters_raw']))->toBeLessThanOrEqual(65536)
+        ->and($call['parameters_truncated_bytes'])->toBeGreaterThan(65536);
+});
+
 test('a nameless tool block is still dropped', function () {
     // Nothing worth showing, and it would render as an empty wrench.
     $blocks = recordTurn(function (StreamHandler $h) {

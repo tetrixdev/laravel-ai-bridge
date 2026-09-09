@@ -462,7 +462,7 @@
                     if (!b.tool_name) return '';
                     // The wire carries the provider's name verbatim; trimming
                     // the MCP namespace for display is this consumer's job.
-                    const shown = String(b.tool_name).replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '');
+                    const shown = String(b.tool_name).replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '') || String(b.tool_name);
                     // "cut off" only when it really was. PHP also sets
                     // parameters_raw for valid-but-not-an-object JSON, which was
                     // not truncated at all — labelling that as cut off is a
@@ -470,14 +470,18 @@
                     const argNote = b.parameters_truncated_bytes !== undefined
                         ? `   ← cut off, ${b.parameters_truncated_bytes} bytes in total`
                         : (b.parameters_raw !== undefined ? '   ← arguments could not be parsed' : '');
-                    const resultBody = (b.result === undefined || b.result === null || b.result === '')
+                    // Matches the standalone tool_result branch below, so a
+                    // call reads the same live as it does after a reload.
+                    const emptyResult = (b.result === undefined || b.result === null || b.result === '');
+                    const resultBody = emptyResult
                         ? '(no output)'
                         : (typeof b.result === 'string' ? b.result : JSON.stringify(b.result));
+                    const showResult = 'result' in b && (!emptyResult || b.is_error);
                     return `<div class="tool"><b>🔧 ${this.esc(shown)}</b>
                         <pre>${this.esc((b.parameters_raw !== undefined
                             ? b.parameters_raw
                             : JSON.stringify(b.parameters || {}, null, 2)) + argNote)}</pre>
-                        ${b.result !== undefined ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(resultBody)}</div>` : ''}</div>`;
+                        ${showResult ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(resultBody)}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
                     // Persisted conversations store tool results as their own
@@ -996,6 +1000,11 @@
                     // block_stop. Showing it on stop instead caused a flash on
                     // the final block: stop turned it on, done turned it off.
                     this.s.pulse = true;
+                    // Finalise a block the stream never closed, so it keeps its
+                    // arguments instead of rendering as "called with none" —
+                    // the recorder does the same, and disagreeing about the
+                    // same stream is worse than either answer alone.
+                    this.closeToolBlock();
                     if ((d.block_type || 'text') === 'tool_call') {
                         // A tool the SERVER resolves arrives twice — as this
                         // block and as the dedicated 'tool_call' event, which
@@ -1016,6 +1025,22 @@
                             tool_call_id: d.tool_call_id, text: '', parameters: {},
                             _fromStream: true,
                         };
+                        // A frame can arrive before its own block — PROTOCOL.md
+                        // does not pin the order down, which is why the recorder
+                        // reconciles at persist rather than on arrival. Drop the
+                        // frame's placeholder now that the richer block exists,
+                        // or the same call is drawn twice live and once after a
+                        // reload: the worst shape a bug can take.
+                        const early = this.assistant.blocks.findIndex((b) =>
+                            b.type === 'tool_call' && !b._fromStream && !b._claimed
+                            && (d.tool_name === 'mcp__bridge__' + b.tool_name || d.tool_name === b.tool_name));
+                        if (early !== -1) {
+                            if (!this.current.parameters || !Object.keys(this.current.parameters).length) {
+                                this.current.parameters = this.assistant.blocks[early].parameters || {};
+                            }
+                            this.assistant.blocks.splice(early, 1);
+                            this.current._claimed = true;
+                        }
                         this.assistant.blocks.push(this.current);
                         break;
                     }

@@ -513,12 +513,10 @@ class AiBridgeManager
         });
 
         $stream->onDone(function (?array $usage, array $meta = []) use ($sink, $onTerminal) {
-            // An allowlist of the documented fields — see BufferingSink for the
-            // reasoning. cli_session_id is the server's to keep.
-            $meta = array_intersect_key($meta, array_flip([
-                'model', 'provider_version', 'stop_reason', 'cost_usd',
-                'duration_ms', 'duration_api_ms', 'num_turns', 'permission_denials',
-            ]));
+            // One allowlist, not two copies — a future field must be reviewed
+            // once, not remembered in two places. cli_session_id is the
+            // server's to keep; see BufferingSink for the reasoning.
+            $meta = BufferingSink::publicDoneMeta($meta);
 
             // Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
             // always runs even if the sink throws, preventing SSE clients from hanging.

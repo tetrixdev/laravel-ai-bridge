@@ -177,6 +177,12 @@ final class ConversationRecorder
 
                 return;
             }
+            // Reset here too. A nameless tool block sets this and is dropped;
+            // without clearing it, the next block's deltas were swallowed and
+            // its block discarded by onBlockStop's early return — so the
+            // assistant's prose disappeared from the record while a hollow
+            // empty block took its place.
+            $inStreamToolCall = false;
             $current = ['type' => $blockType, 'text' => ''];
         });
         $handler->onBlockDelta(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
@@ -206,13 +212,9 @@ final class ConversationRecorder
         $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
             // Recorded as-is. Reconciliation against the stream block happens
             // at persist time, where the ordering of the two is irrelevant.
-            $blocks[] = [
-                'type' => 'tool_call',
-                'tool_name' => $name,
-                'parameters' => $params,
-                'tool_call_id' => $callId,
-                '_from_frame' => true,
-            ];
+            $blocks[] = ['type' => 'tool_call', 'tool_name' => $name]
+                + self::capParameters($params)
+                + ['tool_call_id' => $callId, '_from_frame' => true];
         });
         $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks) {
             // Record the tool_result with the id the dispatcher provided. In
@@ -321,6 +323,60 @@ final class ConversationRecorder
      * @param  array<string, mixed>|null  $usage
      */
     /**
+     * Is there exactly one call of this name in the turn from each side?
+     *
+     * Guards the one place arguments move between records. With two parallel
+     * calls to the same tool there is no way to tell which frame belongs to
+     * which block — this file rejects that same guess about tool_results — so
+     * where it is ambiguous nothing is copied and the block keeps what it has.
+     *
+     * @param  array<int, array<string, mixed>>  $blocks
+     */
+    private static function isUnambiguous(array $blocks, string $frameToolName): bool
+    {
+        $streamCalls = 0;
+        $frameCalls = 0;
+
+        foreach ($blocks as $block) {
+            if (($block['type'] ?? '') !== 'tool_call') {
+                continue;
+            }
+            if ($block['_from_stream'] ?? false) {
+                $streamCalls += self::describesSameCall((string) ($block['tool_name'] ?? ''), $frameToolName) ? 1 : 0;
+            } elseif ($block['_from_frame'] ?? false) {
+                $frameCalls += ((string) ($block['tool_name'] ?? '')) === $frameToolName ? 1 : 0;
+            }
+        }
+
+        return $streamCalls === 1 && $frameCalls === 1;
+    }
+
+    /**
+     * Apply the argument ceiling to a frame's already-parsed parameters.
+     *
+     * The cap existed only on the stream path, so a frame carrying a 300KB
+     * argument was persisted whole — and in BYOK and Managed modes EVERY tool
+     * call is a frame, so the growth path the cap exists to close was open in
+     * its entirety there.
+     *
+     * @param  array<string, mixed>  $params
+     * @return array<string, mixed>
+     */
+    private static function capParameters(array $params): array
+    {
+        $encoded = json_encode($params);
+        if ($encoded === false || strlen($encoded) <= self::MAX_ARGUMENT_BYTES) {
+            return ['parameters' => $params];
+        }
+
+        return [
+            'parameters' => [],
+            'parameters_raw' => mb_strcut($encoded, 0, self::MAX_ARGUMENT_BYTES, 'UTF-8'),
+            'parameters_truncated_bytes' => strlen($encoded),
+        ];
+    }
+
+    /**
      * Drop each `tool_call` frame that duplicates a stream block, and clear the
      * bookkeeping both carried.
      *
@@ -368,6 +424,27 @@ final class ConversationRecorder
                 // One frame cancels against one block; a third call with no
                 // frame of its own keeps its block rather than being consumed.
                 $claimed[$candidate] = true;
+
+                // The block is USUALLY richer — it has the id results are keyed
+                // by — but not always: its arguments are raw delta text, which
+                // can arrive truncated, unparsed, or not at all, while the
+                // frame carries them already parsed. Take them from the frame in
+                // exactly that case, and only when the pairing is unambiguous,
+                // so nothing can be attributed to the wrong call.
+                if (isset($blocks[$candidate]['parameters_raw']) || ($blocks[$candidate]['parameters'] ?? []) === []) {
+                    if (self::isUnambiguous($blocks, (string) ($block['tool_name'] ?? ''))) {
+                        unset($blocks[$candidate]['parameters_raw'], $blocks[$candidate]['parameters_truncated_bytes']);
+                        $blocks[$candidate] = $blocks[$candidate] + ['parameters' => []];
+                        $blocks[$candidate]['parameters'] = $block['parameters'] ?? [];
+                        if (isset($block['parameters_raw'])) {
+                            $blocks[$candidate]['parameters_raw'] = $block['parameters_raw'];
+                        }
+                        if (isset($block['parameters_truncated_bytes'])) {
+                            $blocks[$candidate]['parameters_truncated_bytes'] = $block['parameters_truncated_bytes'];
+                        }
+                    }
+                }
+
                 unset($blocks[$index]);
                 break;
             }

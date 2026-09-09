@@ -151,6 +151,40 @@ test('the operator\'s own MCP tool is not claimed by a bridge frame', async ({ p
   expect(b[1].parameters).toEqual({ url: 'SERVER' });
 });
 
+test('a frame arriving before the block STARTS still draws one call', async ({ page }) => {
+  // PROTOCOL.md does not pin the order down, which is why the recorder
+  // reconciles at persist. The live path searched only blocks that already
+  // existed, so this drew the call twice live and once after a reload — the
+  // worst shape a bug can take.
+  await ready(page);
+  await feed(page, [
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { n: 1 }, tool_call_id: 'mcp-1' } },
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"n":1}' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].tool_call_id).toBe('t1');
+});
+
+test('an unclosed tool block keeps its arguments when the next block opens', async ({ page }) => {
+  // The recorder finalises here; the component did not, so the same stream gave
+  // two different answers and the wrong one was the one seen first.
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'Bash', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"command":"echo hi"}' } },
+    { event: 'block_start', data: { block_index: 1, block_type: 'text' } },
+    { event: 'block_delta', data: { block_index: 1, content: 'done' } },
+    { event: 'block_stop', data: { block_index: 1 } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b[0].parameters).toEqual({ command: 'echo hi' });
+});
+
 test('a frame arriving before the block closes still draws one call', async ({ page }) => {
   await ready(page);
   await feed(page, [

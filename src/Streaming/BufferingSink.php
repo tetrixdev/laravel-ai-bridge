@@ -118,7 +118,7 @@ final class BufferingSink
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {
-            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicMeta($meta));
+            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicDoneMeta($meta));
             self::completeQuietly($store, $rid, 'completed');
         });
 
@@ -145,14 +145,22 @@ final class BufferingSink
             ]);
         }
     }
-
     /**
      * Reduce the provider's turn metadata to the fields a browser may see.
      *
      * @param  array<string, mixed>  $meta
      * @return array<string, mixed>
      */
-private static function publicMeta(array $meta): array
+    /**
+     * Reduce the provider's turn metadata to the fields a browser may see.
+     *
+     * Public because AiBridgeManager's SSE path needs the same decision, and
+     * two copies of an allowlist is one copy too many.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    public static function publicDoneMeta(array $meta): array
     {
         return array_intersect_key($meta, array_flip(self::PUBLIC_DONE_META));
     }
