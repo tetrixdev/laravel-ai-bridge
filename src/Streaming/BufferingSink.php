@@ -25,6 +25,20 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
  */
 final class BufferingSink
 {
+    /**
+     * What of the provider's turn metadata a BROWSER is shown.
+     *
+     * An allowlist, not a denylist. `done` carries whatever the provider chose
+     * to report, and a denylist forwards every future field by default —
+     * including one nobody has evaluated yet. These are the documented ones
+     * from PROTOCOL.md; `cli_session_id` is deliberately absent, being a
+     * resumable handle the server keeps to itself.
+     */
+    private const PUBLIC_DONE_META = [
+        'model', 'provider_version', 'stop_reason', 'cost_usd',
+        'duration_ms', 'duration_api_ms', 'num_turns', 'permission_denials',
+    ];
+
     public static function attach(StreamHandler $handler, StreamStoreContract $store): void
     {
         $rid = $handler->requestId;
@@ -104,12 +118,7 @@ final class BufferingSink
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {
-            // Everything the provider reported, minus the CLI session handle.
-            // That is a resumable credential-ish token the server keeps to
-            // itself; a browser has no use for it and this buffer is read by
-            // one. The rest is what the turn cost and how it ended.
-            unset($meta['cli_session_id']);
-            $append(MessageTypes::DONE, ['usage' => $usage] + $meta);
+            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicMeta($meta));
             self::completeQuietly($store, $rid, 'completed');
         });
 
@@ -135,5 +144,16 @@ final class BufferingSink
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+
+    /**
+     * Reduce the provider's turn metadata to the fields a browser may see.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+private static function publicMeta(array $meta): array
+    {
+        return array_intersect_key($meta, array_flip(self::PUBLIC_DONE_META));
     }
 }

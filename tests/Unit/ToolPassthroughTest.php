@@ -361,3 +361,4 @@ test('a tool_call block_start from a real bridge keeps its tool name', function 
 
     expect($seen['tool_name'])->toBe('Bash')->and($seen['tool_call_id'])->toBe('toolu_1');
 });
+

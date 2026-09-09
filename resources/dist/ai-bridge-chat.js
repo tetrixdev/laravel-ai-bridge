@@ -460,11 +460,24 @@
                     // Defensive: a tool_call block with no name carries nothing
                     // worth showing — never render an empty "🔧" block.
                     if (!b.tool_name) return '';
-                    return `<div class="tool"><b>🔧 ${this.esc(b.tool_name)}</b>
-                        <pre>${this.esc(b.parameters_raw !== undefined
-                            ? b.parameters_raw + '   ← arguments were cut off'
-                            : JSON.stringify(b.parameters || {}, null, 2))}</pre>
-                        ${b.result !== undefined ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
+                    // The wire carries the provider's name verbatim; trimming
+                    // the MCP namespace for display is this consumer's job.
+                    const shown = String(b.tool_name).replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '');
+                    // "cut off" only when it really was. PHP also sets
+                    // parameters_raw for valid-but-not-an-object JSON, which was
+                    // not truncated at all — labelling that as cut off is a
+                    // false statement about the data.
+                    const argNote = b.parameters_truncated_bytes !== undefined
+                        ? `   ← cut off, ${b.parameters_truncated_bytes} bytes in total`
+                        : (b.parameters_raw !== undefined ? '   ← arguments could not be parsed' : '');
+                    const resultBody = (b.result === undefined || b.result === null || b.result === '')
+                        ? '(no output)'
+                        : (typeof b.result === 'string' ? b.result : JSON.stringify(b.result));
+                    return `<div class="tool"><b>🔧 ${this.esc(shown)}</b>
+                        <pre>${this.esc((b.parameters_raw !== undefined
+                            ? b.parameters_raw
+                            : JSON.stringify(b.parameters || {}, null, 2)) + argNote)}</pre>
+                        ${b.result !== undefined ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(resultBody)}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
                     // Persisted conversations store tool results as their own
@@ -1024,23 +1037,24 @@
                     this.current = null;
                     break;
                 case 'tool_call': {
-                    // The canonical version of a call that also arrived as a
-                    // stream block: same call, better data (bare name, parsed
-                    // arguments). Upgrade that block rather than drawing a
-                    // second one.
+                    // A server-resolved tool arrives twice: as a stream block
+                    // and as this frame. The FRAME is dropped, because the
+                    // block has everything it has and two things it does not —
+                    // the CLI's tool_call_id, which is what tool_result events
+                    // are keyed by, and its own arguments, so nothing is copied
+                    // between calls and two parallel calls to the same tool
+                    // cannot swap arguments when their frames return out of
+                    // order.
                     //
-                    // Which stream blocks get a frame like this cannot be known
-                    // when the block opens, and cannot be predicted from the
-                    // name either — a server-declared tool with execute:"local"
-                    // is namespaced under the bridge and never sends one.
-                    const shadow = this.assistant.blocks.find((b) =>
-                        b.type === 'tool_call' && b._fromStream
-                        && (b.tool_name === d.tool_name || String(b.tool_name).endsWith('__' + d.tool_name)));
+                    // Matched on the bridge's own namespace only. An
+                    // open-ended `__` suffix also matched the operator's own
+                    // MCP servers, whose calls have no frame at all.
+                    const claims = (b) => b && b.type === 'tool_call' && b._fromStream && !b._claimed
+                        && (b.tool_name === 'mcp__bridge__' + d.tool_name || b.tool_name === d.tool_name);
+                    const shadow = this.assistant.blocks.find(claims)
+                        || (claims(this.current) ? this.current : null);
                     if (shadow) {
-                        shadow.tool_name = d.tool_name;
-                        shadow.parameters = d.parameters || {};
-                        shadow.tool_call_id = d.tool_call_id || shadow.tool_call_id;
-                        delete shadow._fromStream;
+                        shadow._claimed = true;
                         break;
                     }
                     // tool_call_id included so a later tool_result can find it.

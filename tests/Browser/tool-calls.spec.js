@@ -108,18 +108,61 @@ test('a run of tools can be counted and grouped by kind', async ({ page }) => {
 });
 
 test('a tool the server resolves is drawn once, not twice', async ({ page }) => {
-  // It arrives as a stream block AND as the dedicated tool_call event.
+  // It arrives as a stream block AND as the dedicated tool_call event. The
+  // block survives — it keeps the CLI's tool_call_id, which is what results are
+  // keyed by, and its own arguments.
   await ready(page);
   await feed(page, [
     { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__company_directory', tool_call_id: 't1' } },
     { event: 'block_delta', data: { block_index: 0, content: '{"name":"Jasper"}' } },
     { event: 'block_stop', data: { block_index: 0 } },
-    { event: 'tool_call', data: { tool_name: 'company_directory', parameters: { name: 'Jasper' } } },
+    { event: 'tool_call', data: { tool_name: 'company_directory', parameters: { name: 'Jasper' }, tool_call_id: 'mcp-1' } },
+    { event: 'tool_result', data: { tool_call_id: 't1', result: 'Jasper Bauer' } },
   ]);
 
   const b = await blocks(page);
   expect(b).toHaveLength(1);
-  expect(b[0].tool_name).toBe('company_directory');
+  expect(b[0].tool_call_id).toBe('t1');
+  // The result finds it, which is the point of keeping that id.
+  expect(b[0].result).toBe('Jasper Bauer');
+
+  // Shown without the MCP namespace — display formatting, not data.
+  const text = await page.evaluate(() =>
+    document.querySelector('ai-bridge-chat').shadowRoot.querySelector('.messages').textContent);
+  expect(text).toContain('company_directory');
+  expect(text).not.toContain('mcp__bridge__');
+});
+
+test('the operator\'s own MCP tool is not claimed by a bridge frame', async ({ page }) => {
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__playwright__navigate', tool_call_id: 'local' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"url":"LOCAL"}' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'block_start', data: { block_index: 1, block_type: 'tool_call', tool_name: 'mcp__bridge__navigate', tool_call_id: 'srv' } },
+    { event: 'block_delta', data: { block_index: 1, content: '{"url":"SERVER"}' } },
+    { event: 'block_stop', data: { block_index: 1 } },
+    { event: 'tool_call', data: { tool_name: 'navigate', parameters: { url: 'SERVER' }, tool_call_id: 'mcp-1' } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(2);
+  expect(b[0].parameters).toEqual({ url: 'LOCAL' });
+  expect(b[1].parameters).toEqual({ url: 'SERVER' });
+});
+
+test('a frame arriving before the block closes still draws one call', async ({ page }) => {
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { n: 1 }, tool_call_id: 'mcp-1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"n":1}' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].parameters).toEqual({ n: 1 });
 });
 
 test('arguments cut off mid-stream are kept rather than shown as none', async ({ page }) => {
@@ -184,9 +227,9 @@ test('a failed call with no output is still shown', async ({ page }) => {
   expect(html).toContain('res err');
 });
 
-test('a result whose call arrived as a tool_call frame finds its owner', async ({ page }) => {
-  // The frame's block used to be built without a tool_call_id, so its result
-  // could never be matched and always fell through to the orphan branch.
+test('a result whose call arrived only as a tool_call frame finds its owner', async ({ page }) => {
+  // With no stream block to claim, the frame stands alone — and its block must
+  // still carry an id, or its result orphans.
   await ready(page);
   await feed(page, [
     { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { n: 1 }, tool_call_id: 'mcp-1' } },

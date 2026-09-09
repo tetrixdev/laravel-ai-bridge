@@ -513,9 +513,12 @@ class AiBridgeManager
         });
 
         $stream->onDone(function (?array $usage, array $meta = []) use ($sink, $onTerminal) {
-            // Minus the CLI session handle, which is the server's to keep — see
-            // BufferingSink for the same decision.
-            unset($meta['cli_session_id']);
+            // An allowlist of the documented fields — see BufferingSink for the
+            // reasoning. cli_session_id is the server's to keep.
+            $meta = array_intersect_key($meta, array_flip([
+                'model', 'provider_version', 'stop_reason', 'cost_usd',
+                'duration_ms', 'duration_api_ms', 'num_turns', 'permission_denials',
+            ]));
 
             // Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
             // always runs even if the sink throws, preventing SSE clients from hanging.

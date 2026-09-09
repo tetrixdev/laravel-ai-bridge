@@ -99,8 +99,183 @@ test('a tool the server resolves is recorded once, not twice', function () {
 
     $tools = collect($blocks)->where('type', 'tool_call')->values();
 
+    // One block, and it is the STREAM one: it carries the CLI's own tool_call_id,
+    // which is what tool_result events are keyed by, and its own arguments — so
+    // nothing is copied between calls and nothing can be mis-attributed. The
+    // name stays as the CLI reported it; display formatting is the consumer's.
     expect($tools)->toHaveCount(1)
-        ->and($tools[0]['tool_name'])->toBe('company_directory');
+        ->and($tools[0]['tool_name'])->toBe('mcp__bridge__company_directory')
+        ->and($tools[0]['tool_call_id'])->toBe('toolu_2')
+        ->and($tools[0]['parameters'])->toBe(['name' => 'Jasper']);
+});
+
+test('a result still finds a server-resolved call after reconciliation', function () {
+    // The id kept must be the one results are keyed by. Replacing it with the
+    // frame's mcp-<rid>-<n> orphaned every result — the opposite of the fix it
+    // was written as.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => 'toolu_9',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"n":1}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchToolCall('roll_dice', ['n' => 1], 'mcp-req-1');
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 'toolu_9', 'result' => '17']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $call = collect($blocks)->firstWhere('type', 'tool_call');
+    $result = collect($blocks)->firstWhere('type', 'tool_result');
+
+    expect($call['tool_call_id'])->toBe($result['tool_call_id']);
+});
+
+test('parallel calls to one tool do not swap arguments when frames return out of order', function () {
+    // Positional matching copied the wrong frame's arguments onto a block. This
+    // file rejects exactly that reasoning about tool_results a few lines away.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        foreach ([['toolu_A', '{"n":"A"}'], ['toolu_B', '{"n":"B"}']] as $i => [$id, $args]) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => $id,
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $args]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+        }
+        // Frames come back reversed.
+        $h->dispatchToolCall('roll_dice', ['n' => 'B'], 'mcp-B');
+        $h->dispatchToolCall('roll_dice', ['n' => 'A'], 'mcp-A');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $calls = collect($blocks)->where('type', 'tool_call')->values();
+
+    expect($calls)->toHaveCount(2)
+        ->and($calls[0]['tool_call_id'])->toBe('toolu_A')
+        ->and($calls[0]['parameters'])->toBe(['n' => 'A'])
+        ->and($calls[1]['tool_call_id'])->toBe('toolu_B')
+        ->and($calls[1]['parameters'])->toBe(['n' => 'B']);
+});
+
+test('a server call with no stream block of its own is still recorded', function () {
+    // Where the match precision actually bites: a loose suffix rule lets a
+    // LOCAL namespaced block absorb the frame, and the server call — which had
+    // no block of its own — disappears from the record entirely.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__playwright__navigate', 'tool_call_id' => 'toolu_local',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"url":"LOCAL"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        // A server-resolved call the provider reported no block for.
+        $h->dispatchToolCall('navigate', ['url' => 'SERVER'], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $calls = collect($blocks)->where('type', 'tool_call')->values();
+
+    expect($calls)->toHaveCount(2)
+        ->and($calls[0]['parameters'])->toBe(['url' => 'LOCAL'])
+        ->and($calls[1]['tool_name'])->toBe('navigate')
+        ->and($calls[1]['parameters'])->toBe(['url' => 'SERVER']);
+});
+
+test('an operator\'s own MCP tool is not claimed by a bridge frame', function () {
+    // In native posture the operator's own MCP servers are in play. An
+    // open-ended `__` suffix match let a bridge frame claim one of those calls
+    // and destroy its only record.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__playwright__navigate', 'tool_call_id' => 'toolu_local',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"url":"LOCAL"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 1, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__navigate', 'tool_call_id' => 'toolu_srv',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => '{"url":"SERVER"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+
+        $h->dispatchToolCall('navigate', ['url' => 'SERVER'], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $calls = collect($blocks)->where('type', 'tool_call')->values();
+
+    expect($calls)->toHaveCount(2)
+        ->and($calls[0]['tool_name'])->toBe('mcp__playwright__navigate')
+        ->and($calls[0]['parameters'])->toBe(['url' => 'LOCAL'])
+        ->and($calls[1]['tool_name'])->toBe('mcp__bridge__navigate');
+});
+
+test('a frame arriving before the block closes still records one call', function () {
+    // Reconciling on arrival made this order-sensitive, and PROTOCOL.md does
+    // not pin the order down.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__roll_dice', 'tool_call_id' => 'toolu_1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"n":1}']));
+        $h->dispatchToolCall('roll_dice', ['n' => 1], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->where('type', 'tool_call'))->toHaveCount(1);
+});
+
+test('a block the stream never closed is not lost when the next one opens', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"command":"ls"}']));
+        // no block_stop
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 1, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => 'done!']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $call = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($call)->not->toBeNull()
+        ->and($call['tool_name'])->toBe('Bash')
+        ->and($call['parameters'])->toBe(['command' => 'ls']);
+});
+
+test('a multi-byte argument payload does not destroy the whole turn', function () {
+    // substr cuts at a byte offset, so a character straddling the boundary
+    // leaves invalid UTF-8 — the blocks cast then fails and the ENTIRE
+    // assistant message is lost, prose and all.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Write',
+        ]));
+        // 'é' is two bytes. The single 'x' shifts the alignment so that byte
+        // 65536 lands in the MIDDLE of a character — without it the cut happens
+        // to fall on a boundary and substr produces valid UTF-8 by luck, which
+        // is how the first version of this test passed against the bug.
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => '{"content":"x'.str_repeat('é', 40000).'"}',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 1, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => 'the prose survived']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($blocks)->not->toBeEmpty();
+    expect(collect($blocks)->firstWhere('type', 'text')['text'])->toBe('the prose survived');
+    expect(mb_check_encoding(collect($blocks)->firstWhere('type', 'tool_call')['parameters_raw'], 'UTF-8'))->toBeTrue();
 });
 
 test('a tool result is recorded with its failure status', function () {

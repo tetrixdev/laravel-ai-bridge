@@ -129,3 +129,67 @@ test('attach() buffers tool_call as a single event', function () {
         'tool_call_id' => 'c-1',
     ]);
 });
+
+test('the buffer carries a tool result, including whether it failed', function () {
+    // Without a tool_result handler here, a result could never reach a browser
+    // even once the bridge started sending them.
+    $store = new ArrayStreamStore();
+    $handler = new StreamHandler(fakeBufferProvider(), 'rid-tr');
+    BufferingSink::attach($handler, $store);
+
+    $handler->dispatchToolResult('toolu_1', 'boom', true);
+
+    $events = $store->range('rid-tr');
+
+    expect($events)->toHaveCount(1)
+        ->and($events[0]['event'])->toBe('tool_result')
+        ->and($events[0]['data']['result'])->toBe('boom')
+        ->and($events[0]['data']['is_error'])->toBeTrue();
+});
+
+test('a null tool result keeps its key, so the call does not look forever-running', function () {
+    $store = new ArrayStreamStore();
+    $handler = new StreamHandler(fakeBufferProvider(), 'rid-null');
+    BufferingSink::attach($handler, $store);
+
+    $handler->dispatchToolResult('toolu_1', null, true);
+
+    expect($store->range('rid-null')[0]['data'])->toHaveKey('result');
+});
+
+test('the buffer carries rate limit status without ending the turn', function () {
+    $store = new ArrayStreamStore();
+    $handler = new StreamHandler(fakeBufferProvider(), 'rid-rl');
+    BufferingSink::attach($handler, $store);
+
+    $handler->dispatchRateLimit('claude', ['status' => 'allowed']);
+
+    $events = $store->range('rid-rl');
+
+    expect($events)->toHaveCount(1)
+        ->and($events[0]['event'])->toBe('rate_limit')
+        ->and($events[0]['data']['provider'])->toBe('claude');
+});
+
+test('a browser sees the documented turn metadata and not the session handle', function () {
+    // An allowlist, not a denylist: `done` carries whatever the provider chose
+    // to report, and a denylist forwards every future field by default —
+    // including one nobody has evaluated yet.
+    $store = new ArrayStreamStore();
+    $handler = new StreamHandler(fakeBufferProvider(), 'rid-meta');
+    BufferingSink::attach($handler, $store);
+
+    $handler->dispatchDone(['input_tokens' => 1], [
+        'model' => 'claude-sonnet-5',
+        'cost_usd' => 0.01,
+        'cli_session_id' => 'sess-secret',
+        'some_future_field' => 'not yet evaluated',
+    ]);
+
+    $done = collect($store->range('rid-meta'))->firstWhere('event', 'done');
+
+    expect($done['data']['model'])->toBe('claude-sonnet-5')
+        ->and($done['data']['cost_usd'])->toBe(0.01)
+        ->and($done['data'])->not->toHaveKey('cli_session_id')
+        ->and($done['data'])->not->toHaveKey('some_future_field');
+});

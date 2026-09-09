@@ -37,6 +37,9 @@ final class ConversationRecorder
      */
     private const MAX_ARGUMENT_BYTES = 65536;
 
+    /** The MCP namespace the bridge registers its own tools under. */
+    private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
+
     /**
      * Does this stream block describe the same call as a `tool_call` frame?
      *
@@ -55,8 +58,18 @@ final class ConversationRecorder
      */
     private static function describesSameCall(string $blockToolName, string $frameToolName): bool
     {
-        return $blockToolName === $frameToolName
-            || str_ends_with($blockToolName, '__'.$frameToolName);
+        // Deliberately NOT an open-ended `__` suffix test. That matched any
+        // `mcp__<anything>__<name>`, so in `native` posture a call to the
+        // OPERATOR's own MCP server was claimed by a bridge frame for a
+        // same-named server tool — destroying the local call's only record,
+        // which is the very bug this reconciliation exists to prevent, reached
+        // from the other side.
+        //
+        // PROTOCOL.md is explicit: a `mcp__bridge__<tool>` block has a frame,
+        // and anything else has nothing else. The bare match covers providers
+        // that report a tool name without a namespace.
+        return $blockToolName === self::BRIDGE_TOOL_PREFIX.$frameToolName
+            || $blockToolName === $frameToolName;
     }
 
     /**
@@ -81,7 +94,13 @@ final class ConversationRecorder
         if (strlen($trimmed) > self::MAX_ARGUMENT_BYTES) {
             return [
                 'parameters' => [],
-                'parameters_raw' => substr($trimmed, 0, self::MAX_ARGUMENT_BYTES),
+                // mb_strcut, NOT substr. substr cuts at a byte offset, so a
+                // multi-byte character straddling the boundary leaves invalid
+                // UTF-8 — the blocks cast then fails to encode and the ENTIRE
+                // assistant message is lost, prose and all, not just this
+                // block. A UTF-8 file with one accented character past 64KB is
+                // enough, and a Write call's arguments are a whole file.
+                'parameters_raw' => mb_strcut($trimmed, 0, self::MAX_ARGUMENT_BYTES, 'UTF-8'),
                 'parameters_truncated_bytes' => strlen($trimmed),
             ];
         }
@@ -118,7 +137,13 @@ final class ConversationRecorder
         // (truncated stream) can't make us swallow subsequent block_deltas.
         $inStreamToolCall = false;
 
-        $handler->onBlockStart(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
+        $handler->onBlockStart(function (StreamEvent $event) use (&$blocks, &$current, &$inStreamToolCall) {
+            // A block the stream never closed used to be overwritten here and
+            // lost outright — flushCurrent only rescues one still open when the
+            // TURN ends, so a truncated block followed by any other block
+            // vanished from the record, arguments and all.
+            self::flushCurrent($blocks, $current);
+
             $blockType = $event->data['block_type'] ?? 'text';
             if ($blockType === 'tool_call') {
                 $toolName = $event->data['tool_name'] ?? null;
@@ -179,29 +204,15 @@ final class ConversationRecorder
             }
         });
         $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
-            // Upgrade the stream block this frame is the canonical version of,
-            // rather than appending a second entry for the same call. The frame
-            // carries the bare name and the parsed arguments, both of which are
-            // better than what the block had.
-            foreach ($blocks as $i => $block) {
-                if (($block['type'] ?? '') !== 'tool_call' || ! ($block['_from_stream'] ?? false)) {
-                    continue;
-                }
-                if (! self::describesSameCall((string) ($block['tool_name'] ?? ''), $name)) {
-                    continue;
-                }
-
-                $blocks[$i] = [
-                    'type' => 'tool_call',
-                    'tool_name' => $name,
-                    'parameters' => $params,
-                    'tool_call_id' => $callId,
-                ];
-
-                return;
-            }
-
-            $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
+            // Recorded as-is. Reconciliation against the stream block happens
+            // at persist time, where the ordering of the two is irrelevant.
+            $blocks[] = [
+                'type' => 'tool_call',
+                'tool_name' => $name,
+                'parameters' => $params,
+                'tool_call_id' => $callId,
+                '_from_frame' => true,
+            ];
         });
         $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks) {
             // Record the tool_result with the id the dispatcher provided. In
@@ -309,15 +320,69 @@ final class ConversationRecorder
      * @param  array<int, array<string, mixed>>  $blocks
      * @param  array<string, mixed>|null  $usage
      */
-    private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
+    /**
+     * Drop each `tool_call` frame that duplicates a stream block, and clear the
+     * bookkeeping both carried.
+     *
+     * A server-resolved tool arrives twice: as a stream block (namespaced name,
+     * the CLI's own id, arguments as delta text) and as a WebSocket frame (bare
+     * name, parsed arguments). The FRAME is the one dropped, because the block
+     * has everything it has and two things it does not:
+     *
+     *  - The CLI's `toolu_…` id, which is what `tool_result` events are keyed
+     *    by. An earlier version replaced it with the frame's `mcp-<rid>-<n>`,
+     *    so every result then failed to find its call — the opposite of the fix
+     *    it was written as.
+     *  - Nothing to mis-attribute. That version copied the frame's arguments
+     *    onto a matched block, so two parallel calls to the same tool whose
+     *    frames returned out of order swapped arguments with each other. This
+     *    file rejects exactly that reasoning a few lines below, about
+     *    tool_results, and it was quietly re-adopted here.
+     *
+     * Reconciling at persist rather than on arrival makes it independent of
+     * which of the two turns up first, which PROTOCOL.md does not pin down.
+     *
+     * @param  array<int, array<string, mixed>>  $blocks
+     * @return array<int, array<string, mixed>>
+     */
+    private static function reconcileToolCalls(array $blocks): array
     {
-        // Internal bookkeeping for reconciling a stream block against its
-        // tool_call frame. Nothing outside this class should see it.
-        $blocks = array_map(static function (array $block): array {
-            unset($block['_from_stream']);
+        $claimed = [];
+
+        foreach ($blocks as $index => $block) {
+            if (($block['type'] ?? '') !== 'tool_call' || ! ($block['_from_frame'] ?? false)) {
+                continue;
+            }
+
+            foreach ($blocks as $candidate => $streamBlock) {
+                if (($streamBlock['type'] ?? '') !== 'tool_call' || ! ($streamBlock['_from_stream'] ?? false)) {
+                    continue;
+                }
+                if (isset($claimed[$candidate])) {
+                    continue;
+                }
+                if (! self::describesSameCall((string) ($streamBlock['tool_name'] ?? ''), (string) ($block['tool_name'] ?? ''))) {
+                    continue;
+                }
+
+                // One frame cancels against one block; a third call with no
+                // frame of its own keeps its block rather than being consumed.
+                $claimed[$candidate] = true;
+                unset($blocks[$index]);
+                break;
+            }
+        }
+
+        return array_values(array_map(static function (array $block): array {
+            unset($block['_from_stream'], $block['_from_frame']);
 
             return $block;
-        }, $blocks);
+        }, $blocks));
+    }
+
+    private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
+    {
+        $blocks = self::reconcileToolCalls($blocks);
 
         $text = '';
         foreach ($blocks as $block) {
