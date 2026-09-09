@@ -140,7 +140,124 @@ test('arguments cut off mid-stream are kept raw rather than reported as none', f
 
     $tool = collect($blocks)->firstWhere('type', 'tool_call');
 
-    expect($tool['parameters'])->toBe(['_raw' => '{"file_pa']);
+    // Kept as a sibling key, not inside parameters: a tool may genuinely take
+    // an argument called `_raw`, and a sentinel that can appear in the data is
+    // the same mistake as reading failure out of an "Error:" prefix.
+    expect($tool['parameters'])->toBe([])
+        ->and($tool['parameters_raw'])->toBe('{"file_pa');
+});
+
+test('a tool the bridge runs locally on the server\'s behalf is kept', function () {
+    // A server-declared tool with execute: "local" runs ON the bridge and never
+    // emits a tool_call frame, yet it still reaches the model namespaced under
+    // mcp__bridge__. Identifying the shadow by that prefix deleted exactly these
+    // calls and left their results orphaned.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__fetch_mail', 'tool_call_id' => 'toolu_local',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"box":"inbox"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        // No tool_call frame — the bridge ran it and returned the result itself.
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 'toolu_local', 'result' => '12 messages']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and($tool['tool_name'])->toBe('mcp__bridge__fetch_mail')
+        ->and($tool['parameters'])->toBe(['box' => 'inbox']);
+});
+
+test('arguments survive a turn that dies before the block closes', function () {
+    // A truncated turn never sends block_stop — that is what truncated means —
+    // so decoding only there left a reader shown "called with no arguments".
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"command":"echo hi"}']));
+        // no block_stop
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool['parameters'])->toBe(['command' => 'echo hi'])
+        ->and($tool)->not->toHaveKey('text');
+});
+
+test('a real argument called _raw is not mistaken for truncation', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Custom',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => '{"_raw":"i am a real argument"}',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool['parameters'])->toBe(['_raw' => 'i am a real argument'])
+        ->and($tool)->not->toHaveKey('parameters_raw');
+});
+
+test('valid JSON that is not an argument object keeps its text', function () {
+    foreach (['[1,2,3]', 'null', '123', '"hello"'] as $payload) {
+        $blocks = recordTurn(function (StreamHandler $h) use ($payload) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Odd',
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => $payload]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+            $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+        });
+
+        $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+        expect($tool['parameters'])->toBe([])
+            ->and($tool['parameters_raw'])->toBe($payload);
+    }
+});
+
+test('enormous arguments are truncated, and say so', function () {
+    // A Write call's arguments are a whole file. Recording these is a new
+    // growth path in the messages table; silent truncation would be worse.
+    $body = str_repeat('x', 80000);
+
+    $blocks = recordTurn(function (StreamHandler $h) use ($body) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Write',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => '{"content":"'.$body.'"}',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect(strlen($tool['parameters_raw']))->toBe(65536)
+        ->and($tool['parameters_truncated_bytes'])->toBeGreaterThan(65536);
+});
+
+test('internal reconciliation bookkeeping does not reach a consumer', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->firstWhere('type', 'tool_call'))->not->toHaveKey('_from_stream');
 });
 
 test('a nameless tool block is still dropped', function () {

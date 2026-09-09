@@ -29,6 +29,16 @@ use Tetrix\AiBridge\Auth\TokenManager;
 |
 */
 
+beforeEach(function () {
+    Event::fake();
+    $this->manager = new BridgeConnectionManager();
+    $this->messageHandler = new MessageHandler(
+        connectionManager: $this->manager,
+        tokenManager: app(TokenManager::class),
+        toolRegistry: new ToolRegistry(),
+    );
+});
+
 function passthroughHandler(): StreamHandler
 {
     $provider = Mockery::mock(StreamableProvider::class);
@@ -171,6 +181,25 @@ test('a non-boolean is_error is ignored rather than coerced', function () {
     expect($seen)->toBeNull();
 });
 
+test('a null result is still sent, so the call does not look forever-running', function () {
+    // Filtering nulls out of the payload drops the `result` key entirely. A
+    // consumer waiting for it to appear — which is how the browser decides a
+    // call has finished — shows the call as still running for ever. A failing
+    // tool commonly has no output, so this is the failure path.
+    $event = StreamEvent::toolResult('req-1', 'tc1', null, true);
+
+    expect($event->data)->toHaveKey('result')
+        ->and($event->data['result'])->toBeNull()
+        ->and($event->data['is_error'])->toBeTrue();
+});
+
+test('an unreported status is still omitted', function () {
+    $event = StreamEvent::toolResult('req-1', 'tc1', 'output');
+
+    expect($event->data)->not->toHaveKey('is_error')
+        ->and($event->data['result'])->toBe('output');
+});
+
 test('rate_limit reaches a callback and does not end the turn', function () {
     $handler = passthroughHandler();
     $seen = null;
@@ -248,16 +277,6 @@ test('lastDoneMeta exposes the metadata after the turn', function () {
     ]));
 
     expect($handler->lastDoneMeta()['model'])->toBe('claude-opus-5');
-});
-
-beforeEach(function () {
-    Event::fake();
-    $this->manager = new BridgeConnectionManager();
-    $this->messageHandler = new MessageHandler(
-        connectionManager: $this->manager,
-        tokenManager: app(TokenManager::class),
-        toolRegistry: new ToolRegistry(),
-    );
 });
 
 /*

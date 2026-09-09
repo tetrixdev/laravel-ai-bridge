@@ -96,11 +96,16 @@ final class StreamEvent
      */
     public static function toolResult(string $requestId, string $toolCallId, mixed $result, ?bool $isError = null): self
     {
-        return new self($requestId, MessageTypes::TOOL_RESULT, array_filter([
-            'tool_call_id' => $toolCallId,
-            'result' => $result,
-            'is_error' => $isError,
-        ], static fn ($value) => $value !== null));
+        // Only is_error is conditional. Filtering `result` too would erase a
+        // null result — which a failing tool commonly has — and a consumer
+        // waiting for `result` to appear would show the call as still running
+        // for ever.
+        $data = ['tool_call_id' => $toolCallId, 'result' => $result];
+        if ($isError !== null) {
+            $data['is_error'] = $isError;
+        }
+
+        return new self($requestId, MessageTypes::TOOL_RESULT, $data);
     }
 
     /**

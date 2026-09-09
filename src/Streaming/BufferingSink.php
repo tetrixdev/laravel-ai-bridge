@@ -83,11 +83,14 @@ final class BufferingSink
         // bridge sends them, StreamHandler dispatches them, and the SSE buffer
         // simply had no handler, so they stopped here.
         $handler->onToolResult(function (string $toolCallId, mixed $result, ?bool $isError = null) use ($append): void {
-            $append(MessageTypes::TOOL_RESULT, array_filter([
-                'tool_call_id' => $toolCallId,
-                'result' => $result,
-                'is_error' => $isError,
-            ], static fn ($value) => $value !== null));
+            // `result` is sent even when null — dropping the key leaves the
+            // browser waiting for a result that has already arrived, and the
+            // call renders as still running for ever.
+            $data = ['tool_call_id' => $toolCallId, 'result' => $result];
+            if ($isError !== null) {
+                $data['is_error'] = $isError;
+            }
+            $append(MessageTypes::TOOL_RESULT, $data);
         });
 
         $handler->onRateLimit(function (string $provider, array $info) use ($append): void {
@@ -101,6 +104,11 @@ final class BufferingSink
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {
+            // Everything the provider reported, minus the CLI session handle.
+            // That is a resumable credential-ish token the server keeps to
+            // itself; a browser has no use for it and this buffer is read by
+            // one. The rest is what the turn cost and how it ended.
+            unset($meta['cli_session_id']);
             $append(MessageTypes::DONE, ['usage' => $usage] + $meta);
             self::completeQuietly($store, $rid, 'completed');
         });

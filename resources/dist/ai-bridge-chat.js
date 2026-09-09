@@ -461,17 +461,25 @@
                     // worth showing — never render an empty "🔧" block.
                     if (!b.tool_name) return '';
                     return `<div class="tool"><b>🔧 ${this.esc(b.tool_name)}</b>
-                        <pre>${this.esc(JSON.stringify(b.parameters || {}, null, 2))}</pre>
+                        <pre>${this.esc(b.parameters_raw !== undefined
+                            ? b.parameters_raw + '   ← arguments were cut off'
+                            : JSON.stringify(b.parameters || {}, null, 2))}</pre>
                         ${b.result !== undefined ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
                     // Persisted conversations store tool results as their own
-                    // blocks. An empty result has nothing to show — rendering it
-                    // would leave a blank grey bubble. Show it only when there
-                    // is content.
+                    // blocks, so THIS is the branch a page reload takes — the
+                    // live path merges them into the call instead. It used to
+                    // ignore is_error entirely, so a failed command read as a
+                    // success the moment the reader refreshed.
                     const r = b.result;
-                    if (r === undefined || r === null || r === '') return '';
-                    return `<div class="tool"><div class="res">→ ${this.esc(typeof r === 'string' ? r : JSON.stringify(r))}</div></div>`;
+                    const empty = (r === undefined || r === null || r === '');
+                    // An empty SUCCESS has nothing to show. An empty FAILURE
+                    // still has to appear, or the failed call vanishes from the
+                    // transcript while its successful neighbours are drawn.
+                    if (empty && !b.is_error) return '';
+                    const body = empty ? '(no output)' : (typeof r === 'string' ? r : JSON.stringify(r));
+                    return `<div class="tool"><div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(body)}</div></div>`;
                 }
                 // Skip empty text blocks — a blank bubble is just visual noise.
                 if (!b.text) return '';
@@ -986,13 +994,14 @@
                         // only thing that will ever describe it. Skipping those
                         // too — which is what this used to do — is why a run of
                         // them showed as nothing at all.
-                        if (!d.tool_name || d.tool_name.indexOf('mcp__bridge__') === 0) {
+                        if (typeof d.tool_name !== 'string' || !d.tool_name) {
                             this.current = null;
                             break;
                         }
                         this.current = {
                             type: 'tool_call', tool_name: d.tool_name,
                             tool_call_id: d.tool_call_id, text: '', parameters: {},
+                            _fromStream: true,
                         };
                         this.assistant.blocks.push(this.current);
                         break;
@@ -1011,16 +1020,36 @@
                     // keep the raw text if it does not parse, because a
                     // truncated call and a call with no arguments should not
                     // look the same.
-                    if (this.current && this.current.type === 'tool_call') {
-                        const raw = (this.current.text || '').trim();
-                        this.current.parameters = raw ? this.parseArgs(raw) : {};
-                        delete this.current.text;
-                    }
+                    this.closeToolBlock();
                     this.current = null;
                     break;
-                case 'tool_call':
-                    this.assistant.blocks.push({ type: 'tool_call', tool_name: d.tool_name, parameters: d.parameters || {} });
+                case 'tool_call': {
+                    // The canonical version of a call that also arrived as a
+                    // stream block: same call, better data (bare name, parsed
+                    // arguments). Upgrade that block rather than drawing a
+                    // second one.
+                    //
+                    // Which stream blocks get a frame like this cannot be known
+                    // when the block opens, and cannot be predicted from the
+                    // name either — a server-declared tool with execute:"local"
+                    // is namespaced under the bridge and never sends one.
+                    const shadow = this.assistant.blocks.find((b) =>
+                        b.type === 'tool_call' && b._fromStream
+                        && (b.tool_name === d.tool_name || String(b.tool_name).endsWith('__' + d.tool_name)));
+                    if (shadow) {
+                        shadow.tool_name = d.tool_name;
+                        shadow.parameters = d.parameters || {};
+                        shadow.tool_call_id = d.tool_call_id || shadow.tool_call_id;
+                        delete shadow._fromStream;
+                        break;
+                    }
+                    // tool_call_id included so a later tool_result can find it.
+                    this.assistant.blocks.push({
+                        type: 'tool_call', tool_name: d.tool_name,
+                        parameters: d.parameters || {}, tool_call_id: d.tool_call_id,
+                    });
                     break;
+                }
                 case 'tool_result': {
                     // Attach to the call it belongs to, so the output is shown
                     // under the tool that produced it rather than floating
@@ -1051,6 +1080,10 @@
             this.scheduleRender();
         }
         finish() {
+            // A turn killed mid-arguments never sends block_stop, so decode
+            // here too or the block keeps its raw text and renders as "called
+            // with no arguments" — the confusion the raw text exists to prevent.
+            this.closeToolBlock();
             this.clearWatchdog();
             this.detachStreamSource();
             this.s.streaming = false; this.s.pulse = false; this.current = null;
@@ -1058,11 +1091,24 @@
             this.renderAll();
         }
 
-        // Parse a tool call's accumulated argument JSON, keeping the raw text
-        // when it does not parse rather than reporting no arguments at all.
-        parseArgs(raw) {
-            try { const v = JSON.parse(raw); return (v && typeof v === 'object') ? v : { _raw: raw }; }
-            catch (e) { return { _raw: raw }; }
+        // Decode the argument JSON a tool block's deltas accumulated.
+        //
+        // The raw text is kept as a SIBLING field, never as a `_raw` key inside
+        // parameters: a tool may genuinely take an argument called `_raw`, and a
+        // sentinel that can appear in the data is the same mistake as reading
+        // failure out of an "Error:" prefix.
+        closeToolBlock() {
+            const b = this.current;
+            if (!b || b.type !== 'tool_call' || b.text === undefined) return;
+            const raw = (b.text || '').trim();
+            delete b.text;
+            if (!raw) { b.parameters = {}; return; }
+            try {
+                const v = JSON.parse(raw);
+                if (v && typeof v === 'object' && !Array.isArray(v)) { b.parameters = v; return; }
+            } catch (e) { /* falls through to the raw form below */ }
+            b.parameters = {};
+            b.parameters_raw = raw;
         }
 
         scrollDown(stick = true, keepTop = 0) {

@@ -131,7 +131,71 @@ test('arguments cut off mid-stream are kept rather than shown as none', async ({
   ]);
 
   const b = await blocks(page);
-  expect(b[0].parameters).toEqual({ _raw: '{"file_pa' });
+  // A sibling field, not a `_raw` key inside parameters — a tool may genuinely
+  // take an argument called `_raw`.
+  expect(b[0].parameters).toEqual({});
+  expect(b[0].parameters_raw).toBe('{"file_pa');
+});
+
+test('arguments survive a turn that is cancelled before the block closes', async ({ page }) => {
+  // A turn killed mid-arguments never sends block_stop — that is what
+  // truncated means — so decoding only there leaves the block showing "called
+  // with no arguments".
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'Bash', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"command":"echo hi"}' } },
+    { event: 'error', data: { code: 'provider_error', message: 'died' } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b[0].parameters).toEqual({ command: 'echo hi' });
+  expect(b[0]).not.toHaveProperty('text');
+});
+
+test('a server-declared tool the bridge runs locally is still drawn', async ({ page }) => {
+  // execute:"local" tools are namespaced under the bridge but never send a
+  // tool_call frame, so skipping blocks by namespace deleted exactly these.
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__fetch_mail', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"box":"inbox"}' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'tool_result', data: { tool_call_id: 't1', result: '12 messages' } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].tool_name).toBe('mcp__bridge__fetch_mail');
+  expect(b[0].parameters).toEqual({ box: 'inbox' });
+  expect(b[0].result).toBe('12 messages');
+});
+
+test('a failed call with no output is still shown', async ({ page }) => {
+  // An empty successful result has nothing to show; an empty FAILURE must not
+  // vanish while its successful neighbours are drawn.
+  await ready(page);
+  await feed(page, [
+    { event: 'tool_result', data: { tool_call_id: 'orphan', result: '', is_error: true } },
+  ]);
+
+  const html = await page.evaluate(() =>
+    document.querySelector('ai-bridge-chat').shadowRoot.querySelector('.messages').innerHTML);
+  expect(html).toContain('res err');
+});
+
+test('a result whose call arrived as a tool_call frame finds its owner', async ({ page }) => {
+  // The frame's block used to be built without a tool_call_id, so its result
+  // could never be matched and always fell through to the orphan branch.
+  await ready(page);
+  await feed(page, [
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { n: 1 }, tool_call_id: 'mcp-1' } },
+    { event: 'tool_result', data: { tool_call_id: 'mcp-1', result: '17' } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].result).toBe('17');
 });
 
 test('a rate limit notice is recorded but not drawn into the answer', async ({ page }) => {

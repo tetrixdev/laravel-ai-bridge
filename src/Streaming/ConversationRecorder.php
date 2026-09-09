@@ -27,42 +27,80 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
 final class ConversationRecorder
 {
     /**
-     * The MCP namespace the bridge registers its own server under.
+     * How much of a tool call's arguments to persist.
      *
-     * A server-declared tool reaches the model as `mcp__bridge__<tool>` and is
-     * relayed back over the WebSocket as a `tool_call` frame, so it is recorded
-     * from that frame instead of from the stream block. Anything else ran on the
-     * operator's own machine and the stream block is its only record.
+     * Locally-run tool calls are now recorded, and some of them carry a whole
+     * file: a `Write` call's arguments are the file body. Storing that verbatim
+     * in every recorded turn is an unbounded growth path in the messages table
+     * that did not exist while these blocks were being dropped. Truncation is
+     * marked explicitly rather than done silently.
      */
-    private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
+    private const MAX_ARGUMENT_BYTES = 65536;
 
-    /** Is this tool one the server resolves, rather than one that ran locally? */
-    private static function isServerResolved(string $toolName): bool
+    /**
+     * Does this stream block describe the same call as a `tool_call` frame?
+     *
+     * The question is NOT "is it namespaced under the bridge" — that was the
+     * first answer here and it is wrong. A server-declared tool with
+     * `execute: "local"` is run BY the bridge and never emits a `tool_call`
+     * frame (PROTOCOL.md), yet it still reaches the model as
+     * `mcp__bridge__<tool>`; matching on the prefix deleted exactly those calls
+     * and left their results orphaned. The reverse also fails: in `native`
+     * posture an operator's own MCP server named `bridge` produces the same
+     * prefix for tools this server never declared.
+     *
+     * So the shadow is identified by the frame that actually arrives. A tool
+     * reaches the model namespaced (`mcp__bridge__roll_dice`) and comes back
+     * over the WebSocket under its bare name (`roll_dice`).
+     */
+    private static function describesSameCall(string $blockToolName, string $frameToolName): bool
     {
-        return str_starts_with($toolName, self::BRIDGE_TOOL_PREFIX);
+        return $blockToolName === $frameToolName
+            || str_ends_with($blockToolName, '__'.$frameToolName);
     }
 
     /**
-     * Decode a locally-run tool call's arguments.
+     * Decode a tool call's arguments from the text its deltas carried.
      *
      * The bridge sends them as one delta carrying the complete JSON object, so
-     * this normally parses. When it does not — a turn truncated mid-arguments —
-     * the raw text is kept under `_raw` rather than discarded, because "the
-     * arguments were cut off" and "the tool was called with none" are different
-     * things and a reader should be able to tell them apart.
+     * this normally parses. When it does not — a turn truncated mid-arguments,
+     * or a value that is not an object — the text is kept under a SIBLING key
+     * rather than inside `parameters`, because "the arguments were cut off" and
+     * "the tool was called with none" are different things and a reader should
+     * be able to tell them apart.
      *
-     * @return array<string, mixed>
+     * Deliberately not a `_raw` key inside `parameters`: a tool may genuinely
+     * take an argument called `_raw`, and a sentinel that can appear in the
+     * data is the same mistake as reading failure out of an `Error:` prefix.
+     *
+     * @return array<string, mixed> the `parameters` / `parameters_raw` pair
      */
     private static function decodeArguments(string $text): array
     {
         $trimmed = trim($text);
+        if (strlen($trimmed) > self::MAX_ARGUMENT_BYTES) {
+            return [
+                'parameters' => [],
+                'parameters_raw' => substr($trimmed, 0, self::MAX_ARGUMENT_BYTES),
+                'parameters_truncated_bytes' => strlen($trimmed),
+            ];
+        }
+
         if ($trimmed === '') {
-            return [];
+            return ['parameters' => []];
         }
 
         $decoded = json_decode($trimmed, true);
 
-        return is_array($decoded) ? $decoded : ['_raw' => $trimmed];
+        // A JSON list, scalar, or null is valid JSON but not an argument
+        // object, and json_decode also returns null past its depth limit. All
+        // of those keep the text rather than pretending to a shape they do not
+        // have.
+        if (is_array($decoded) && ! array_is_list($decoded)) {
+            return ['parameters' => $decoded];
+        }
+
+        return ['parameters' => [], 'parameters_raw' => $trimmed];
     }
 
     /**
@@ -85,18 +123,16 @@ final class ConversationRecorder
             if ($blockType === 'tool_call') {
                 $toolName = $event->data['tool_name'] ?? null;
 
-                // A tool the SERVER resolves arrives twice: once as this block
-                // and once as the canonical WS tool_call frame, which carries
-                // the parsed arguments. Recording both shows the same call
-                // twice, so the block is dropped and onToolCall below wins.
+                // Recorded now, and reconciled later. A tool the SERVER
+                // resolves also arrives as a `tool_call` frame carrying parsed
+                // arguments; onToolCall below upgrades this block in place
+                // rather than appending a second one.
                 //
-                // A tool that ran on the operator's own machine — Bash, Read,
-                // an editor — has no WS frame, so this block is the only record
-                // there will ever be. Dropping it unconditionally, which is what
-                // this used to do, is why a chat could only say "4 tool calls":
-                // the names were being thrown away here, one layer after being
-                // thrown away in StreamHandler.
-                if ($toolName === null || $toolName === '' || self::isServerResolved($toolName)) {
+                // Whether that frame comes cannot be known here — it arrives
+                // after the block closes — and it cannot be predicted from the
+                // name either, which is what the first version of this tried.
+                // A block with no name carries nothing worth showing.
+                if ($toolName === null || $toolName === '') {
                     $inStreamToolCall = true;
                     $current = null;
 
@@ -108,6 +144,7 @@ final class ConversationRecorder
                     'type' => 'tool_call',
                     'tool_name' => $toolName,
                     'text' => '',
+                    '_from_stream' => true,
                 ];
                 if (isset($event->data['tool_call_id']) && is_string($event->data['tool_call_id'])) {
                     $current['tool_call_id'] = $event->data['tool_call_id'];
@@ -136,15 +173,34 @@ final class ConversationRecorder
                 // arguments JSON. Decode it so a consumer gets the same shape
                 // as a server-resolved call, and keep the raw text when it does
                 // not parse rather than reporting no arguments at all.
-                if (($current['type'] ?? '') === 'tool_call') {
-                    $current['parameters'] = self::decodeArguments($current['text'] ?? '');
-                    unset($current['text']);
-                }
+                $current = self::finaliseToolCall($current);
                 $blocks[] = $current;
                 $current = null;
             }
         });
         $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
+            // Upgrade the stream block this frame is the canonical version of,
+            // rather than appending a second entry for the same call. The frame
+            // carries the bare name and the parsed arguments, both of which are
+            // better than what the block had.
+            foreach ($blocks as $i => $block) {
+                if (($block['type'] ?? '') !== 'tool_call' || ! ($block['_from_stream'] ?? false)) {
+                    continue;
+                }
+                if (! self::describesSameCall((string) ($block['tool_name'] ?? ''), $name)) {
+                    continue;
+                }
+
+                $blocks[$i] = [
+                    'type' => 'tool_call',
+                    'tool_name' => $name,
+                    'parameters' => $params,
+                    'tool_call_id' => $callId,
+                ];
+
+                return;
+            }
+
             $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
         });
         $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks) {
@@ -217,9 +273,36 @@ final class ConversationRecorder
     private static function flushCurrent(array &$blocks, ?array &$current): void
     {
         if ($current !== null) {
-            $blocks[] = $current;
+            // Also on this path, which is the one a TRUNCATED turn takes. A
+            // turn that dies mid-arguments never sends block_stop — that is
+            // what truncated means — so decoding only there left the block with
+            // a stray `text` key, no `parameters`, and a reader shown "called
+            // with no arguments": exactly the confusion the raw text exists to
+            // prevent.
+            $blocks[] = self::finaliseToolCall($current);
             $current = null;
         }
+    }
+
+    /**
+     * Turn an in-flight block into its stored form.
+     *
+     * For a tool call that means decoding the arguments its deltas carried.
+     * Everything else is stored as it stands.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>
+     */
+    private static function finaliseToolCall(array $block): array
+    {
+        if (($block['type'] ?? '') !== 'tool_call') {
+            return $block;
+        }
+
+        $text = is_string($block['text'] ?? null) ? $block['text'] : '';
+        unset($block['text']);
+
+        return $block + self::decodeArguments($text);
     }
 
     /**
@@ -228,6 +311,14 @@ final class ConversationRecorder
      */
     private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
     {
+        // Internal bookkeeping for reconciling a stream block against its
+        // tool_call frame. Nothing outside this class should see it.
+        $blocks = array_map(static function (array $block): array {
+            unset($block['_from_stream']);
+
+            return $block;
+        }, $blocks);
+
         $text = '';
         foreach ($blocks as $block) {
             if (($block['type'] ?? 'text') === 'text') {
