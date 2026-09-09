@@ -7,7 +7,12 @@ use Tetrix\AiBridge\Enums\ProviderMode;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\StreamHandler;
+use Illuminate\Support\Facades\Event;
+use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
 use Tetrix\AiBridge\Contracts\StreamableProvider;
+use Tetrix\AiBridge\WebSocket\MessageHandler;
+use Tetrix\AiBridge\Tools\ToolRegistry;
+use Tetrix\AiBridge\Auth\TokenManager;
 
 /*
 |--------------------------------------------------------------------------
@@ -243,4 +248,97 @@ test('lastDoneMeta exposes the metadata after the turn', function () {
     ]));
 
     expect($handler->lastDoneMeta()['model'])->toBe('claude-opus-5');
+});
+
+beforeEach(function () {
+    Event::fake();
+    $this->manager = new BridgeConnectionManager();
+    $this->messageHandler = new MessageHandler(
+        connectionManager: $this->manager,
+        tokenManager: app(TokenManager::class),
+        toolRegistry: new ToolRegistry(),
+    );
+});
+
+/*
+|--------------------------------------------------------------------------
+| The bridge-mode path, which is the one that actually runs
+|--------------------------------------------------------------------------
+|
+| A `done` frame from a bridge does not reach dispatchEvent — MessageHandler
+| special-cases it so it can clean up the pending request. That gave a second
+| place where the event was rebuilt from a subset of what arrived, which is
+| exactly how tool_name was lost on block_start.
+|
+*/
+
+test('a done frame from a real bridge keeps its metadata', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->messageHandler->registerRelayedRequest('req-meta', 'user-1', 'conv-1');
+
+    $handler = $this->manager->getPendingRequest('req-meta');
+    $usage = null;
+    $meta = [];
+    $handler->onDone(function (?array $u, array $m = []) use (&$usage, &$meta) {
+        $usage = $u;
+        $meta = $m;
+    });
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-meta',
+        'event' => MessageTypes::DONE,
+        'data' => [
+            'usage' => ['input_tokens' => 6, 'cache_read_input_tokens' => 66013],
+            'model' => 'claude-sonnet-5',
+            'cost_usd' => 0.0377,
+            'permission_denials' => [['tool_name' => 'Bash']],
+            'cli_session_id' => 'sess-1',
+        ],
+    ]));
+
+    expect($usage['cache_read_input_tokens'])->toBe(66013)
+        ->and($meta['model'])->toBe('claude-sonnet-5')
+        ->and($meta['cost_usd'])->toBe(0.0377)
+        ->and($meta['permission_denials'])->toHaveCount(1);
+});
+
+test('a rate_limit frame from a real bridge reaches its callback', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->messageHandler->registerRelayedRequest('req-rl', 'user-1', 'conv-1');
+
+    $handler = $this->manager->getPendingRequest('req-rl');
+    $seen = null;
+    $handler->onRateLimit(function (string $provider, array $info) use (&$seen) {
+        $seen = [$provider, $info];
+    });
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-rl',
+        'event' => MessageTypes::RATE_LIMIT,
+        'data' => ['provider' => 'claude', 'info' => ['status' => 'allowed']],
+    ]));
+
+    expect($seen[0])->toBe('claude')->and($seen[1]['status'])->toBe('allowed');
+});
+
+test('a tool_call block_start from a real bridge keeps its tool name', function () {
+    $this->manager->addConnection('user-1', 'conn-1');
+    $this->messageHandler->registerRelayedRequest('req-tn', 'user-1', 'conv-1');
+
+    $handler = $this->manager->getPendingRequest('req-tn');
+    $seen = null;
+    $handler->onBlockStart(function (StreamEvent $e) use (&$seen) {
+        $seen = $e->data;
+    });
+
+    $this->messageHandler->handleMessage('conn-1', null, json_encode([
+        'type' => MessageTypes::STREAM,
+        'request_id' => 'req-tn',
+        'event' => MessageTypes::BLOCK_START,
+        'data' => ['block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 'toolu_1'],
+    ]));
+
+    expect($seen['tool_name'])->toBe('Bash')->and($seen['tool_call_id'])->toBe('toolu_1');
 });
