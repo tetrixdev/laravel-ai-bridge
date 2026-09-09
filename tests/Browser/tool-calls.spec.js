@@ -151,6 +151,64 @@ test('the operator\'s own MCP tool is not claimed by a bridge frame', async ({ p
   expect(b[1].parameters).toEqual({ url: 'SERVER' });
 });
 
+test('a frame supplies the arguments when the block could not parse its own', async ({ page }) => {
+  // The recorder does this; a component that did not would disagree with the
+  // record about the same stream — which is the divergence this whole area
+  // keeps having to close.
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"notation":"1d2' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { notation: '1d20+5' }, tool_call_id: 'mcp-1' } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].parameters).toEqual({ notation: '1d20+5' });
+  expect(b[0].parameters_raw).toBeUndefined();
+  // …and it keeps the id a result is matched by.
+  expect(b[0].tool_call_id).toBe('t1');
+});
+
+test('a frame supplies the arguments for a block with no deltas', async ({ page }) => {
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { notation: '1d20' }, tool_call_id: 'mcp-1' } },
+  ]);
+
+  expect((await blocks(page))[0].parameters).toEqual({ notation: '1d20' });
+});
+
+test('a frame arriving first still supplies its arguments', async ({ page }) => {
+  // The early-frame path copied the parameters and then closeToolBlock
+  // overwrote them unconditionally, so the copy was dead code.
+  await ready(page);
+  await feed(page, [
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { sides: 20 }, tool_call_id: 'mcp-1' } },
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+  ]);
+
+  const b = await blocks(page);
+  expect(b).toHaveLength(1);
+  expect(b[0].parameters).toEqual({ sides: 20 });
+});
+
+test('the block wins when its own arguments parsed', async ({ page }) => {
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
+    { event: 'block_delta', data: { block_index: 0, content: '{"notation":"1d20"}' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { notation: 'WRONG' }, tool_call_id: 'mcp-1' } },
+  ]);
+
+  expect((await blocks(page))[0].parameters).toEqual({ notation: '1d20' });
+});
+
 test('a frame arriving before the block STARTS still draws one call', async ({ page }) => {
   // PROTOCOL.md does not pin the order down, which is why the recorder
   // reconciles at persist. The live path searched only blocks that already

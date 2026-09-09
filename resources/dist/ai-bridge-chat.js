@@ -1035,8 +1035,14 @@
                             b.type === 'tool_call' && !b._fromStream && !b._claimed
                             && (d.tool_name === 'mcp__bridge__' + b.tool_name || d.tool_name === b.tool_name));
                         if (early !== -1) {
-                            if (!this.current.parameters || !Object.keys(this.current.parameters).length) {
-                                this.current.parameters = this.assistant.blocks[early].parameters || {};
+                            const placeholder = this.assistant.blocks[early];
+                            this.current._frameParams = placeholder.parameters || {};
+                            // Carry over anything already attached to the
+                            // placeholder, so a result that arrived first is not
+                            // discarded with it.
+                            if ('result' in placeholder) {
+                                this.current.result = placeholder.result;
+                                this.current.is_error = placeholder.is_error;
                             }
                             this.assistant.blocks.splice(early, 1);
                             this.current._claimed = true;
@@ -1080,6 +1086,16 @@
                         || (claims(this.current) ? this.current : null);
                     if (shadow) {
                         shadow._claimed = true;
+                        // Remember the frame's parsed arguments. The block is
+                        // usually richer, but its arguments are raw delta text
+                        // and can arrive truncated, unparsed or absent — the
+                        // recorder takes the frame's in exactly that case, and
+                        // a component that did not would disagree with the
+                        // record about the same stream.
+                        shadow._frameParams = d.parameters || {};
+                        // Applied now if the block has already closed; otherwise
+                        // closeToolBlock() applies it once the deltas are in.
+                        if (shadow.text === undefined) this.applyFrameParams(shadow);
                         break;
                     }
                     // tool_call_id included so a later tool_result can find it.
@@ -1141,13 +1157,33 @@
             if (!b || b.type !== 'tool_call' || b.text === undefined) return;
             const raw = (b.text || '').trim();
             delete b.text;
-            if (!raw) { b.parameters = {}; return; }
-            try {
-                const v = JSON.parse(raw);
-                if (v && typeof v === 'object' && !Array.isArray(v)) { b.parameters = v; return; }
-            } catch (e) { /* falls through to the raw form below */ }
             b.parameters = {};
-            b.parameters_raw = raw;
+            if (raw) {
+                try {
+                    const v = JSON.parse(raw);
+                    if (v && typeof v === 'object' && !Array.isArray(v)) b.parameters = v;
+                    else b.parameters_raw = raw;
+                } catch (e) { b.parameters_raw = raw; }
+            }
+            // Only after parsing: an unconditional reset here is what made the
+            // frame copy dead code the first time.
+            this.applyFrameParams(b);
+        }
+
+        // Fall back to a tool_call frame's parsed arguments when the block's own
+        // are unusable. Mirrors ConversationRecorder, so the same stream reads
+        // the same live as it does after a reload.
+        applyFrameParams(b) {
+            if (!b || b._frameParams === undefined) return;
+            const own = b.parameters;
+            const usable = own && typeof own === 'object' && Object.keys(own).length > 0
+                && b.parameters_raw === undefined;
+            if (!usable && Object.keys(b._frameParams).length > 0) {
+                b.parameters = b._frameParams;
+                delete b.parameters_raw;
+                delete b.parameters_truncated_bytes;
+            }
+            delete b._frameParams;
         }
 
         scrollDown(stick = true, keepTop = 0) {

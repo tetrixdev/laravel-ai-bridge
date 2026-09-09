@@ -344,7 +344,9 @@ final class ConversationRecorder
             if ($block['_from_stream'] ?? false) {
                 $streamCalls += self::describesSameCall((string) ($block['tool_name'] ?? ''), $frameToolName) ? 1 : 0;
             } elseif ($block['_from_frame'] ?? false) {
-                $frameCalls += ((string) ($block['tool_name'] ?? '')) === $frameToolName ? 1 : 0;
+                // The same predicate as the stream side. Two different tests
+                // could report "unambiguous" for a set that is not.
+                $frameCalls += self::describesSameCall($frameToolName, (string) ($block['tool_name'] ?? '')) ? 1 : 0;
             }
         }
 
@@ -365,7 +367,17 @@ final class ConversationRecorder
     private static function capParameters(array $params): array
     {
         $encoded = json_encode($params);
-        if ($encoded === false || strlen($encoded) <= self::MAX_ARGUMENT_BYTES) {
+
+        // Written the other way round the first time, which put the one case
+        // that must NEVER be stored verbatim — parameters that cannot be
+        // encoded at all — on the "small enough, keep them" branch. The blocks
+        // cast then fails and the ENTIRE assistant turn is lost, prose
+        // included, exactly as an invalid byte-offset cut would.
+        if ($encoded === false) {
+            return ['parameters' => [], 'parameters_raw' => '[arguments could not be encoded]'];
+        }
+
+        if (strlen($encoded) <= self::MAX_ARGUMENT_BYTES) {
             return ['parameters' => $params];
         }
 
@@ -432,7 +444,14 @@ final class ConversationRecorder
                 // exactly that case, and only when the pairing is unambiguous,
                 // so nothing can be attributed to the wrong call.
                 if (isset($blocks[$candidate]['parameters_raw']) || ($blocks[$candidate]['parameters'] ?? []) === []) {
-                    if (self::isUnambiguous($blocks, (string) ($block['tool_name'] ?? ''))) {
+                    // Only when the frame actually has something better. A
+                    // genuinely empty frame would otherwise erase the block's
+                    // record of having been cut off and replace it with
+                    // "called with no arguments" — a false statement about the
+                    // data, which is the thing this whole area is careful about.
+                    $frameHasArguments = ($block['parameters'] ?? []) !== [] || isset($block['parameters_raw']);
+
+                    if ($frameHasArguments && self::isUnambiguous($blocks, (string) ($block['tool_name'] ?? ''))) {
                         unset($blocks[$candidate]['parameters_raw'], $blocks[$candidate]['parameters_truncated_bytes']);
                         $blocks[$candidate] = $blocks[$candidate] + ['parameters' => []];
                         $blocks[$candidate]['parameters'] = $block['parameters'] ?? [];

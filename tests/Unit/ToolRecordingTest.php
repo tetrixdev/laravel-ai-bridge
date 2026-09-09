@@ -528,6 +528,45 @@ test('a frame carrying enormous arguments is capped like a block is', function (
         ->and($call['parameters_truncated_bytes'])->toBeGreaterThan(65536);
 });
 
+test('parameters that cannot be encoded do not take the whole turn down', function () {
+    // json_encode returning false is the ONE case that must never be stored
+    // verbatim; it was on the "small enough, keep them" branch, so the blocks
+    // cast failed and the entire assistant message was lost.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchToolCall('write_file', ['content' => 'bad '.chr(0xC3).chr(0x28).' utf8'], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => 'the prose survived']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->firstWhere('type', 'text')['text'])->toBe('the prose survived')
+        ->and(collect($blocks)->firstWhere('type', 'tool_call')['parameters'])->toBe([]);
+});
+
+test('an empty frame does not erase the block\'s record of being cut off', function () {
+    // Replacing "cut off, 90000 bytes in total" with "called with no arguments"
+    // is a false statement about the data.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call',
+            'tool_name' => 'mcp__bridge__write_file', 'tool_call_id' => 'toolu_1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => '{"body":"'.str_repeat('y', 80000),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        // A frame that genuinely carries nothing.
+        $h->dispatchToolCall('write_file', [], 'mcp-1');
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $call = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($call)->toHaveKey('parameters_raw')
+        ->and($call['parameters_truncated_bytes'])->toBeGreaterThan(65536);
+});
+
 test('a nameless tool block is still dropped', function () {
     // Nothing worth showing, and it would render as an empty wrench.
     $blocks = recordTurn(function (StreamHandler $h) {
