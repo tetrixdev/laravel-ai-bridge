@@ -81,6 +81,7 @@
     .tool b { color: #1d4ed8; }
     .tool pre { margin: 4px 0 0; overflow-x: auto; color: #2563eb; font-size: 11px; }
     .tool .res { margin-top: 4px; border-top: 1px solid #bfdbfe; padding-top: 4px; color: #2563eb; }
+    .tool .res.err { color: #b91c1c; border-top-color: #fecaca; }
     .pulse { display: flex; align-items: center; gap: 4px; background: #f3f4f6; color: #6b7280;
         border-radius: 16px; padding: 8px 14px; width: fit-content; }
     .pulse i { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; display: inline-block;
@@ -461,7 +462,7 @@
                     if (!b.tool_name) return '';
                     return `<div class="tool"><b>🔧 ${this.esc(b.tool_name)}</b>
                         <pre>${this.esc(JSON.stringify(b.parameters || {}, null, 2))}</pre>
-                        ${b.result !== undefined ? `<div class="res">→ ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
+                        ${b.result !== undefined ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
                     // Persisted conversations store tool results as their own
@@ -928,7 +929,7 @@
             // name and a `:`-prefixed body, so they never reach a listener.
             const wire = (name) => es.addEventListener(name, (e) => this.onSseEvent(name, e));
             ['block_start', 'block_delta', 'block_stop', 'tool_call', 'tool_result',
-             'done', 'error', 'cancelled'].forEach(wire);
+             'rate_limit', 'done', 'error', 'cancelled'].forEach(wire);
             // onerror fires both on transient disconnects (the browser will
             // reconnect automatically) and on terminal failures. Only treat
             // it as terminal once readyState is CLOSED.
@@ -974,13 +975,26 @@
                     // block_stop. Showing it on stop instead caused a flash on
                     // the final block: stop turned it on, done turned it off.
                     this.s.pulse = true;
-                    // A tool_call block is delivered whole by the dedicated
-                    // 'tool_call' event (tool_name + parsed parameters). Its
-                    // block_start carries none of that, so pushing a block here
-                    // would render an empty "🔧" placeholder next to the real
-                    // one. Skip it — tool-input deltas are not needed either.
                     if ((d.block_type || 'text') === 'tool_call') {
-                        this.current = null;
+                        // A tool the SERVER resolves arrives twice — as this
+                        // block and as the dedicated 'tool_call' event, which
+                        // carries the parsed arguments. Skip the block so the
+                        // same call is not drawn twice.
+                        //
+                        // A tool that ran on the operator's own machine (Bash,
+                        // Read, an editor) has no such event: this block is the
+                        // only thing that will ever describe it. Skipping those
+                        // too — which is what this used to do — is why a run of
+                        // them showed as nothing at all.
+                        if (!d.tool_name || d.tool_name.indexOf('mcp__bridge__') === 0) {
+                            this.current = null;
+                            break;
+                        }
+                        this.current = {
+                            type: 'tool_call', tool_name: d.tool_name,
+                            tool_call_id: d.tool_call_id, text: '', parameters: {},
+                        };
+                        this.assistant.blocks.push(this.current);
                         break;
                     }
                     this.current = { type: d.block_type || 'text', text: '', _open: false };
@@ -991,10 +1005,44 @@
                     if (this.current) this.current.text += (d.content || '');
                     break;
                 case 'block_stop':
-                    this.s.pulse = false; this.current = null;
+                    this.s.pulse = false;
+                    // A locally-run tool's arguments arrive as the block's
+                    // delta text, as one complete JSON object. Parse it here;
+                    // keep the raw text if it does not parse, because a
+                    // truncated call and a call with no arguments should not
+                    // look the same.
+                    if (this.current && this.current.type === 'tool_call') {
+                        const raw = (this.current.text || '').trim();
+                        this.current.parameters = raw ? this.parseArgs(raw) : {};
+                        delete this.current.text;
+                    }
+                    this.current = null;
                     break;
                 case 'tool_call':
                     this.assistant.blocks.push({ type: 'tool_call', tool_name: d.tool_name, parameters: d.parameters || {} });
+                    break;
+                case 'tool_result': {
+                    // Attach to the call it belongs to, so the output is shown
+                    // under the tool that produced it rather than floating
+                    // loose. Matched on the id the bridge carries on both.
+                    const owner = d.tool_call_id && this.assistant.blocks.find(
+                        (b) => b.type === 'tool_call' && b.tool_call_id === d.tool_call_id);
+                    if (owner) {
+                        owner.result = d.result;
+                        if (d.is_error !== undefined) owner.is_error = d.is_error;
+                    } else {
+                        this.assistant.blocks.push({
+                            type: 'tool_result', tool_call_id: d.tool_call_id,
+                            result: d.result, is_error: d.is_error,
+                        });
+                    }
+                    break;
+                }
+                case 'rate_limit':
+                    // Informational and non-terminal. Recorded on the element so
+                    // a host app can read it; deliberately not drawn, since a
+                    // quota notice mid-answer is not what the reader is here for.
+                    this.s.rateLimit = { provider: d.provider, info: d.info };
                     break;
                 case 'done': this.finish(); return;
                 case 'error': this.s.error = d.message || d.code || 'Stream error'; this.finish(); return;
@@ -1008,6 +1056,13 @@
             this.s.streaming = false; this.s.pulse = false; this.current = null;
             this.loadConversations().then(() => this.renderAll());
             this.renderAll();
+        }
+
+        // Parse a tool call's accumulated argument JSON, keeping the raw text
+        // when it does not parse rather than reporting no arguments at all.
+        parseArgs(raw) {
+            try { const v = JSON.parse(raw); return (v && typeof v === 'object') ? v : { _raw: raw }; }
+            catch (e) { return { _raw: raw }; }
         }
 
         scrollDown(stick = true, keepTop = 0) {

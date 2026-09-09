@@ -101,6 +101,9 @@ final class MessageTypes
      */
     public const TOOL_RESULT = 'tool_result';
 
+    /** Provider rate-limit status. Informational; the turn continues. */
+    public const RATE_LIMIT = 'rate_limit';
+
     /**
      * A file the assistant produced and chose to hand back.
      *
@@ -187,6 +190,7 @@ final class MessageTypes
             self::BLOCK_STOP,
             self::TOOL_CALL,
             self::TOOL_RESULT,
+            self::RATE_LIMIT,
             self::ATTACHMENT,
             self::POSTURE,
             self::TOOL_RESOLVE,

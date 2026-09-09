@@ -59,6 +59,17 @@ class StreamHandler
     /** @var Closure[] */
     private array $toolResultCallbacks = [];
 
+    /** @var array<int, Closure> */
+    private array $rateLimitCallbacks = [];
+
+    /**
+     * Everything the provider reported about the last turn besides usage —
+     * model, cost, duration, stop reason, permission denials.
+     *
+     * @var array<string, mixed>
+     */
+    private array $lastDoneMeta = [];
+
     /** @var Closure[] */
     private array $attachmentCallbacks = [];
 
@@ -196,13 +207,39 @@ class StreamHandler
     /**
      * Register a callback for tool_result events from the bridge.
      *
-     * The callback receives: string $toolCallId, mixed $result.
+     * The callback receives: string $toolCallId, mixed $result, ?bool $isError.
+     * $isError is null when the provider did not report a status — never
+     * assume null means success.
      */
     public function onToolResult(Closure $callback): static
     {
         $this->toolResultCallbacks[] = $callback;
 
         return $this;
+    }
+
+    /**
+     * Register a callback for rate_limit events from the bridge.
+     *
+     * The callback receives: string $provider, array $info. Informational and
+     * non-terminal — the turn continues. The shape of $info is the provider's
+     * own and is passed through unchanged.
+     */
+    public function onRateLimit(Closure $callback): static
+    {
+        $this->rateLimitCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * What the provider reported about the last completed turn besides usage.
+     *
+     * @return array<string, mixed>
+     */
+    public function lastDoneMeta(): array
+    {
+        return $this->lastDoneMeta;
     }
 
     /**
@@ -312,13 +349,17 @@ class StreamHandler
      *
      * @internal Called by StreamableProvider implementations.
      */
-    public function dispatchBlockStart(BlockType $blockType, int $blockIndex): void
-    {
+    public function dispatchBlockStart(
+        BlockType $blockType,
+        int $blockIndex,
+        ?string $toolName = null,
+        ?string $toolCallId = null,
+    ): void {
         if ($this->cancelled || $this->terminated) {
             return;
         }
 
-        $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex);
+        $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex, $toolName, $toolCallId);
         $this->dispatchCallbacks($this->blockStartCallbacks, [$event], 'blockStart');
     }
 
@@ -367,20 +408,43 @@ class StreamHandler
     }
 
     /**
+     * Dispatch a rate_limit event to all registered callbacks.
+     *
+     * Non-terminal on purpose: a rate-limit notice is the provider reporting
+     * how much of a window is spent, not a failure. Treating it as terminal
+     * would abort a turn that is still running perfectly well.
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchRateLimit(string $provider, array $info): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        $this->dispatchCallbacks($this->rateLimitCallbacks, [$provider, $info], 'rateLimit');
+    }
+
+    /**
      * Dispatch a done event to all registered callbacks.
      *
      * Also dispatches the StreamCompleted Laravel event for logging/analytics.
      *
      * @internal Called by StreamableProvider implementations.
      */
-    public function dispatchDone(?array $usage = null): void
+    public function dispatchDone(?array $usage = null, array $meta = []): void
     {
         if ($this->cancelled || $this->terminated) {
             return;
         }
         $this->terminated = true;
 
-        $this->dispatchCallbacks($this->doneCallbacks, [$usage], 'done');
+        $this->lastDoneMeta = $meta;
+
+        // $meta is passed as a second argument. PHP allows extra arguments to a
+        // userland closure, so callbacks written against the one-argument form
+        // keep working untouched.
+        $this->dispatchCallbacks($this->doneCallbacks, [$usage, $meta], 'done');
 
         $this->dispatchStreamCompleted(true, $usage, null, TerminatedBy::Success);
 
@@ -413,7 +477,7 @@ class StreamHandler
      *
      * @internal Called when the bridge acknowledges receipt of a tool result.
      */
-    public function dispatchToolResult(string $toolCallId, mixed $result): void
+    public function dispatchToolResult(string $toolCallId, mixed $result, ?bool $isError = null): void
     {
         if ($this->cancelled || $this->terminated) {
             return;
@@ -424,7 +488,7 @@ class StreamHandler
             'tool_call_id' => $toolCallId,
         ]);
 
-        $this->dispatchCallbacks($this->toolResultCallbacks, [$toolCallId, $result], 'toolResult');
+        $this->dispatchCallbacks($this->toolResultCallbacks, [$toolCallId, $result, $isError], 'toolResult');
     }
 
     /**
@@ -501,9 +565,17 @@ class StreamHandler
             MessageTypes::TOOL_RESULT => $this->dispatchToolResult(
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
                 $event->data['result'] ?? null,
+                is_bool($event->data['is_error'] ?? null) ? $event->data['is_error'] : null,
+            ),
+            MessageTypes::RATE_LIMIT => $this->dispatchRateLimit(
+                is_string($event->data['provider'] ?? null) ? $event->data['provider'] : 'unknown',
+                is_array($event->data['info'] ?? null) ? $event->data['info'] : [],
             ),
             MessageTypes::ATTACHMENT => $this->dispatchAttachment($event->data),
-            MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
+            MessageTypes::DONE => $this->dispatchDone(
+                $event->data['usage'] ?? null,
+                array_diff_key($event->data, ['usage' => true]),
+            ),
             MessageTypes::ERROR => $this->dispatchError(
                 $event->data['code'] ?? 'unknown',
                 $event->data['message'] ?? 'Unknown error',
@@ -528,7 +600,19 @@ class StreamHandler
         }
         $blockIndex = (int) ($event->data['block_index'] ?? 0);
         $this->blockTypes[$blockIndex] = $blockType;
-        $this->dispatchBlockStart($blockType, $blockIndex);
+
+        // The bridge sends these for every provider; rebuilding the event from
+        // only type and index is what threw them away, and is why a chat could
+        // say "4 tool calls" and never what any of them were.
+        $toolName = $event->data['tool_name'] ?? null;
+        $toolCallId = $event->data['tool_call_id'] ?? null;
+
+        $this->dispatchBlockStart(
+            $blockType,
+            $blockIndex,
+            is_string($toolName) && $toolName !== '' ? $toolName : null,
+            is_string($toolCallId) && $toolCallId !== '' ? $toolCallId : null,
+        );
     }
 
     /**

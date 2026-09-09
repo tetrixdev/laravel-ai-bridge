@@ -79,14 +79,29 @@ final class BufferingSink
             ]);
         });
 
+        // Without this the browser could never see a tool result at all: the
+        // bridge sends them, StreamHandler dispatches them, and the SSE buffer
+        // simply had no handler, so they stopped here.
+        $handler->onToolResult(function (string $toolCallId, mixed $result, ?bool $isError = null) use ($append): void {
+            $append(MessageTypes::TOOL_RESULT, array_filter([
+                'tool_call_id' => $toolCallId,
+                'result' => $result,
+                'is_error' => $isError,
+            ], static fn ($value) => $value !== null));
+        });
+
+        $handler->onRateLimit(function (string $provider, array $info) use ($append): void {
+            $append(MessageTypes::RATE_LIMIT, ['provider' => $provider, 'info' => $info]);
+        });
+
         $handler->onAttachment(function (array $attachment) use ($append): void {
             $append(MessageTypes::ATTACHMENT, $attachment);
         });
 
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
-        $handler->onDone(function (?array $usage) use ($append, $store, $rid): void {
-            $append(MessageTypes::DONE, ['usage' => $usage]);
+        $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {
+            $append(MessageTypes::DONE, ['usage' => $usage] + $meta);
             self::completeQuietly($store, $rid, 'completed');
         });
 

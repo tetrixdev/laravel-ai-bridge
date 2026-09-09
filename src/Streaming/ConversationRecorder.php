@@ -27,6 +27,45 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
 final class ConversationRecorder
 {
     /**
+     * The MCP namespace the bridge registers its own server under.
+     *
+     * A server-declared tool reaches the model as `mcp__bridge__<tool>` and is
+     * relayed back over the WebSocket as a `tool_call` frame, so it is recorded
+     * from that frame instead of from the stream block. Anything else ran on the
+     * operator's own machine and the stream block is its only record.
+     */
+    private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
+
+    /** Is this tool one the server resolves, rather than one that ran locally? */
+    private static function isServerResolved(string $toolName): bool
+    {
+        return str_starts_with($toolName, self::BRIDGE_TOOL_PREFIX);
+    }
+
+    /**
+     * Decode a locally-run tool call's arguments.
+     *
+     * The bridge sends them as one delta carrying the complete JSON object, so
+     * this normally parses. When it does not — a turn truncated mid-arguments —
+     * the raw text is kept under `_raw` rather than discarded, because "the
+     * arguments were cut off" and "the tool was called with none" are different
+     * things and a reader should be able to tell them apart.
+     *
+     * @return array<string, mixed>
+     */
+    private static function decodeArguments(string $text): array
+    {
+        $trimmed = trim($text);
+        if ($trimmed === '') {
+            return [];
+        }
+
+        $decoded = json_decode($trimmed, true);
+
+        return is_array($decoded) ? $decoded : ['_raw' => $trimmed];
+    }
+
+    /**
      * Attach recording callbacks to a StreamHandler for the given conversation.
      */
     public static function attach(StreamHandler $handler, Conversation $conversation): void
@@ -43,16 +82,36 @@ final class ConversationRecorder
 
         $handler->onBlockStart(function (StreamEvent $event) use (&$current, &$inStreamToolCall) {
             $blockType = $event->data['block_type'] ?? 'text';
-            // Drop stream-event tool_call blocks. They are a shadow of the WS
-            // tool_call frame: the CLI emits block_start (tool_call) + a
-            // block_delta carrying the args text + block_stop, but with no
-            // tool_name and no tool_call_id. The chat UI cannot render them
-            // (it skips tool_call blocks with no tool_name) and on a recorded
-            // turn they appear as duplicate, unpaired tool_call entries. The
-            // canonical block is stored by the onToolCall callback below.
             if ($blockType === 'tool_call') {
-                $inStreamToolCall = true;
-                $current = null;
+                $toolName = $event->data['tool_name'] ?? null;
+
+                // A tool the SERVER resolves arrives twice: once as this block
+                // and once as the canonical WS tool_call frame, which carries
+                // the parsed arguments. Recording both shows the same call
+                // twice, so the block is dropped and onToolCall below wins.
+                //
+                // A tool that ran on the operator's own machine — Bash, Read,
+                // an editor — has no WS frame, so this block is the only record
+                // there will ever be. Dropping it unconditionally, which is what
+                // this used to do, is why a chat could only say "4 tool calls":
+                // the names were being thrown away here, one layer after being
+                // thrown away in StreamHandler.
+                if ($toolName === null || $toolName === '' || self::isServerResolved($toolName)) {
+                    $inStreamToolCall = true;
+                    $current = null;
+
+                    return;
+                }
+
+                $inStreamToolCall = false;
+                $current = [
+                    'type' => 'tool_call',
+                    'tool_name' => $toolName,
+                    'text' => '',
+                ];
+                if (isset($event->data['tool_call_id']) && is_string($event->data['tool_call_id'])) {
+                    $current['tool_call_id'] = $event->data['tool_call_id'];
+                }
 
                 return;
             }
@@ -73,6 +132,14 @@ final class ConversationRecorder
                 return;
             }
             if ($current !== null) {
+                // For a locally-run tool the accumulated delta text IS the
+                // arguments JSON. Decode it so a consumer gets the same shape
+                // as a server-resolved call, and keep the raw text when it does
+                // not parse rather than reporting no arguments at all.
+                if (($current['type'] ?? '') === 'tool_call') {
+                    $current['parameters'] = self::decodeArguments($current['text'] ?? '');
+                    unset($current['text']);
+                }
                 $blocks[] = $current;
                 $current = null;
             }
@@ -80,7 +147,7 @@ final class ConversationRecorder
         $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
             $blocks[] = ['type' => 'tool_call', 'tool_name' => $name, 'parameters' => $params, 'tool_call_id' => $callId];
         });
-        $handler->onToolResult(function (string $callId, mixed $result) use (&$blocks) {
+        $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks) {
             // Record the tool_result with the id the dispatcher provided. In
             // bridge mode that's the CLI's own id (which won't match the WS
             // tool_call block's `mcp-<rid>-<n>` id) — but the chat UI renders
@@ -89,7 +156,14 @@ final class ConversationRecorder
             // earlier draft tried to remap ids by FIFO arrival order; that
             // assumed CLIs emit results in invocation order, which is not
             // guaranteed under parallel tool_use, so it was dropped.
-            $blocks[] = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
+            $block = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
+            // Only when the provider actually said. Absent must not be read as
+            // success — a tool printing "Error: no matches" is not a failure,
+            // and a failure that reported nothing is not a success.
+            if ($isError !== null) {
+                $block['is_error'] = $isError;
+            }
+            $blocks[] = $block;
         });
         $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
             $inStreamToolCall = false;

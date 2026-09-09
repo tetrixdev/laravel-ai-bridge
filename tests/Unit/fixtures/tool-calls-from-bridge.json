@@ -1,0 +1,227 @@
+[
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "rate_limit",
+  "data": {
+   "provider": "claude",
+   "info": {
+    "status": "allowed",
+    "resetsAt": 1789009200,
+    "rateLimitType": "five_hour",
+    "overageStatus": "rejected",
+    "overageDisabledReason": "org_level_disabled",
+    "isUsingOverage": false,
+    "unifiedWindows": {
+     "five_hour": {
+      "utilization": 0,
+      "resetsAt": 1789009200
+     },
+     "seven_day": {
+      "utilization": 0.35,
+      "resetsAt": 1789308000
+     }
+    }
+   }
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_start",
+  "data": {
+   "block_index": 0,
+   "block_type": "tool_call",
+   "tool_name": "Bash",
+   "tool_call_id": "toolu_01CgSG7nmvDTUehKes3Q3L6x"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_delta",
+  "data": {
+   "block_index": 0,
+   "content": "{\"command\":\"echo one\",\"description\":\"Echo one\"}"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_stop",
+  "data": {
+   "block_index": 0
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "tool_result",
+  "data": {
+   "tool_call_id": "toolu_01CgSG7nmvDTUehKes3Q3L6x",
+   "result": "one",
+   "is_error": false
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_start",
+  "data": {
+   "block_index": 1,
+   "block_type": "tool_call",
+   "tool_name": "Bash",
+   "tool_call_id": "toolu_01SRTm6jD7c8Es1X1aTaBtJ8"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_delta",
+  "data": {
+   "block_index": 1,
+   "content": "{\"command\":\"echo two\",\"description\":\"Echo two\"}"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_stop",
+  "data": {
+   "block_index": 1
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "tool_result",
+  "data": {
+   "tool_call_id": "toolu_01SRTm6jD7c8Es1X1aTaBtJ8",
+   "result": "two",
+   "is_error": false
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_start",
+  "data": {
+   "block_index": 2,
+   "block_type": "tool_call",
+   "tool_name": "Bash",
+   "tool_call_id": "toolu_012i2NLBZ6TWCBbrhxegqrbV"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_delta",
+  "data": {
+   "block_index": 2,
+   "content": "{\"command\":\"echo three\",\"description\":\"Echo three\"}"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_stop",
+  "data": {
+   "block_index": 2
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "tool_result",
+  "data": {
+   "tool_call_id": "toolu_012i2NLBZ6TWCBbrhxegqrbV",
+   "result": "three",
+   "is_error": false
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_start",
+  "data": {
+   "block_index": 3,
+   "block_type": "tool_call",
+   "tool_name": "Read",
+   "tool_call_id": "toolu_012919k8jMro9D9V8E5Ghkiw"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_delta",
+  "data": {
+   "block_index": 3,
+   "content": "{\"file_path\":\"/tmp/toolprobe-cNHrfL/note.txt\"}"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_stop",
+  "data": {
+   "block_index": 3
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "tool_result",
+  "data": {
+   "tool_call_id": "toolu_012919k8jMro9D9V8E5Ghkiw",
+   "result": "1\tthe code is TN-7781\n2\t"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_start",
+  "data": {
+   "block_index": 4,
+   "block_type": "text"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_delta",
+  "data": {
+   "block_index": 4,
+   "content": "done"
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "block_stop",
+  "data": {
+   "block_index": 4
+  }
+ },
+ {
+  "type": "stream",
+  "request_id": "r1",
+  "event": "done",
+  "data": {
+   "usage": {
+    "input_tokens": 10,
+    "output_tokens": 446,
+    "cache_creation_input_tokens": 4291,
+    "cache_read_input_tokens": 64222
+   },
+   "model": "claude-opus-5[1m]",
+   "provider_version": "2.1.261",
+   "stop_reason": "end_turn",
+   "cost_usd": 0.08724299999999999,
+   "duration_ms": 9410,
+   "duration_api_ms": 9832,
+   "num_turns": 5,
+   "permission_denials": [],
+   "cli_session_id": "bef9c8d9-e480-43fe-abd1-599ed8724d2d"
+  }
+ }
+]
