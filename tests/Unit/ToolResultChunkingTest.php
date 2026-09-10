@@ -238,3 +238,62 @@ test('a cancelled stream stops accumulating chunks', function () {
 
     expect($seen)->toBe([]);
 });
+
+test('an enormous result is bounded before it reaches the database', function () {
+    // The write is wrapped in a catch that logs and swallows, so an oversized
+    // row does not fail loudly — it loses the whole assistant turn, prose and
+    // all. Chunking made that reachable by removing the bridge's own 256 KB
+    // bound, so the record needs one of its own.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"command":"cat big"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        $piece = str_repeat('x', 512 * 1024);
+        for ($i = 0; $i < 6; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 5,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and(strlen($tool['result']))->toBeLessThan(1048576 + 200)
+        ->and($tool['result'])->toContain('truncated by the server')
+        ->and($tool['result_truncated_bytes'])->toBe(6 * 512 * 1024);
+
+    // The turn itself survived, which is the whole point.
+    expect(collect($blocks)->firstWhere('type', 'tool_call')['tool_name'])->toBe('Bash');
+});
+
+test('bounding the result does not cut a character in half', function () {
+    // substr at a byte offset leaves half a UTF-8 character, the blocks cast
+    // then fails, and the entire turn is lost — the same destruction this
+    // bound exists to prevent, arrived at from the other direction. The
+    // multi-byte characters are placed so the 1 MB mark lands INSIDE one.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        // 'é' is two bytes. An odd-length ASCII prefix puts every following
+        // character boundary off the 1 MB mark by one byte.
+        $body = str_repeat('a', 1048575).str_repeat('é', 200_000);
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => $body, 'chunk_index' => 0, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and(mb_check_encoding($tool['result'], 'UTF-8'))->toBeTrue()
+        ->and(json_encode($tool['result']))->not->toBeFalse();
+});

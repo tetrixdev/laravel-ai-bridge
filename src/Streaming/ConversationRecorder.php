@@ -37,6 +37,22 @@ final class ConversationRecorder
      */
     private const MAX_ARGUMENT_BYTES = 65536;
 
+    /**
+     * How much of a tool's OUTPUT to persist.
+     *
+     * The bridge used to bound a result at 256 KB before sending it, so this
+     * class never had to. It now chunks instead of truncating, and an assembled
+     * result can reach 16 MB — which lands in a `json` column, inside a write
+     * whose failure is caught, logged and swallowed. The turn's prose would go
+     * with it: the whole assistant message lost to one large `cat`, silently,
+     * which is worse than any truncation.
+     *
+     * 1 MB rather than the bridge's old 256 KB, so the record still gains from
+     * chunking, and far enough under a default `max_allowed_packet` that a
+     * turn with several large results is still a write that succeeds.
+     */
+    private const MAX_RESULT_BYTES = 1048576;
+
     /** The MCP namespace the bridge registers its own tools under. */
     private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
 
@@ -500,6 +516,31 @@ final class ConversationRecorder
     }
 
     /**
+     * Bound a block's stored result, marking the cut rather than hiding it.
+     *
+     * `mb_strcut`, NOT `substr`: substr cuts at a byte offset and can leave a
+     * half-formed UTF-8 character, which fails the `blocks` cast and destroys
+     * the entire turn — the same failure this bound exists to prevent, arrived
+     * at from the other direction.
+     *
+     * @param  array<string, mixed>  $block
+     * @return array<string, mixed>
+     */
+    private static function capResult(array $block): array
+    {
+        $result = $block['result'] ?? null;
+        if (! is_string($result) || strlen($result) <= self::MAX_RESULT_BYTES) {
+            return $block;
+        }
+
+        $block['result_truncated_bytes'] = strlen($result);
+        $block['result'] = mb_strcut($result, 0, self::MAX_RESULT_BYTES, 'UTF-8')
+            ."\n…[truncated by the server: the full result was streamed but is too large to keep]";
+
+        return $block;
+    }
+
+    /**
      * Drop each `tool_call` frame that duplicates a stream block, and clear the
      * bookkeeping both carried.
      *
@@ -628,7 +669,7 @@ final class ConversationRecorder
      */
     private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
     {
-        $blocks = self::reconcileToolCalls($blocks);
+        $blocks = array_map(self::capResult(...), self::reconcileToolCalls($blocks));
 
         $text = '';
         foreach ($blocks as $block) {
