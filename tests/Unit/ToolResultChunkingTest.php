@@ -174,7 +174,7 @@ test('a stream cannot make this process allocate without limit', function () {
         ->and(strlen($seen[0][1]))->toBeLessThanOrEqual(16 * 1024 * 1024 + 200)
         // "truncated by the server", not "incomplete": every chunk arrived and
         // THIS side declined to hold them.
-        ->and($seen[0][1])->toContain('truncated by the server');
+        ->and($seen[0][1])->toContain('this result alone exceeded');
 });
 
 test('a chunked result reaches the transcript as one block', function () {
@@ -569,4 +569,193 @@ test('the turn budget does not cut a character in half either', function () {
         expect(mb_check_encoding($block['result'] ?? '', 'UTF-8'))->toBeTrue();
     }
     expect(json_encode($blocks))->not->toBeFalse();
+});
+
+test('one oversized result does not destroy every result after it', function () {
+    // The turn budget is SPENT, not zeroed. Zeroing it on the first cut meant a
+    // single result over its own 1 MB ceiling wiped out every later result in
+    // the turn: a two-byte `echo` stored as an empty string plus "too large to
+    // keep", with seven megabytes of the budget still unspent. That is strictly
+    // worse than having no turn budget at all.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $sizes = [2 * 1024 * 1024, 11, 2, 4];
+        foreach ($sizes as $i => $size) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('x', $size),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tools = collect($blocks)->where('type', 'tool_call')->values();
+
+    // The big one is cut at its own ceiling...
+    expect(strlen($tools[0]['result']))->toBeGreaterThan(1024 * 1024)
+        ->and($tools[0])->toHaveKey('result_truncated_bytes');
+
+    // ...and the three tiny ones after it are stored WHOLE and unmarked.
+    foreach ([1 => 11, 2 => 2, 3 => 4] as $i => $size) {
+        expect($tools[$i]['result'])->toBe(str_repeat('x', $size))
+            ->and($tools[$i])->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('a result cut because the turn ran out says so, not that it was too large', function () {
+    // "Too large to keep" is false about a small result that simply arrived
+    // after the budget was gone, and sends a reader at the wrong thing.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        for ($i = 0; $i < 10; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tools = collect($blocks)->where('type', 'tool_call')->values();
+    $late = $tools[9];
+
+    expect($late['result'])->toContain('used up the space kept for a turn')
+        ->and($late['result'])->not->toContain('too large to keep');
+});
+
+test('a result that is not a string is charged and capped like one', function () {
+    // Waved through untouched, an array-valued result is neither bounded nor
+    // charged: measured at 8.8 MB against a budget it spent nothing of.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't0',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't0', 'result' => array_fill(0, 200_000, 'aaaaaaaaaaaaaaaa'),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect(strlen(is_string($tool['result']) ? $tool['result'] : json_encode($tool['result'])))
+        ->toBeLessThan(1024 * 1024 + 500)
+        ->and($tool)->toHaveKey('result_truncated_bytes');
+});
+
+test("a turn's arguments are charged against the same budget as its results", function () {
+    // Bounding results alone does not bound the row: 130 calls carrying 64 KB
+    // of arguments each is another 8 MB, and it is the ROW that has to fit.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $big = json_encode(['content' => str_repeat('a', 60 * 1024)]);
+        // Two hundred, not a hundred and thirty: at 130 the arguments alone are
+        // 7.9 MB and the row squeaks under 16 MB even when they are not charged
+        // at all, so the test passed against the bug it was written for.
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Write', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $big]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('r', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // The whole persisted value, which is the thing max_allowed_packet sees.
+    expect(strlen((string) json_encode($blocks)))->toBeLessThan(16 * 1024 * 1024);
+});
+
+test('the marker names the ceiling that was actually reached', function () {
+    // One 20 MB result with nothing else open is not "this turn's results
+    // together" — that is the same misattribution the last fix removed, moved
+    // from the wrong side to the wrong ceiling.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 19,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen[0][1])->toContain('this result alone exceeded')
+        ->and($seen[0][1])->not->toContain("this turn's tool results together");
+});
+
+test('a result that hit a ceiling AND never finished reports both', function () {
+    // Two different faults with two different fixes. Reporting only the
+    // refusal drops the second silently.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => false,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    });
+
+    expect($seen[0][1])->toContain('truncated by the server')
+        ->and($seen[0][1])->toContain('the stream ended');
+});
+
+test('an unchunked frame with no result does not destroy what was buffered', function () {
+    // It was throwing away everything already assembled and dispatching null in
+    // its place: the content gone, and nothing saying so.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'real output ', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'line two', 'chunk_index' => 1, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 't1']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('real output line two');
+});
+
+test('the fast path is still bounded by the per-result ceiling', function () {
+    // Skipping the buffer is the point of that path; skipping the ceiling with
+    // it quietly removed the bound — 24 MB through a 16 MB limit.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => str_repeat('x', 24 * 1024 * 1024),
+            'chunk_index' => 0, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(strlen($seen[0][1]))->toBeLessThanOrEqual(16 * 1024 * 1024 + 200)
+        ->and($seen[0][1])->toContain('this result alone exceeded');
+});
+
+test("the bridge's dropped-byte note lands at the end, not inside the content", function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'AAA', 'chunk_index' => 0,
+            'final' => false, 'truncated_bytes' => 99,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'BBB', 'chunk_index' => 1, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen[0][1])->toStartWith('AAABBB')
+        ->and($seen[0][1])->toContain('99 bytes');
 });

@@ -550,7 +550,17 @@ class StreamHandler
             // same id. Left in place the buffer never finalises, and its bytes
             // stay charged against the turn's ceiling until the terminal —
             // starving every later result on this connection.
-            $this->takeToolResult($toolCallId);
+            //
+            // Only when the frame actually CARRIES a result, though. A frame
+            // with no `result` key at all was throwing away everything already
+            // buffered and dispatching null in its place: the content gone, and
+            // nothing saying so.
+            $superseded = $this->takeToolResult($toolCallId);
+            if (! array_key_exists('result', $data) && $superseded !== null) {
+                $this->dispatchToolResult($toolCallId, $superseded['result'], $superseded['is_error']);
+
+                return;
+            }
 
             $this->dispatchToolResult($toolCallId, $data['result'] ?? null, $isError);
 
@@ -577,6 +587,14 @@ class StreamHandler
         // were open: no callback, no result on the block, and a chat drawing
         // that call as still running for ever.
         if ($buffer === null && $final && $index === 0) {
+            // Still bounded. Skipping the buffer is the point of this path;
+            // skipping the ceiling with it would quietly remove the bound —
+            // measured at 24 MB through a 16 MB limit.
+            if (strlen($piece) > self::MAX_TOTAL_RESULT_BYTES) {
+                $piece = mb_strcut($piece, 0, self::MAX_TOTAL_RESULT_BYTES, 'UTF-8')
+                    ."\n…[truncated by the server: this result alone exceeded the memory one result may use]";
+            }
+
             $this->dispatchToolResult($toolCallId, $piece.$droppedNote, $isError);
 
             return;
@@ -592,7 +610,7 @@ class StreamHandler
                 return;
             }
 
-            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'refused' => false, 'incomplete' => false];
+            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'refused' => false, 'incomplete' => false, 'dropped_note' => ''];
         }
 
         // The verdict rides on every chunk, so the last one seen wins and a
@@ -616,7 +634,7 @@ class StreamHandler
                 // the bridge never finished sending sends whoever debugs it to
                 // the wrong machine, and the two are not remotely the same
                 // problem.
-                $buffer['refused'] = true;
+                $buffer['refused'] = $overOne ? 'result' : 'turn';
                 Log::warning('AI Bridge: dropping tool result content over a memory ceiling', [
                     'request_id' => $this->requestId,
                     'tool_call_id' => $toolCallId,
@@ -632,9 +650,11 @@ class StreamHandler
         }
 
         // Carried into the text rather than a new field, so nothing downstream
-        // has to change in order to stop discarding it.
+        // has to change in order to stop discarding it. Held until the flush
+        // rather than pushed in as it arrives: on a non-final chunk it would
+        // otherwise land in the MIDDLE of the content.
         if ($droppedNote !== '') {
-            $buffer['parts'][] = $droppedNote;
+            $buffer['dropped_note'] = $droppedNote;
         }
 
         $this->toolResultChunks[$toolCallId] = $buffer;
@@ -660,11 +680,22 @@ class StreamHandler
         $this->toolResultBytes -= $buffer['bytes'];
 
         $result = implode('', $buffer['parts']);
-        if ($buffer['refused'] ?? false) {
-            $result .= "\n…[truncated by the server: this turn's tool results exceeded the memory one turn may use]";
-        } elseif ($buffer['incomplete']) {
+
+        // BOTH, not one or the other. A buffer can hit a ceiling AND never
+        // receive its final chunk, and reporting only the refusal drops the
+        // second fault silently — they are different problems with different
+        // fixes.
+        if (($buffer['refused'] ?? false) === 'result') {
+            $result .= "\n…[truncated by the server: this result alone exceeded the memory one result may use]";
+        } elseif (($buffer['refused'] ?? false) === 'turn') {
+            $result .= "\n…[truncated by the server: this turn's tool results together exceeded the memory one turn may use]";
+        }
+
+        if ($buffer['incomplete']) {
             $result .= "\n…[incomplete: the stream ended before this result finished]";
         }
+
+        $result .= $buffer['dropped_note'] ?? '';
 
         return ['result' => $result, 'is_error' => $buffer['is_error']];
     }

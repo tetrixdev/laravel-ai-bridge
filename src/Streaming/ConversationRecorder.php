@@ -54,7 +54,7 @@ final class ConversationRecorder
     private const MAX_RESULT_BYTES = 1048576;
 
     /**
-     * How much of a turn's tool output to persist IN TOTAL.
+     * How much of a turn's tool call data to persist IN TOTAL.
      *
      * Bounding one result bounds nothing on its own: the number of tool calls
      * in a turn is chosen by the model, not by this package. Seventy calls
@@ -64,7 +64,7 @@ final class ConversationRecorder
      * included. That is the outcome the per-result bound was written to
      * prevent, reached by multiplying instead of by growing.
      */
-    private const MAX_TURN_RESULT_BYTES = 8388608;
+    private const MAX_TURN_BLOCK_BYTES = 8388608;
 
     /** The MCP namespace the bridge registers its own tools under. */
     private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
@@ -539,35 +539,76 @@ final class ConversationRecorder
      * @param  array<string, mixed>  $block
      * @return array<string, mixed>
      */
-    private static function capResults(array $blocks): array
+    private static function capForStorage(array $blocks): array
     {
-        $remaining = self::MAX_TURN_RESULT_BYTES;
+        $remaining = self::MAX_TURN_BLOCK_BYTES;
 
         return array_map(static function (array $block) use (&$remaining): array {
-            $result = $block['result'] ?? null;
-            if (! is_string($result)) {
+            // Arguments are already capped per call at 64 KB, but the NUMBER of
+            // calls is the model's choice, so they are charged against the same
+            // budget as results. 130 calls at 64 KB is another 8 MB, and what
+            // has to fit is the ROW — not either half of it.
+            // Charged AND capped. Charging alone only starves the results:
+            // two hundred calls carrying 64 KB of arguments each is twelve
+            // megabytes on its own, and the row is that size whatever the
+            // results do. What has to fit is the ROW, not either half of it.
+            foreach (['parameters', 'parameters_raw'] as $key) {
+                if (! array_key_exists($key, $block)) {
+                    continue;
+                }
+
+                $encoded = is_string($block[$key]) ? $block[$key] : (json_encode($block[$key]) ?: '');
+                if (strlen($encoded) <= max(0, $remaining)) {
+                    $remaining -= strlen($encoded);
+
+                    continue;
+                }
+
+                $block['parameters'] = [];
+                $block['parameters_truncated_bytes'] = strlen($encoded);
+                $block['parameters_raw'] = mb_strcut($encoded, 0, max(0, $remaining), 'UTF-8');
+                $remaining = 0;
+            }
+
+            if (! array_key_exists('result', $block) || $block['result'] === null) {
                 return $block;
             }
 
-            // Whichever runs out first: this result's own ceiling, or what is
-            // left of the turn's. Spending the budget in arrival order means an
-            // early result is whole and a late one is cut, which is the same
-            // order a reader meets them in.
+            // A non-string result is neither capped nor charged if it is simply
+            // waved through: an array-valued result measured 8.8 MB against a
+            // budget it spent nothing of.
+            $result = $block['result'];
+            $text = is_string($result) ? $result : (json_encode($result, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
+            $size = strlen($text);
+
+            // The turn's budget is SPENT, not zeroed. Zeroing it on the first
+            // cut meant one result over its own 1 MB ceiling destroyed every
+            // later result in the turn — a two-byte `echo` stored as an empty
+            // string plus "too large to keep", with 7 MB of the budget still
+            // unspent. Strictly worse than having no turn budget at all.
             $keep = min(self::MAX_RESULT_BYTES, max(0, $remaining));
-            if (strlen($result) <= $keep) {
-                $remaining -= strlen($result);
+            if ($size <= $keep) {
+                $remaining -= $size;
 
                 return $block;
             }
 
-            $block['result_truncated_bytes'] = strlen($result);
+            $block['result_truncated_bytes'] = $size;
+            $remaining -= $keep;
+
+            // Which limit was reached decides what the reader is told. "Too
+            // large to keep" is false about a small result that simply arrived
+            // after the budget was gone, and sends them looking at the wrong
+            // thing entirely.
+            $why = $keep < self::MAX_RESULT_BYTES
+                ? "\n…[truncated by the server: this turn's earlier tool output used up the space kept for a turn]"
+                : "\n…[truncated by the server: the full result was streamed but is too large to keep]";
+
             // mb_strcut, NOT substr: substr cuts at a byte offset and can leave
             // a half-formed UTF-8 character, which fails the `blocks` cast and
             // destroys the entire turn — the same destruction this bound exists
             // to prevent, arrived at from the other direction.
-            $block['result'] = mb_strcut($result, 0, $keep, 'UTF-8')
-                ."\n…[truncated by the server: the full result was streamed but is too large to keep]";
-            $remaining = 0;
+            $block['result'] = mb_strcut($text, 0, $keep, 'UTF-8').$why;
 
             return $block;
         }, $blocks);
@@ -702,7 +743,7 @@ final class ConversationRecorder
      */
     private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
     {
-        $blocks = self::capResults(self::reconcileToolCalls($blocks));
+        $blocks = self::capForStorage(self::reconcileToolCalls($blocks));
 
         $text = '';
         foreach ($blocks as $block) {
