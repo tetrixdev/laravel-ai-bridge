@@ -50,7 +50,18 @@ for (const scenario of corpus.scenarios) {
         for (const k of Object.keys(b).sort()) {
           if (k === '_open') continue;          // presentation-only
           if (k.startsWith('_')) continue;      // internal bookkeeping
-          if (b[k] !== undefined) out[k] = b[k];
+          if (b[k] === undefined) continue;
+          // An EMPTY object and an empty array are the same thing here, and
+          // must be compared as such. PHP's `json_decode($json, true)` cannot
+          // tell them apart, so the recorder holds `[]` where this side holds
+          // `{}` — and each half of the corpus was quietly asserting against
+          // its own representation. Thirteen scenarios carry `parameters: {}`,
+          // and every one of them passed while comparing a different value on
+          // each side: the corpus claims "every block, every field, both
+          // readers", and that was the hole in it.
+          out[k] = (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) && Object.keys(b[k]).length === 0)
+            ? []
+            : b[k];
         }
         return out;
       };
@@ -58,9 +69,14 @@ for (const scenario of corpus.scenarios) {
       return el.assistant.blocks.map(clean);
     }, scenario.events);
 
+    // The SAME normalisation on the expected side. Applying it to only one half
+    // does not close the hole, it moves it: the corpus is written with `{}` for
+    // a no-argument call, and the point is that both readers are compared
+    // against one representation rather than each against its own.
+    const emptyObject = (v) => v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0;
     const expected = scenario.expected.map((b) => {
       const out = {};
-      for (const k of Object.keys(b).sort()) out[k] = b[k];
+      for (const k of Object.keys(b).sort()) out[k] = emptyObject(b[k]) ? [] : b[k];
       return out;
     });
 

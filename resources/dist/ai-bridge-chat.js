@@ -487,7 +487,7 @@
                     return `<div class="tool"><b>🔧 ${this.esc(shown)}</b>
                         <pre>${this.esc((b.parameters_raw !== undefined
                             ? b.parameters_raw
-                            : JSON.stringify(b.parameters || {}, null, 2)) + argNote)}</pre>
+                            : this.showArgs(b.parameters)) + argNote)}</pre>
                         ${showResult ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(resultBody)}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
@@ -928,6 +928,20 @@
                     headers: { 'Content-Type': 'application/json' },
                 });
             } catch (e) { /* the EventSource will deliver the terminal regardless */ }
+        }
+
+        // A call's arguments, drawn the same whichever shape they arrive in.
+        //
+        // PHP's `json_decode($json, true)` cannot tell `{}` from `[]`, so a
+        // no-argument call is held as `{}` live and comes back from the
+        // transcript as `[]`. Rendered literally that is `{}` before a reload
+        // and `[]` after one, for the same call — a difference with no meaning
+        // that a reader is left to interpret.
+        showArgs(params) {
+            const empty = !params
+                || (Array.isArray(params) ? params.length === 0 : Object.keys(params).length === 0);
+
+            return empty ? '{}' : JSON.stringify(params, null, 2);
         }
 
         // ── watchdog: never let the UI hang on "Thinking" ─────────────

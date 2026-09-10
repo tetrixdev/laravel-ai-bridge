@@ -394,3 +394,33 @@ test('a standalone result that returned nothing is not deleted', async ({ page }
 
   expect(html).toContain('(no output)');
 });
+
+test('a no-argument call reads the same before and after a reload', async ({ page }) => {
+  // PHP's json_decode($json, true) cannot tell {} from [], so a no-argument
+  // call is held as {} live and comes back from the transcript as []. Rendered
+  // literally that is "{}" before a reload and "[]" after one, for the same
+  // call — a difference with no meaning, left for the reader to interpret.
+  await ready(page);
+
+  const live = await renderBlocks(page, [
+    { type: 'tool_call', tool_name: 'Ping', tool_call_id: 'c1', parameters: {} },
+  ]);
+  const reloaded = await renderBlocks(page, [
+    { type: 'tool_call', tool_name: 'Ping', tool_call_id: 'c1', parameters: [] },
+  ]);
+
+  expect(live).toBe(reloaded);
+  expect(live).toContain('{}');
+  expect(live).not.toContain('[]');
+});
+
+test('arguments that are actually present are still shown', async ({ page }) => {
+  // The normalisation must apply to EMPTY only — otherwise it would hide the
+  // arguments it exists to display consistently.
+  await ready(page);
+  const html = await renderBlocks(page, [
+    { type: 'tool_call', tool_name: 'Bash', tool_call_id: 'c1', parameters: { command: 'echo hi' } },
+  ]);
+
+  expect(html).toContain('echo hi');
+});

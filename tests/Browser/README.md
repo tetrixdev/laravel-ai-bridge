@@ -52,6 +52,17 @@ The corpus makes that a test.
 composer test -- --filter=Conformance                         # the recorded half
 ```
 
+**One normalisation, deliberately.** PHP's `json_decode($json, true)` cannot
+tell `{}` from `[]`, so a no-argument call is held as `{}` by the component and
+as `[]` by the recorder. Both halves of the corpus were quietly asserting
+against their own representation — thirteen scenarios carry `parameters: {}`,
+and every one passed while comparing a different value on each side. An empty
+object and an empty array are now folded together on both sides, so the two
+readers are compared against one representation rather than each against its
+own. Nothing else is normalised: a real difference in arguments still fails,
+and the component renders both shapes as `{}` so a reader sees the same thing
+before and after a reload.
+
 **When a divergence is found, add a scenario.** Both suites pick it up with no
 further wiring. Every block is compared, and every field either side models —
 `tool_name`, `parameters`, `parameters_raw`, `parameters_truncated_bytes`,
