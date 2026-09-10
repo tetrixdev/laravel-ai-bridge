@@ -969,3 +969,46 @@ test('a short text block past the prose budget is left alone, not inflated', fun
     expect($texts[1]['text'])->toBe('Done.')
         ->and($texts[1])->not->toHaveKey('text_truncated_bytes');
 });
+
+test("a failed turn's cost is kept, not thrown away with its terminal", function () {
+    // The bridge sends `error` and then a trailing `done` carrying what the
+    // turn cost — often more than a turn that succeeded. The terminated guard
+    // dropped the whole frame, so the cost of exactly the turns worth
+    // investigating was the cost nobody could see.
+    $handler = recordingHandler();
+
+    $handler->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, [
+        'usage' => ['input_tokens' => 100, 'output_tokens' => 5],
+        'cost_usd' => 0.41,
+        'num_turns' => 2,
+    ]));
+
+    expect($handler->lastDoneUsage())->toBe(['input_tokens' => 100, 'output_tokens' => 5])
+        ->and($handler->lastDoneMeta()['cost_usd'])->toBe(0.41)
+        ->and($handler->lastDoneMeta()['num_turns'])->toBe(2);
+});
+
+test('recording a late done does not fire a second terminal', function () {
+    // Keeping the numbers must not turn one turn into two endings.
+    $handler = recordingHandler();
+    $dones = 0;
+    $handler->onDone(function () use (&$dones) { $dones++; });
+
+    $handler->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, ['usage' => ['input_tokens' => 1]]));
+
+    expect($dones)->toBe(0)
+        ->and($handler->lastDoneUsage())->toBe(['input_tokens' => 1]);
+});
+
+test('a cancelled turn does not record a late done', function () {
+    // Cancellation is the reader saying stop; a trailing frame after it is not
+    // something to quietly adopt.
+    $handler = recordingHandler();
+
+    $handler->cancel();
+    $handler->dispatchEvent(wire(MessageTypes::DONE, ['usage' => ['input_tokens' => 9]]));
+
+    expect($handler->lastDoneUsage())->toBeNull();
+});

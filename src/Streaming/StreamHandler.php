@@ -114,6 +114,14 @@ class StreamHandler
      */
     private array $lastDoneMeta = [];
 
+    /**
+     * The token counts from the last `done`, including one that arrived after
+     * an error terminal and so was never dispatched.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $lastDoneUsage = null;
+
     /** @var Closure[] */
     private array $attachmentCallbacks = [];
 
@@ -284,6 +292,16 @@ class StreamHandler
     public function lastDoneMeta(): array
     {
         return $this->lastDoneMeta;
+    }
+
+    /**
+     * What the turn cost, whether it succeeded or failed.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function lastDoneUsage(): ?array
+    {
+        return $this->lastDoneUsage;
     }
 
     /**
@@ -479,6 +497,19 @@ class StreamHandler
     public function dispatchDone(?array $usage = null, array $meta = []): void
     {
         if ($this->cancelled || $this->terminated) {
+            // A turn that ends in an ERROR still gets a trailing `done`, and it
+            // carries what the turn cost — often more than a turn that
+            // succeeded. Returning here threw all of it away, so the cost of
+            // exactly the turns worth investigating was the cost nobody could
+            // see. It must not dispatch a second terminal, but there is no
+            // reason to discard the numbers: they are recorded for
+            // `lastDoneMeta()` and `lastDoneUsage()` to hand back.
+            if ($this->terminated && ! $this->cancelled) {
+                $this->lastDoneMeta = $meta;
+        $this->lastDoneUsage = $usage;
+                $this->lastDoneUsage = $usage;
+            }
+
             return;
         }
 
