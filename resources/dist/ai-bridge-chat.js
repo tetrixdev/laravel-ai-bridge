@@ -1136,8 +1136,14 @@
                     // Attach to the call it belongs to, so the output is shown
                     // under the tool that produced it rather than floating
                     // loose. Matched on the id the bridge carries on both.
+                    // `!('result' in b)` matters: a second result for the same
+                    // id would otherwise overwrite the first and lose it, where
+                    // the recorder keeps both. Two results for one call should
+                    // not happen — and when something that should not happen
+                    // does, keeping the evidence beats discarding half of it.
                     const owner = d.tool_call_id && this.assistant.blocks.find(
-                        (b) => b.type === 'tool_call' && b.tool_call_id === d.tool_call_id);
+                        (b) => b.type === 'tool_call' && b.tool_call_id === d.tool_call_id
+                            && !('result' in b));
                     if (owner) {
                         owner.result = d.result;
                         if (d.is_error !== undefined) owner.is_error = d.is_error;

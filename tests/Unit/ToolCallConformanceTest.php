@@ -88,6 +88,16 @@ it('records the same tool calls the chat component draws', function (array $scen
             continue;
         }
 
+        // Nor does a cancellation. Routing it through dispatchEvent hits the
+        // "unknown event type" default and silently does nothing, so the turn
+        // never terminates and the recorder persists nothing — which reads as a
+        // divergence in the product rather than in this driver.
+        if ($event['event'] === 'cancelled') {
+            $handler->dispatchCancelled();
+
+            continue;
+        }
+
         $handler->dispatchEvent(StreamEvent::fromArray([
             'type' => MessageTypes::STREAM,
             'request_id' => 'req-conf',
