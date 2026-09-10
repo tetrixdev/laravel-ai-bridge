@@ -619,6 +619,13 @@ final class ConversationRecorder
         }, $blocks));
     }
 
+    /**
+     * Reconcile the turn's blocks and write the assistant message.
+     *
+     * The one place blocks become a record, and so the one place duplicate
+     * calls are cancelled against their frames — at the end, when both
+     * orderings have arrived, rather than on arrival when only one has.
+     */
     private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
     {
         $blocks = self::reconcileToolCalls($blocks);

@@ -25,6 +25,7 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
 
 uses(RefreshDatabase::class);
 
+/** A handler recording into a conversation, with the provider stubbed out. */
 function recordingHandler(): StreamHandler
 {
     $provider = Mockery::mock(StreamableProvider::class);
@@ -38,6 +39,7 @@ function recordingHandler(): StreamHandler
     return $handler;
 }
 
+/** Build the stream envelope the bridge actually sends for one event. */
 function wire(string $event, array $data): StreamEvent
 {
     return StreamEvent::fromArray([

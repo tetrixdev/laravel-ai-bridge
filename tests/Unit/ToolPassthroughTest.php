@@ -39,6 +39,7 @@ beforeEach(function () {
     );
 });
 
+/** A handler recording into a conversation, with the provider stubbed out. */
 function passthroughHandler(): StreamHandler
 {
     $provider = Mockery::mock(StreamableProvider::class);

@@ -39,6 +39,13 @@ final class BufferingSink
         'duration_ms', 'duration_api_ms', 'num_turns', 'permission_denials',
     ];
 
+    /**
+     * Wire a handler's callbacks into the buffered store the SSE endpoint reads.
+     *
+     * Every stream event a consumer can observe has to be represented here.
+     * `tool_result` had no callback at all, so a result that crossed the bridge
+     * intact reached the server and died in this class.
+     */
     public static function attach(StreamHandler $handler, StreamStoreContract $store): void
     {
         $rid = $handler->requestId;
@@ -133,6 +140,12 @@ final class BufferingSink
         });
     }
 
+    /**
+     * Mark a stream finished, swallowing a store failure.
+     *
+     * Called from terminal paths where throwing would replace a finished turn
+     * with an unhandled exception and leave the reader with neither.
+     */
     private static function completeQuietly(StreamStoreContract $store, string $rid, string $status): void
     {
         try {

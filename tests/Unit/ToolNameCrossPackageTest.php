@@ -29,6 +29,7 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
 
 uses(RefreshDatabase::class);
 
+/** Frames captured off the wire from a real bridge turn, replayed verbatim. */
 function bridgeFrames(): array
 {
     $path = __DIR__.'/fixtures/tool-calls-from-bridge.json';
@@ -37,6 +38,7 @@ function bridgeFrames(): array
     return json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
 }
 
+/** A handler recording into a conversation, with the provider stubbed out. */
 function crossPackageHandler(): StreamHandler
 {
     $provider = Mockery::mock(StreamableProvider::class);

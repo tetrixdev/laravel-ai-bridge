@@ -29,6 +29,12 @@ use Tetrix\AiBridge\Streaming\StreamHandler;
 
 uses(RefreshDatabase::class);
 
+/**
+ * The shared corpus, as Pest datasets keyed by scenario name.
+ *
+ * The same file drives tests/Browser/conformance.spec.js, so a divergence
+ * between the recorder and the component fails here rather than in a chat.
+ */
 function conformanceScenarios(): array
 {
     $path = __DIR__.'/../Conformance/tool-call-scenarios.json';
