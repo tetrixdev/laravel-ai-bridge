@@ -1206,7 +1206,19 @@
                     // all of it live and 64KB of parameters_raw on reload —
                     // the one rule this area keeps insisting must not have two
                     // implementations.
-                    if (v && typeof v === 'object' && !Array.isArray(v)) Object.assign(b, this.capParameters(v));
+                    // Gated on the RAW delta text, which is what the recorder
+                    // measures — re-encoding first splits the two on any JSON
+                    // that is not already in canonical compact form, such as
+                    // whitespace padding or \uXXXX escapes.
+                    if (v && typeof v === 'object' && !Array.isArray(v)) {
+                        if (new TextEncoder().encode(raw).length > 65536) {
+                            b.parameters = {};
+                            b.parameters_raw = this.cutToBytes(raw, 65536);
+                            b.parameters_truncated_bytes = new TextEncoder().encode(raw).length;
+                        } else {
+                            b.parameters = v;
+                        }
+                    }
                     else this.keepRawArguments(b, raw);
                 } catch (e) { this.keepRawArguments(b, raw); }
             }

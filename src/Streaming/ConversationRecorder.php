@@ -122,7 +122,10 @@ final class ConversationRecorder
         // {"0":"a"} and ["a"] into the same PHP array, so array_is_list alone
         // recorded a genuine object with numeric keys as "could not be parsed"
         // — a false statement about the data.
-        if (is_array($decoded) && ($trimmed[0] === '{' || $decoded === [])) {
+        // The TEXT decides. `{}` is covered by this test; adding `$decoded === []`
+        // would also swallow `[]`, which is a list and which the component keeps
+        // as raw — two answers for one input.
+        if (is_array($decoded) && $trimmed[0] === '{') {
             return ['parameters' => $decoded];
         }
 
@@ -271,7 +274,7 @@ final class ConversationRecorder
             // parallel tool use.
             if (($current['type'] ?? '') === 'tool_call'
                 && ($current['tool_call_id'] ?? null) === $callId
-                && ! isset($current['result'])) {
+                && ! array_key_exists('result', $current)) {
                 $current['result'] = $result;
                 if ($isError !== null) {
                     $current['is_error'] = $isError;
@@ -284,7 +287,7 @@ final class ConversationRecorder
                 if (($candidate['type'] ?? '') !== 'tool_call') {
                     continue;
                 }
-                if (($candidate['tool_call_id'] ?? null) !== $callId || isset($candidate['result'])) {
+                if (($candidate['tool_call_id'] ?? null) !== $callId || array_key_exists('result', $candidate)) {
                     continue;
                 }
 
@@ -301,7 +304,7 @@ final class ConversationRecorder
             // belongs to — and the carry-over at reconciliation then had
             // nothing to carry.
             foreach ($pendingFrames as $i => $frame) {
-                if (($frame['tool_call_id'] ?? null) === $callId && ! isset($frame['result'])) {
+                if (($frame['tool_call_id'] ?? null) === $callId && ! array_key_exists('result', $frame)) {
                     $pendingFrames[$i]['result'] = $result;
                     if ($isError !== null) {
                         $pendingFrames[$i]['is_error'] = $isError;
@@ -579,6 +582,23 @@ final class ConversationRecorder
                             $blocks[$candidate]['parameters_truncated_bytes'] = $block['parameters_truncated_bytes'];
                         }
                     }
+                }
+
+                // A result the frame carried that could NOT be merged (the
+                // surviving block already has one of its own) becomes a block
+                // in its own right rather than dying with the frame. Two
+                // results for one call should not happen, and when something
+                // that should not happen does, keeping the evidence beats
+                // discarding half of it — the rule the component follows.
+                if (array_key_exists('result', $block) && array_key_exists('result', $blocks[$candidate])
+                    && $block['result'] !== $blocks[$candidate]['result']) {
+                    $orphaned = ['type' => 'tool_result', 'tool_call_id' => $block['tool_call_id'] ?? '', 'result' => $block['result']];
+                    if (array_key_exists('is_error', $block)) {
+                        $orphaned['is_error'] = $block['is_error'];
+                    }
+                    $blocks[$index] = $orphaned;
+
+                    break;
                 }
 
                 unset($blocks[$index]);
