@@ -291,7 +291,13 @@ class StreamHandler
      */
     public function lastDoneMeta(): array
     {
-        return $this->lastDoneMeta;
+        // Without the session handle. It is how a turn is resumed and it is
+        // persisted from the frame itself, not from here, so nothing needs it
+        // in this array — and the README points a host app straight at this
+        // accessor, which should not hand back a resumable handle nobody asked
+        // for. `BufferingSink::publicDoneMeta()` withholds it from the browser
+        // for the same reason; this is the other place it is handed out.
+        return array_diff_key($this->lastDoneMeta, ['cli_session_id' => true]);
     }
 
     /**
