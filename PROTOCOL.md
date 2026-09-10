@@ -787,7 +787,7 @@ Two kinds of call arrive as `tool_call` blocks, and a consumer usually wants to 
 
 | Where it ran | Also arrives as |
 |---|---|
-| The **server** resolves it | a separate [`tool_call`](#tool_call) frame carrying parsed arguments |
+| The **server** resolves it | a separate [`tool_call`](#tool-resolution-flow-cli-bridge) frame carrying parsed arguments |
 | The operator's **own machine** — the CLI's shell, file reader, editor, or a tool the bridge itself runs | nothing else |
 
 For a server-resolved tool the block is a shadow of the `tool_call` frame; render one or the other, not both. For every other call the block is the **only** record that will ever exist, and its `tool_result` the only account of what it did — dropping it is why a chat can end up able to say "4 tool calls" and nothing more.
