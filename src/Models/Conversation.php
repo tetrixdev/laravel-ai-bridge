@@ -35,6 +35,24 @@ class Conversation extends Model
 {
     protected $table = 'ai_bridge_conversations';
 
+    /**
+     * Hidden from JSON, which is how this model reaches a browser.
+     *
+     * `BufferingSink::publicDoneMeta()` deliberately withholds `cli_session_id`
+     * from the SSE stream — it is a resumable handle the server keeps to
+     * itself. That was the whole allowlist, and then `ConversationController`
+     * returned the model whole and handed the same value straight back. An
+     * allowlist on one door is not an allowlist.
+     *
+     * `working_dir` deliberately stays visible. It is a path on the operator's
+     * own machine, but it is one THEY chose and the workspace picker shows it
+     * back to them — hiding it broke that, which is how I found out it is part
+     * of the contract rather than a leak.
+     *
+     * @var list<string>
+     */
+    protected $hidden = ['cli_session_id'];
+
     protected $fillable = [
         'title',
         'mode',

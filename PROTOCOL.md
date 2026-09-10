@@ -765,7 +765,7 @@ Opens a new block. The `block_index` is sequential within the response (0, 1, 2,
 }
 ```
 
-For `tool_call` blocks, includes the tool name:
+For `tool_call` blocks, includes the tool name and id:
 
 ```json
 {
@@ -775,11 +775,26 @@ For `tool_call` blocks, includes the tool name:
   "data": {
     "block_index": 1,
     "block_type": "tool_call",
-    "tool_name": "roll_dice",
-    "tool_call_id": "tc_001"
+    "tool_name": "Bash",
+    "tool_call_id": "toolu_01SXtmUHX3mr4tSyyHMNNxsv"
   }
 }
 ```
+
+`tool_name` is the provider's own name for the tool, **verbatim** — `Bash`, `Read`, `Edit`, or an MCP tool's full namespaced name such as `mcp__bridge__roll_dice`. It is not prettified, split or title-cased; display formatting is the consumer's decision, and a name the consumer cannot map back to the provider's own is worse than useless.
+
+Two kinds of call arrive as `tool_call` blocks, and a consumer usually wants to treat them differently:
+
+| Where it ran | Also arrives as |
+|---|---|
+| The **server** resolves it | a separate [`tool_call`](#tool-resolution-flow-cli-bridge) frame carrying parsed arguments |
+| The operator's **own machine** — the CLI's shell, file reader, editor, or a tool the bridge itself runs | nothing else |
+
+For a server-resolved tool the block is a shadow of the `tool_call` frame; render one or the other, not both. For every other call the block is the **only** record that will ever exist, and its `tool_result` the only account of what it did — dropping it is why a chat can end up able to say "4 tool calls" and nothing more.
+
+**The `mcp__bridge__` prefix does not tell the two apart.** It says the tool was declared by the server, not that a frame is coming: a server-declared tool with `execute: "local"` runs on the bridge and reaches the model under the same prefix, with no frame of its own. A consumer that discards a prefixed block on sight therefore deletes exactly those calls and orphans their results. Keep every block, and treat one as a shadow only once the matching `tool_call` frame has actually arrived — reconciling at the end of the turn, since the order of the two is not pinned down.
+
+`tool_call_id` pairs the call to its [`tool_result`](#tool_result).
 
 #### `block_delta`
 
@@ -865,7 +880,10 @@ Closes a block. No further deltas for this `block_index` will be sent.
 
 #### `tool_result`
 
-After the server executes a tool and returns the result (see [Tool Calls](#tool-calls)), the bridge acknowledges with this event before continuing generation:
+What a tool returned. Emitted for **both** kinds of tool call:
+
+- a tool the **server** resolved (see [Tool Calls](#tool-calls)), acknowledged before generation continues;
+- a tool that ran on the **operator's own machine** — the CLI's shell, file reader, editor. The server never sees these run, so this event is the only account of what they did.
 
 ```json
 {
@@ -873,11 +891,97 @@ After the server executes a tool and returns the result (see [Tool Calls](#tool-
   "request_id": "req_abc123",
   "event": "tool_result",
   "data": {
-    "tool_call_id": "tc_001",
-    "result": "You rolled a 17!"
+    "tool_call_id": "toolu_01SXtmUHX3mr4tSyyHMNNxsv",
+    "result": "hello",
+    "is_error": false
   }
 }
 ```
+
+`tool_call_id` is the same id carried on the matching `tool_call` block's `block_start`, so a consumer can pair a result to the call that produced it.
+
+`is_error` is the authoritative failure signal, and is **absent when the provider did not report one** — absent never means "succeeded". Do not infer failure from the text: a tool legitimately printing `Error: no matches` is indistinguishable from one that failed. (For historical reasons the Codex and Gemini adapters additionally prefix `Error: ` onto a failed result; that prefix is not a substitute for the field.)
+
+##### Chunked results
+
+A result larger than one frame arrives **in pieces**, keyed by `tool_call_id`:
+
+```json
+{
+  "type": "stream",
+  "request_id": "req_abc123",
+  "event": "tool_result",
+  "data": {
+    "tool_call_id": "toolu_01SXtmUHX3mr4tSyyHMNNxsv",
+    "result": "…the first 256 KB…",
+    "chunk_index": 0,
+    "final": false,
+    "is_error": false
+  }
+}
+```
+
+- **`chunk_index`** — 0-based, ascending, one sequence per `tool_call_id`. Two calls can chunk at the same time, so a consumer must key its buffer by the call id and not by arrival order.
+- **`final`** — `true` on the last chunk and only then. Concatenate `result` in index order; the join is exact, with no separator.
+- **`truncated_bytes`** — on the final chunk only, and only when the whole result exceeded the 16 MB ceiling below. It names how many bytes were dropped.
+
+**A result that fits in one frame carries neither `chunk_index` nor `final`** — the shape this event has always had. Chunk fields appear only where a result would previously have been truncated, so a consumer written before chunking existed sees no change to anything it could already receive.
+
+If the stream ends before a `final` chunk arrives, keep what you have and mark it partial. Discarding it loses the only account of what the tool did, which is the thing this event exists to carry.
+
+**Size.** Three ceilings:
+
+- A **single frame's result** holds at most 256 KB of JSON-encoded bytes. Longer results are chunked, not cut.
+- A **whole result**, across all its chunks, is bounded at **16 MB of JSON-encoded bytes** — the wire cost, which is what the receiver has to hold. Past that the final chunk carries `truncated_bytes` (counting the raw content bytes dropped) and a marker. There has to be some limit: the reassembling side holds every chunk until the result completes, so an unbounded result is an unbounded allocation on a machine that did not choose to make it.
+- A **`tool_call` block's arguments** are bounded at **64 KB** — the same number the reference server caps them at, so that two truncations cannot compose and destroy each other's evidence. Arguments are not chunked; they are bounded by structure, below.
+
+A consumer that **stores** results has its own decision to make, separate from the transport, and needs more than one bound. The reference server keeps a reassembled result whole in the live stream and, before writing to the transcript, applies:
+
+| Bound | Value | Why |
+|---|---|---|
+| one stored result | 1 MB | a `cat` of a large file should not dominate a row |
+| one turn's blocks — **results and arguments together** | 8 MB | bounding results alone bounds nothing: the number of tool calls is the model's choice, and 200 calls at 64 KB of arguments is 12 MB on its own |
+| one turn's **prose** (text and thinking) | 4 MB, budgeted separately | it grows delta by delta with no ceiling of its own and shares the row; kept apart from tool output because an answer is what a reader came for, and cutting it to make room for a `cat` is the wrong trade |
+| one assembling result | 16 MB | held in memory until its final chunk arrives |
+| all assembling results at once | 32 MB | the sender picks the `tool_call_id` each buffer is keyed by, so the count is not the receiver's to choose |
+| results assembling at once | 64 | as above, for the number of buffers rather than their size |
+
+None of that is the protocol's business, but the reasoning is worth stating: a database write that is too large tends to fail as a whole row, and a turn's prose is in the same row as its tool results. Losing the entire assistant message to one large `cat` is a worse outcome than a marked truncation.
+
+Three consequences a consumer should copy. **Spend a turn budget, do not zero it** — cutting one result must not make every later result in the turn store empty. **Say which bound was reached**: "this result was too large" is false about a small result that merely arrived after the budget was gone, and sends a reader at the wrong thing. And **never replace content with a longer notice** — past the budget a truncation marker is bigger than a short result, so swapping one for the other grows the row it exists to shrink.
+
+That last rule makes a turn budget a target rather than a hard ceiling: once it is spent, short blocks are kept whole and the total can drift past it by up to a marker's length per block. The alternative is storing an empty result, which renders as "the tool returned nothing" — a false statement about a call that produced output. The reference server takes the drift and measures it: under 30 KB across a 500-call turn, against a `max_allowed_packet` counted in megabytes.
+
+Arguments are bounded by **structure**, not by cutting the text. Every key survives that can, and only values too large to carry are replaced, by an object saying what was there:
+
+```json
+{ "file_path": "/etc/hosts", "content": { "__truncated__": { "bytes": 2000002, "head": "127.0.0.1 …" } } }
+```
+
+That keeps the result valid JSON. Cutting the encoded text instead makes it stop parsing, and a consumer then loses *every* argument — including the twenty-byte `file_path` that says what the call actually did. When breadth rather than size is the problem, the entries that fit are kept and a `__truncated__` key reports how many were not; if the input already uses that name, a free variant is chosen instead.
+
+None of this is squeamishness about size: an oversized frame is not delivered-and-ignored, it is answered with a `CLOSE_TOO_BIG` that tears down the WebSocket connection and every in-flight request on it. A marked truncation is what a consumer can act on.
+
+Binary parts — an image or audio block, an MCP embedded resource carrying a base64 blob — are replaced by a short description of their kind and size rather than inlined. A screenshot is around 600,000 characters of base64: unreadable as output, and two of them exceed the frame cap on their own. A file the assistant means to hand back has its own route in the [`attachment`](#attachment) event.
+
+#### `rate_limit`
+
+The provider's own rate-limit status, forwarded as the CLI reports it. **Informational and non-terminal** — the turn continues, and a consumer that treats this as an error will abort a perfectly healthy turn.
+
+```json
+{
+  "type": "stream",
+  "request_id": "req_abc123",
+  "event": "rate_limit",
+  "data": {
+    "provider": "claude",
+    "info": { "status": "allowed", "rateLimitType": "five_hour", "resetsAt": 1788991200 }
+  }
+}
+```
+
+
+`info` is the provider's own shape, passed through unchanged rather than normalised — its contents differ per provider and are expected to change. Carried so a server can show what the operator's CLI already knows, instead of discovering a limit by hitting it.
 
 #### `attachment`
 
@@ -915,15 +1019,39 @@ Signals the end of the AI response. No more events for this `request_id`.
   "event": "done",
   "data": {
     "usage": {
-      "input_tokens": 1250,
-      "output_tokens": 380
+      "input_tokens": 6,
+      "output_tokens": 183,
+      "cache_creation_input_tokens": 5429,
+      "cache_read_input_tokens": 66013
     },
+    "model": "claude-sonnet-5",
+    "provider_version": "2.1.261",
+    "stop_reason": "end_turn",
+    "cost_usd": 0.0377526,
+    "duration_ms": 7034,
+    "duration_api_ms": 7597,
+    "num_turns": 3,
+    "permission_denials": [],
     "cli_session_id": "session_def456"
   }
 }
 ```
 
 `usage` is optional — not all CLIs report token counts.
+
+**The cache counts are not a detail.** On a resumed conversation they dominate: the example above is a real turn that read 66,013 cached tokens against six new input tokens. A consumer showing only `input_tokens` and `output_tokens` understates the turn by orders of magnitude and cannot reconcile its own numbers with the provider's bill.
+
+Everything beside `usage` is likewise provider-reported and optional. **Absent means the CLI did not say — never that the value was zero.** The bridge forwards what it is given rather than deciding what a server ought to care about:
+
+| Field | What it is |
+|---|---|
+| `model` | The model that actually ran, resolved from whatever alias was requested. A server asking for `sonnet` learns here what that became. |
+| `provider_version` | Version of the provider CLI that ran the turn. |
+| `stop_reason` | Why the model stopped — `end_turn`, `max_tokens`, and so on. |
+| `cost_usd` | What the provider says the turn cost. |
+| `duration_ms` / `duration_api_ms` | Wall-clock duration of the turn, and of the API portion. |
+| `num_turns` | How many assistant turns the CLI took internally to answer. |
+| `permission_denials` | Tool calls the CLI's own permission system refused. In `isolated` this is the record of what the posture actually stopped — an empty answer with three denials reads very differently from an empty answer with none. |
 
 `cli_session_id` is the CLI session this turn ran under — the id created on a fresh start, or the id resumed. The server persists it on the conversation so the next turn can resume. Absent/`null` when no session id was produced.
 

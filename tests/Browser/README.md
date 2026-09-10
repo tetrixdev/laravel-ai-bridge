@@ -31,3 +31,41 @@ two things load-bearing that were previously too rare to matter:
 
 Sending a message and opening a conversation deliberately override that and
 force the bottom, since the new content is the whole point of those renders.
+
+## Conformance: one corpus, two readers
+
+`tests/Conformance/tool-call-scenarios.json` is replayed through **both**
+implementations of the tool-call rules:
+
+- `tests/Unit/ToolCallConformanceTest.php` → `ConversationRecorder` (what a
+  reload shows)
+- `tests/Browser/conformance.spec.js` → the chat component (what the reader
+  sees live)
+
+They are independent readers of the same protocol, and every parity bug in this
+area came from asserting by hand that they agree — which they repeatedly did
+not, in ways only a reviewer replaying the same input through both would notice.
+The corpus makes that a test.
+
+```bash
+~/.local/bin/pw test tests/Browser/conformance.spec.js        # the live half
+composer test -- --filter=Conformance                         # the recorded half
+```
+
+**One normalisation, deliberately.** PHP's `json_decode($json, true)` cannot
+tell `{}` from `[]`, so a no-argument call is held as `{}` by the component and
+as `[]` by the recorder. Both halves of the corpus were quietly asserting
+against their own representation — thirteen scenarios carry `parameters: {}`,
+and every one passed while comparing a different value on each side. An empty
+object and an empty array are now folded together on both sides, so the two
+readers are compared against one representation rather than each against its
+own. Nothing else is normalised: a real difference in arguments still fails,
+and the component renders both shapes as `{}` so a reader sees the same thing
+before and after a reload.
+
+**When a divergence is found, add a scenario.** Both suites pick it up with no
+further wiring. Every block is compared, and every field either side models —
+`tool_name`, `parameters`, `parameters_raw`, `parameters_truncated_bytes`,
+`tool_call_id`, `result`, `is_error`, `text`, `type` — with internal bookkeeping
+keys (those prefixed `_`) excluded. A comparison narrower than the thing it
+compares proves nothing.

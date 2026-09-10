@@ -1,0 +1,1099 @@
+<?php
+
+declare(strict_types=1);
+
+/**
+ * A tool result too large for one frame arrives in chunks and is reassembled
+ * here, at the first thing to touch the wire.
+ *
+ * Everything downstream — ConversationRecorder, BufferingSink, the browser
+ * component — keeps seeing ONE complete result. That is the whole design: the
+ * chunking lives on the wire and nowhere else, so the three independent readers
+ * of a tool result cannot disagree about it.
+ */
+
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Tetrix\AiBridge\Protocol\MessageTypes;
+use Tetrix\AiBridge\Streaming\StreamHandler;
+
+uses(RefreshDatabase::class);
+
+/**
+ * Drive a handler with these events and return every tool_result it dispatched.
+ *
+ * @return list<array{0: string, 1: mixed, 2: bool|null}>
+ */
+function collectToolResults(callable $drive): array
+{
+    $handler = recordingHandler();
+    $seen = [];
+    $handler->onToolResult(function (string $id, mixed $result, ?bool $isError) use (&$seen) {
+        $seen[] = [$id, $result, $isError];
+    });
+
+    $drive($handler);
+
+    return $seen;
+}
+
+test('a result that fits in one frame is passed straight through', function () {
+    // No chunk fields: the shape every result had before chunking existed.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'all of it',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toBe([['t1', 'all of it', null]]);
+});
+
+test('chunks are joined back into one result, dispatched once', function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'one ', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'two ', 'chunk_index' => 1, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'three', 'chunk_index' => 2, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toBe([['t1', 'one two three', null]]);
+});
+
+test('nothing is dispatched until the final chunk arrives', function () {
+    // A downstream consumer must never see half a result and treat it as whole.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'half', 'chunk_index' => 0, 'final' => false,
+        ]));
+    });
+
+    expect($seen)->toBe([]);
+});
+
+test('two calls chunking at the same time do not mix', function () {
+    // Parallel tool calls interleave on one connection. Keyed by call id, not
+    // by arrival order, or one tool gets the other tool's output.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 'a', 'result' => 'A1', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 'b', 'result' => 'B1', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 'a', 'result' => 'A2', 'chunk_index' => 1, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 'b', 'result' => 'B2', 'chunk_index' => 1, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toBe([['a', 'A1A2', null], ['b', 'B1B2', null]]);
+});
+
+test('the verdict survives, whichever chunk carried it', function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'boom ', 'chunk_index' => 0, 'final' => false, 'is_error' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'again', 'chunk_index' => 1, 'final' => true, 'is_error' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toBe([['t1', 'boom again', true]]);
+});
+
+test('a result whose final chunk never comes is kept, and marked', function () {
+    // Dropping it silently is the exact failure this whole change exists to
+    // stop. A partial result that says it is partial beats nothing at all.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'the first half', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][0])->toBe('t1')
+        ->and($seen[0][1])->toStartWith('the first half')
+        ->and($seen[0][1])->toContain('incomplete');
+});
+
+test('a partial result survives the turn ending in an error', function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'got this far', 'chunk_index' => 0, 'final' => false, 'is_error' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('got this far')
+        ->and($seen[0][2])->toBe(false);
+});
+
+test('a gap in the numbering is reported, not papered over', function () {
+    // Reordering or back-filling would guess at content. Saying so does not.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'first', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'fourth', 'chunk_index' => 3, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toBe("first\n…[incomplete: the stream ended before this result finished]");
+});
+
+test('a stream cannot make this process allocate without limit', function () {
+    // The bridge stops at the same ceiling. A server must not depend on a
+    // client to bound its memory.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 19,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and(strlen($seen[0][1]))->toBeLessThanOrEqual(16 * 1024 * 1024 + 200)
+        // "truncated by the server", not "incomplete": every chunk arrived and
+        // THIS side declined to hold them.
+        ->and($seen[0][1])->toContain('this result alone exceeded');
+});
+
+test('a chunked result reaches the transcript as one block', function () {
+    // The end-to-end point of reassembling at the wire: the recorder never
+    // learns that chunking exists.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Read', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"file_path":"/a"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'line one\n', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'line two', 'chunk_index' => 1, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and($tool['result'])->toBe('line one\nline two')
+        ->and(collect($blocks)->where('type', 'tool_result'))->toHaveCount(0);
+});
+
+test('a partial result survives the turn being cancelled', function () {
+    // The third terminal, and the one that nearly got away: `cancel()` sets a
+    // flag that makes dispatchToolResult refuse, so a flush written the obvious
+    // way is dropped by the very guard meant to protect it. The recorder keeps
+    // partial TEXT on this same terminal, so a tool result vanishing here would
+    // be the odd one out.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'got this far', 'chunk_index' => 0, 'final' => false, 'is_error' => true,
+        ]));
+        $h->cancel();
+        $h->dispatchCancelled('user stopped it');
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('got this far')
+        ->and($seen[0][1])->toContain('incomplete')
+        ->and($seen[0][2])->toBe(true);
+});
+
+test('a cancelled stream stops accumulating chunks', function () {
+    // Otherwise a cancelled turn can still be made to allocate, one 1 MB frame
+    // at a time, by a sender that simply keeps going.
+    // Deliberately NOT final. A final chunk would be stopped by the guard on
+    // dispatchToolResult even if it had been buffered, so the test would pass
+    // whether or not the buffering was prevented — proving nothing. A partial
+    // one is only ever dispatched by the terminal flush, which bypasses that
+    // guard, so it appears if and only if it was retained.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->cancel();
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'after the cancel', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchCancelled('user stopped it');
+    });
+
+    expect($seen)->toBe([]);
+});
+
+test('an enormous result is bounded before it reaches the database', function () {
+    // The write is wrapped in a catch that logs and swallows, so an oversized
+    // row does not fail loudly — it loses the whole assistant turn, prose and
+    // all. Chunking made that reachable by removing the bridge's own 256 KB
+    // bound, so the record needs one of its own.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => '{"command":"cat big"}']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        $piece = str_repeat('x', 512 * 1024);
+        for ($i = 0; $i < 6; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 5,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and(strlen($tool['result']))->toBeLessThan(1048576 + 200)
+        ->and($tool['result'])->toContain('truncated by the server')
+        ->and($tool['result_truncated_bytes'])->toBe(6 * 512 * 1024);
+
+    // The turn itself survived, which is the whole point.
+    expect(collect($blocks)->firstWhere('type', 'tool_call')['tool_name'])->toBe('Bash');
+});
+
+test('bounding the result does not cut a character in half', function () {
+    // substr at a byte offset leaves half a UTF-8 character, the blocks cast
+    // then fails, and the entire turn is lost — the same destruction this
+    // bound exists to prevent, arrived at from the other direction. The
+    // multi-byte characters are placed so the 1 MB mark lands INSIDE one.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        // 'é' is two bytes. An odd-length ASCII prefix puts every following
+        // character boundary off the 1 MB mark by one byte.
+        $body = str_repeat('a', 1048575).str_repeat('é', 200_000);
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => $body, 'chunk_index' => 0, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->not->toBeNull()
+        ->and(mb_check_encoding($tool['result'], 'UTF-8'))->toBeTrue()
+        ->and(json_encode($tool['result']))->not->toBeFalse();
+});
+
+test('many ids cannot allocate what one id may not', function () {
+    // The per-result ceiling bounds ONE buffer, and the sender picks the
+    // tool_call_id every buffer is keyed by — so on its own it bounds nothing.
+    // A thousand ids carrying an unfinished chunk each is a thousand buffers,
+    // none of them individually near its limit.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => $piece, 'chunk_index' => 0, 'final' => false,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // Never more buffers than the cap allows...
+    expect(count($seen))->toBeLessThanOrEqual(64);
+
+    // ...and never more bytes across all of them than the aggregate ceiling.
+    $total = array_sum(array_map(fn ($r) => strlen($r[1]), $seen));
+    expect($total)->toBeLessThanOrEqual(32 * 1024 * 1024 + 64 * 200);
+});
+
+test('one large result still assembles under the aggregate ceiling', function () {
+    // The aggregate limit must not make the ordinary case worse: a single
+    // result up to its own ceiling still arrives whole.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('y', 1024 * 1024);
+        for ($i = 0; $i < 8; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 7,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and(strlen($seen[0][1]))->toBe(8 * 1024 * 1024)
+        ->and($seen[0][1])->not->toContain('incomplete');
+});
+
+test('flushing a buffer gives its bytes back to the aggregate', function () {
+    // Without the release, a long turn of ordinary results walks the running
+    // total up to the ceiling and then refuses everything after it.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('z', 1024 * 1024);
+        for ($call = 0; $call < 40; $call++) {
+            for ($i = 0; $i < 2; $i++) {
+                $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                    'tool_call_id' => "c{$call}", 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 1,
+                ]));
+            }
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // 80 MB in total, one call at a time, each completed and released before
+    // the next begins. Every one arrives whole.
+    expect($seen)->toHaveCount(40);
+    foreach ($seen as $result) {
+        expect(strlen($result[1]))->toBe(2 * 1024 * 1024);
+    }
+});
+
+/*
+|--------------------------------------------------------------------------
+| The flush has to happen BEFORE the terminal callbacks, not merely happen
+|--------------------------------------------------------------------------
+|
+| The tests above assert on raw onToolResult callbacks, which fire whatever the
+| ordering is. Moving every flush to AFTER its dispatchCallbacks left the whole
+| suite green — and it is not cosmetic: the recorder persists from inside one of
+| those callbacks, so a result flushed afterwards is assembled correctly and then
+| never written down. These assert on the RECORD, which is the thing that has to
+| be right.
+|
+*/
+
+test('a partial result reaches the transcript when the turn ends normally', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'half an answer', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->toHaveKey('result')
+        ->and($tool['result'])->toStartWith('half an answer');
+});
+
+test('a partial result reaches the transcript when the turn errors', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'half an answer', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->toHaveKey('result')
+        ->and($tool['result'])->toStartWith('half an answer');
+});
+
+test('a partial result reaches the transcript when the turn is cancelled', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'half an answer', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->cancel();
+        $h->dispatchCancelled('user stopped it');
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect($tool)->toHaveKey('result')
+        ->and($tool['result'])->toStartWith('half an answer');
+});
+
+test('the marker says which side ran out, because they are different faults', function () {
+    // A result the bridge never finished sending and a result this side refused
+    // to hold are not the same problem, and the same words for both send
+    // whoever debugs it to the wrong machine.
+    $stopped = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'partial', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $refused = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 19,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($stopped[0][1])->toContain('the stream ended')
+        ->and($stopped[0][1])->not->toContain('truncated by the server')
+        ->and($refused[0][1])->toContain('truncated by the server')
+        ->and($refused[0][1])->not->toContain('the stream ended');
+});
+
+test('a complete result is never refused, however many buffers are open', function () {
+    // It needs no buffer, so no buffering limit has any business refusing it.
+    // Dropped outright once 64 buffers were open: no callback, no result on the
+    // block, and a chat drawing that call as still running for ever.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        for ($i = 0; $i < 64; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "filler{$i}", 'result' => 'x', 'chunk_index' => 0, 'final' => false,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 'real', 'result' => 'the answer is 42', 'chunk_index' => 0, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $real = collect($seen)->first(fn ($r) => $r[0] === 'real');
+
+    expect($real)->not->toBeNull()
+        ->and($real[1])->toBe('the answer is 42');
+});
+
+test('an unchunked result releases a half-assembled buffer for the same call', function () {
+    // Left in place the buffer never finalises and its bytes stay charged
+    // against the turn's ceiling, starving every later result on the
+    // connection. The second call proves the budget came back.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => str_repeat('x', 1024 * 1024), 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 't1', 'result' => 'superseded']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // One result, the whole one — and no partial left over to flush.
+    expect($seen)->toBe([['t1', 'superseded', null]]);
+});
+
+test("the bridge's own dropped byte count is kept, not discarded", function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'head', 'chunk_index' => 0,
+            'final' => true, 'truncated_bytes' => 900000000,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('head')
+        ->and($seen[0][1])->toContain('900000000');
+});
+
+test('a turn of many results is bounded in total, not just one at a time', function () {
+    // Bounding one result bounds nothing: the number of tool calls in a turn is
+    // the model's choice. Seventy calls returning 2 MB each is a 70 MB row,
+    // past a default max_allowed_packet — and the write is caught, logged and
+    // swallowed, so the whole turn goes, prose included.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('x', 900 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $total = collect($blocks)->sum(fn ($b) => strlen($b['result'] ?? ''));
+
+    // 18 MB offered, 8 MB kept, and the turn itself survived.
+    expect($total)->toBeLessThanOrEqual(8 * 1024 * 1024 + 4096)
+        ->and(collect($blocks)->where('type', 'tool_call'))->toHaveCount(20);
+
+    // Spent in arrival order: the first results are whole, a later one is cut.
+    expect($blocks[0]['result'])->not->toContain('truncated by the server')
+        ->and(collect($blocks)->contains(fn ($b) => str_contains($b['result'] ?? '', 'truncated by the server')))->toBeTrue();
+});
+
+test('the turn budget does not cut a character in half either', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        // The first result eats most of the budget on an ODD boundary, so the
+        // second is cut at an offset that lands inside a two-byte character.
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't0',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't0', 'result' => str_repeat('a', 7 * 1024 * 1024 + 1),
+        ]));
+
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 1, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't1',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => str_repeat('é', 2 * 1024 * 1024),
+        ]));
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    foreach ($blocks as $block) {
+        expect(mb_check_encoding($block['result'] ?? '', 'UTF-8'))->toBeTrue();
+    }
+    expect(json_encode($blocks))->not->toBeFalse();
+});
+
+test('one oversized result does not destroy every result after it', function () {
+    // The turn budget is SPENT, not zeroed. Zeroing it on the first cut meant a
+    // single result over its own 1 MB ceiling wiped out every later result in
+    // the turn: a two-byte `echo` stored as an empty string plus "too large to
+    // keep", with seven megabytes of the budget still unspent. That is strictly
+    // worse than having no turn budget at all.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $sizes = [2 * 1024 * 1024, 11, 2, 4];
+        foreach ($sizes as $i => $size) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('x', $size),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tools = collect($blocks)->where('type', 'tool_call')->values();
+
+    // The big one is cut at its own ceiling...
+    expect(strlen($tools[0]['result']))->toBeGreaterThan(1024 * 1024)
+        ->and($tools[0])->toHaveKey('result_truncated_bytes');
+
+    // ...and the three tiny ones after it are stored WHOLE and unmarked.
+    foreach ([1 => 11, 2 => 2, 3 => 4] as $i => $size) {
+        expect($tools[$i]['result'])->toBe(str_repeat('x', $size))
+            ->and($tools[$i])->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('a result cut because the turn ran out says so, not that it was too large', function () {
+    // "Too large to keep" is false about a small result that simply arrived
+    // after the budget was gone, and sends a reader at the wrong thing.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        for ($i = 0; $i < 10; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tools = collect($blocks)->where('type', 'tool_call')->values();
+    $late = $tools[9];
+
+    expect($late['result'])->toContain('used up the space kept for a turn')
+        ->and($late['result'])->not->toContain('too large to keep');
+});
+
+test('a result that is not a string is charged and capped like one', function () {
+    // Waved through untouched, an array-valued result is neither bounded nor
+    // charged: measured at 8.8 MB against a budget it spent nothing of.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+            'block_index' => 0, 'block_type' => 'tool_call', 'tool_name' => 'Bash', 'tool_call_id' => 't0',
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't0', 'result' => array_fill(0, 200_000, 'aaaaaaaaaaaaaaaa'),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $tool = collect($blocks)->firstWhere('type', 'tool_call');
+
+    expect(strlen(is_string($tool['result']) ? $tool['result'] : json_encode($tool['result'])))
+        ->toBeLessThan(1024 * 1024 + 500)
+        ->and($tool)->toHaveKey('result_truncated_bytes');
+});
+
+test("a turn's arguments are charged against the same budget as its results", function () {
+    // Bounding results alone does not bound the row: 130 calls carrying 64 KB
+    // of arguments each is another 8 MB, and it is the ROW that has to fit.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $big = json_encode(['content' => str_repeat('a', 60 * 1024)]);
+        // Two hundred, not a hundred and thirty: at 130 the arguments alone are
+        // 7.9 MB and the row squeaks under 16 MB even when they are not charged
+        // at all, so the test passed against the bug it was written for.
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Write', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $big]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('r', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // The turn has to SURVIVE first. `persist` catches a failed write and
+    // swallows it, so `recordTurn` returns [] on total loss — and an empty
+    // array encodes to two bytes, which passes a size assertion with flying
+    // colours. The test would have been green on exactly the catastrophe it
+    // was written to detect.
+    expect(collect($blocks)->where('type', 'tool_call'))->toHaveCount(200);
+
+    // The whole persisted value, which is the thing max_allowed_packet sees.
+    expect(strlen((string) json_encode($blocks)))->toBeLessThan(16 * 1024 * 1024);
+});
+
+test('the marker names the ceiling that was actually reached', function () {
+    // One 20 MB result with nothing else open is not "this turn's results
+    // together" — that is the same misattribution the last fix removed, moved
+    // from the wrong side to the wrong ceiling.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 19,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen[0][1])->toContain('this result alone exceeded')
+        ->and($seen[0][1])->not->toContain("this turn's tool results together");
+});
+
+test('a result that hit a ceiling AND never finished reports both', function () {
+    // Two different faults with two different fixes. Reporting only the
+    // refusal drops the second silently.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 20; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => false,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    });
+
+    expect($seen[0][1])->toContain('truncated by the server')
+        ->and($seen[0][1])->toContain('the stream ended');
+});
+
+test('an unchunked frame with no result does not destroy what was buffered', function () {
+    // It was throwing away everything already assembled and dispatching null in
+    // its place: the content gone, and nothing saying so.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'real output ', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'line two', 'chunk_index' => 1, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 't1']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('real output line two');
+});
+
+test('the fast path is still bounded by the per-result ceiling', function () {
+    // Skipping the buffer is the point of that path; skipping the ceiling with
+    // it quietly removed the bound — 24 MB through a 16 MB limit.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => str_repeat('x', 24 * 1024 * 1024),
+            'chunk_index' => 0, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(strlen($seen[0][1]))->toBeLessThanOrEqual(16 * 1024 * 1024 + 200)
+        ->and($seen[0][1])->toContain('this result alone exceeded');
+});
+
+test("the bridge's dropped-byte note lands at the end, not inside the content", function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'AAA', 'chunk_index' => 0,
+            'final' => false, 'truncated_bytes' => 99,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'BBB', 'chunk_index' => 1, 'final' => true,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen[0][1])->toStartWith('AAABBB')
+        ->and($seen[0][1])->toContain('99 bytes');
+});
+
+test('arguments cut by the turn budget keep the head they were cut to', function () {
+    // The cap loop ran over ['parameters', 'parameters_raw'] on the same block,
+    // so the pass that wrote `parameters_raw` was followed by one that found
+    // its own output, re-encoded it, and cut it to nothing against a budget now
+    // at zero. The record then said "arguments were truncated" and kept none of
+    // them — the one thing the raw-text key exists to prevent.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $big = json_encode(['content' => str_repeat('a', 60 * 1024)]);
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Write', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $big]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $cut = collect($blocks)->first(fn ($b) => isset($b['parameters_truncated_bytes']));
+
+    expect($cut)->not->toBeNull()
+        // It reports the size of the ORIGINAL arguments, not of its own output.
+        ->and($cut['parameters_truncated_bytes'])->toBeGreaterThan(50 * 1024);
+});
+
+test('a superseded half-assembled result is marked partial, not passed off as whole', function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'only the start', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 't1']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('only the start')
+        ->and($seen[0][1])->toContain('incomplete');
+});
+
+test("a turn's prose is bounded too, or the row still is not", function () {
+    // Text and thinking blocks accumulate delta by delta with no ceiling and
+    // share a row with everything else, so bounding results and arguments while
+    // leaving prose unbounded does not bound the row — it just moves where the
+    // failure comes from.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        for ($i = 0; $i < 12; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+                'block_index' => 0, 'content' => str_repeat('p', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text)->not->toBeNull()
+        ->and(strlen($text['text']))->toBeLessThan(4 * 1024 * 1024 + 500)
+        ->and($text['text'])->toContain("this turn's text exceeded")
+        ->and($text['text_truncated_bytes'])->toBe(12 * 1024 * 1024);
+});
+
+test('an ordinary answer is left completely alone', function () {
+    // The bound has to be invisible in normal use, or it is a worse bug than
+    // the one it prevents.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => 'A normal answer.']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text['text'])->toBe('A normal answer.')
+        ->and($text)->not->toHaveKey('text_truncated_bytes');
+});
+
+test('prose does not compete with tool output for the same budget', function () {
+    // A large answer must not make tool results start truncating, nor the
+    // reverse — they are different things a reader wants for different reasons.
+    //
+    // The sizes are chosen to REACH that: 3.5 MB of prose plus seven 1 MB
+    // results fits comfortably in two separate budgets and does not fit in one
+    // shared 8 MB budget, where the last three results would be starved. An
+    // earlier version of this test used a small result, which fit either way
+    // and so proved nothing.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('p', 3584 * 1024),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        for ($i = 1; $i <= 7; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('r', 1024 * 1024),
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->firstWhere('type', 'text')['text'])->not->toContain('truncated');
+
+    foreach (collect($blocks)->where('type', 'tool_call') as $tool) {
+        expect($tool['result'])->not->toContain('truncated by the server')
+            ->and($tool)->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('bounding prose does not cut a character in half', function () {
+    // ASCII proves nothing here: substr and mb_strcut agree on it. The
+    // multi-byte characters are placed so the 4 MB mark lands INSIDE one, and
+    // an invalid byte there fails the blocks cast and destroys the whole turn.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        // An odd-length ASCII head puts every following character boundary one
+        // byte off the 4 MB mark.
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('a', 4194303).str_repeat('é', 200_000),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text)->not->toBeNull()
+        ->and(mb_check_encoding($text['text'], 'UTF-8'))->toBeTrue()
+        ->and(json_encode($blocks))->not->toBeFalse();
+});
+
+test('a bound never makes a block bigger than it was', function () {
+    // Once the budget is spent, `$keep` is zero and the notice is ninety-odd
+    // bytes — so a twelve-byte `echo` would be replaced by something eight
+    // times its size. A bound that grows the row is not a bound, and this is
+    // the case it is most likely to hit: many small results after one large one.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        // Spend the whole turn budget first.
+        for ($i = 0; $i < 9; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "big{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "big{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+
+        // Then a run of tiny ones, which must survive intact.
+        foreach (['ok', 'done', 'exit 0'] as $n => $tiny) {
+            $idx = 100 + $n;
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $idx, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "tiny{$n}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $idx]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "tiny{$n}", 'result' => $tiny,
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $byId = collect($blocks)->where('type', 'tool_call')->keyBy('tool_call_id');
+
+    foreach (['tiny0' => 'ok', 'tiny1' => 'done', 'tiny2' => 'exit 0'] as $id => $expected) {
+        expect($byId[$id]['result'])->toBe($expected)
+            ->and($byId[$id])->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('a short text block past the prose budget is left alone, not inflated', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('p', 5 * 1024 * 1024),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 1, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => 'Done.']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $texts = collect($blocks)->where('type', 'text')->values();
+
+    expect($texts[1]['text'])->toBe('Done.')
+        ->and($texts[1])->not->toHaveKey('text_truncated_bytes');
+});
+
+test("a failed turn's cost is kept, not thrown away with its terminal", function () {
+    // The bridge sends `error` and then a trailing `done` carrying what the
+    // turn cost — often more than a turn that succeeded. The terminated guard
+    // dropped the whole frame, so the cost of exactly the turns worth
+    // investigating was the cost nobody could see.
+    $handler = recordingHandler();
+
+    $handler->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, [
+        'usage' => ['input_tokens' => 100, 'output_tokens' => 5],
+        'cost_usd' => 0.41,
+        'num_turns' => 2,
+    ]));
+
+    expect($handler->lastDoneUsage())->toBe(['input_tokens' => 100, 'output_tokens' => 5])
+        ->and($handler->lastDoneMeta()['cost_usd'])->toBe(0.41)
+        ->and($handler->lastDoneMeta()['num_turns'])->toBe(2);
+});
+
+test('recording a late done does not fire a second terminal', function () {
+    // Keeping the numbers must not turn one turn into two endings.
+    $handler = recordingHandler();
+    $dones = 0;
+    $handler->onDone(function () use (&$dones) { $dones++; });
+
+    $handler->dispatchEvent(wire(MessageTypes::ERROR, ['code' => 'provider_error', 'message' => 'died']));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, ['usage' => ['input_tokens' => 1]]));
+
+    expect($dones)->toBe(0)
+        ->and($handler->lastDoneUsage())->toBe(['input_tokens' => 1]);
+});
+
+test('a cancelled turn does not record a late done', function () {
+    // Cancellation is the reader saying stop; a trailing frame after it is not
+    // something to quietly adopt.
+    $handler = recordingHandler();
+
+    $handler->cancel();
+    $handler->dispatchEvent(wire(MessageTypes::DONE, ['usage' => ['input_tokens' => 9]]));
+
+    expect($handler->lastDoneUsage())->toBeNull();
+});
+
+test('the callbacks the README documents receive what it says they do', function () {
+    // A README with a wrong signature is worse than no README: it is confidently
+    // wrong, and a reader has no reason to doubt it. These are the exact shapes
+    // documented under "Listening for Tool Results", "What the turn cost" and
+    // "Rate limit notices".
+    $handler = recordingHandler();
+    $seen = [];
+
+    $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError) use (&$seen) {
+        $seen['tool_result'] = [$callId, $result, $isError];
+    });
+    $handler->onRateLimit(function (string $provider, array $info) use (&$seen) {
+        $seen['rate_limit'] = [$provider, $info];
+    });
+    $handler->onDone(function (?array $usage, array $meta = []) use (&$seen) {
+        $seen['done'] = [$usage, $meta];
+    });
+
+    $handler->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+        'tool_call_id' => 't1', 'result' => 'out', 'is_error' => false,
+    ]));
+    $handler->dispatchEvent(wire(MessageTypes::RATE_LIMIT, [
+        'provider' => 'claude', 'info' => ['status' => 'allowed'],
+    ]));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, [
+        'usage' => ['input_tokens' => 3, 'cache_read_input_tokens' => 9],
+        'model' => 'claude-x', 'cost_usd' => 0.1,
+    ]));
+
+    expect($seen['tool_result'])->toBe(['t1', 'out', false])
+        ->and($seen['rate_limit'])->toBe(['claude', ['status' => 'allowed']])
+        ->and($seen['done'][0]['cache_read_input_tokens'])->toBe(9)
+        ->and($seen['done'][1]['model'])->toBe('claude-x')
+        ->and($seen['done'][1]['cost_usd'])->toBe(0.1);
+
+    // And the two accessors the README tells a reader to use after a failure.
+    expect($handler->lastDoneUsage()['input_tokens'])->toBe(3)
+        ->and($handler->lastDoneMeta()['model'])->toBe('claude-x');
+});
+
+test('a long tail of short results cannot walk the row past a packet limit', function () {
+    // Once the budget is spent, a short result is kept WHOLE rather than being
+    // replaced by a notice eight times its size. That means the budget can be
+    // exceeded — so the question is by how much, and whether it can ever reach
+    // the limit that actually matters. Five hundred short results after the
+    // budget is gone is the shape that would do it.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        // Spend the 8 MB budget.
+        for ($i = 0; $i < 9; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "big{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "big{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+
+        // Then a long tail of tiny ones.
+        for ($i = 0; $i < 500; $i++) {
+            $idx = 1000 + $i;
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $idx, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "tiny{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $idx]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "tiny{$i}", 'result' => 'ok',
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // The turn survived, every call is recorded, and the row is nowhere near a
+    // default max_allowed_packet.
+    expect(collect($blocks)->where('type', 'tool_call'))->toHaveCount(509)
+        ->and(strlen((string) json_encode($blocks)))->toBeLessThan(16 * 1024 * 1024);
+
+    // And the tiny results were kept as they were, not inflated into notices.
+    $tiny = collect($blocks)->firstWhere('tool_call_id', 'tiny499');
+    expect($tiny['result'])->toBe('ok');
+});

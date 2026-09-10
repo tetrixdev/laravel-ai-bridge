@@ -25,6 +25,27 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
  */
 final class BufferingSink
 {
+    /**
+     * What of the provider's turn metadata a BROWSER is shown.
+     *
+     * An allowlist, not a denylist. `done` carries whatever the provider chose
+     * to report, and a denylist forwards every future field by default —
+     * including one nobody has evaluated yet. These are the documented ones
+     * from PROTOCOL.md; `cli_session_id` is deliberately absent, being a
+     * resumable handle the server keeps to itself.
+     */
+    private const PUBLIC_DONE_META = [
+        'model', 'provider_version', 'stop_reason', 'cost_usd',
+        'duration_ms', 'duration_api_ms', 'num_turns', 'permission_denials',
+    ];
+
+    /**
+     * Wire a handler's callbacks into the buffered store the SSE endpoint reads.
+     *
+     * Every stream event a consumer can observe has to be represented here.
+     * `tool_result` had no callback at all, so a result that crossed the bridge
+     * intact reached the server and died in this class.
+     */
     public static function attach(StreamHandler $handler, StreamStoreContract $store): void
     {
         $rid = $handler->requestId;
@@ -79,14 +100,32 @@ final class BufferingSink
             ]);
         });
 
+        // Without this the browser could never see a tool result at all: the
+        // bridge sends them, StreamHandler dispatches them, and the SSE buffer
+        // simply had no handler, so they stopped here.
+        $handler->onToolResult(function (string $toolCallId, mixed $result, ?bool $isError = null) use ($append): void {
+            // `result` is sent even when null — dropping the key leaves the
+            // browser waiting for a result that has already arrived, and the
+            // call renders as still running for ever.
+            $data = ['tool_call_id' => $toolCallId, 'result' => $result];
+            if ($isError !== null) {
+                $data['is_error'] = $isError;
+            }
+            $append(MessageTypes::TOOL_RESULT, $data);
+        });
+
+        $handler->onRateLimit(function (string $provider, array $info) use ($append): void {
+            $append(MessageTypes::RATE_LIMIT, ['provider' => $provider, 'info' => $info]);
+        });
+
         $handler->onAttachment(function (array $attachment) use ($append): void {
             $append(MessageTypes::ATTACHMENT, $attachment);
         });
 
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
-        $handler->onDone(function (?array $usage) use ($append, $store, $rid): void {
-            $append(MessageTypes::DONE, ['usage' => $usage]);
+        $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {
+            $append(MessageTypes::DONE, ['usage' => $usage] + self::publicDoneMeta($meta));
             self::completeQuietly($store, $rid, 'completed');
         });
 
@@ -101,6 +140,12 @@ final class BufferingSink
         });
     }
 
+    /**
+     * Mark a stream finished, swallowing a store failure.
+     *
+     * Called from terminal paths where throwing would replace a finished turn
+     * with an unhandled exception and leave the reader with neither.
+     */
     private static function completeQuietly(StreamStoreContract $store, string $rid, string $status): void
     {
         try {
@@ -112,5 +157,24 @@ final class BufferingSink
                 'error' => $e->getMessage(),
             ]);
         }
+    }
+    /**
+     * Reduce the provider's turn metadata to the fields a browser may see.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    /**
+     * Reduce the provider's turn metadata to the fields a browser may see.
+     *
+     * Public because AiBridgeManager's SSE path needs the same decision, and
+     * two copies of an allowlist is one copy too many.
+     *
+     * @param  array<string, mixed>  $meta
+     * @return array<string, mixed>
+     */
+    public static function publicDoneMeta(array $meta): array
+    {
+        return array_intersect_key($meta, array_flip(self::PUBLIC_DONE_META));
     }
 }

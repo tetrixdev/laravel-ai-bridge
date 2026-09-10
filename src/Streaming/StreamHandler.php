@@ -59,6 +59,69 @@ class StreamHandler
     /** @var Closure[] */
     private array $toolResultCallbacks = [];
 
+    /** @var array<int, Closure> */
+    private array $rateLimitCallbacks = [];
+
+    /**
+     * Partially received tool results, keyed by tool_call_id.
+     *
+     * A result larger than one frame crosses in chunks. They are reassembled
+     * HERE, at the first thing to touch the wire, so everything downstream —
+     * the recorder, the buffering sink, the browser component — keeps seeing a
+     * single complete result and needs no knowledge of chunking at all.
+     *
+     * @var array<string, array{parts: list<string>, bytes: int, next: int, is_error: bool|null, incomplete: bool}>
+     */
+    private array $toolResultChunks = [];
+
+    /**
+     * The largest result this will assemble, matching the bridge's own ceiling.
+     *
+     * Chunks are held in memory until the result completes, so without a limit
+     * a stream could ask this process for an unbounded allocation. The bridge
+     * stops sending at the same number; this is the belt to that braces, since
+     * a server must not depend on a client to bound its memory.
+     */
+    private const MAX_TOTAL_RESULT_BYTES = 16 * 1024 * 1024;
+
+    /**
+     * The same ceiling, applied across ALL open buffers at once.
+     *
+     * The per-result limit above bounds one buffer. The number of buffers is
+     * chosen by the sender, which picks the `tool_call_id` each one is keyed
+     * by, so on its own that limit bounds nothing: a thousand ids carrying one
+     * unfinished chunk each is a thousand buffers, and none of them individually
+     * near its ceiling.
+     */
+    private const MAX_OPEN_RESULT_BYTES = 32 * 1024 * 1024;
+
+    /**
+     * How many results may be assembling at once.
+     *
+     * Parallel tool calls are real, but a handful — this is far above any
+     * genuine turn and far below the number needed to hurt.
+     */
+    private const MAX_OPEN_RESULT_BUFFERS = 64;
+
+    /** Bytes held across every open buffer, so the aggregate can be checked. */
+    private int $toolResultBytes = 0;
+
+    /**
+     * Everything the provider reported about the last turn besides usage —
+     * model, cost, duration, stop reason, permission denials.
+     *
+     * @var array<string, mixed>
+     */
+    private array $lastDoneMeta = [];
+
+    /**
+     * The token counts from the last `done`, including one that arrived after
+     * an error terminal and so was never dispatched.
+     *
+     * @var array<string, mixed>|null
+     */
+    private ?array $lastDoneUsage = null;
+
     /** @var Closure[] */
     private array $attachmentCallbacks = [];
 
@@ -196,13 +259,55 @@ class StreamHandler
     /**
      * Register a callback for tool_result events from the bridge.
      *
-     * The callback receives: string $toolCallId, mixed $result.
+     * The callback receives: string $toolCallId, mixed $result, ?bool $isError.
+     * $isError is null when the provider did not report a status — never
+     * assume null means success.
      */
     public function onToolResult(Closure $callback): static
     {
         $this->toolResultCallbacks[] = $callback;
 
         return $this;
+    }
+
+    /**
+     * Register a callback for rate_limit events from the bridge.
+     *
+     * The callback receives: string $provider, array $info. Informational and
+     * non-terminal — the turn continues. The shape of $info is the provider's
+     * own and is passed through unchanged.
+     */
+    public function onRateLimit(Closure $callback): static
+    {
+        $this->rateLimitCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * What the provider reported about the last completed turn besides usage.
+     *
+     * @return array<string, mixed>
+     */
+    public function lastDoneMeta(): array
+    {
+        // Without the session handle. It is how a turn is resumed and it is
+        // persisted from the frame itself, not from here, so nothing needs it
+        // in this array — and the README points a host app straight at this
+        // accessor, which should not hand back a resumable handle nobody asked
+        // for. `BufferingSink::publicDoneMeta()` withholds it from the browser
+        // for the same reason; this is the other place it is handed out.
+        return array_diff_key($this->lastDoneMeta, ['cli_session_id' => true]);
+    }
+
+    /**
+     * What the turn cost, whether it succeeded or failed.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function lastDoneUsage(): ?array
+    {
+        return $this->lastDoneUsage;
     }
 
     /**
@@ -312,13 +417,17 @@ class StreamHandler
      *
      * @internal Called by StreamableProvider implementations.
      */
-    public function dispatchBlockStart(BlockType $blockType, int $blockIndex): void
-    {
+    public function dispatchBlockStart(
+        BlockType $blockType,
+        int $blockIndex,
+        ?string $toolName = null,
+        ?string $toolCallId = null,
+    ): void {
         if ($this->cancelled || $this->terminated) {
             return;
         }
 
-        $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex);
+        $event = StreamEvent::blockStart($this->requestId, $blockType, $blockIndex, $toolName, $toolCallId);
         $this->dispatchCallbacks($this->blockStartCallbacks, [$event], 'blockStart');
     }
 
@@ -367,20 +476,62 @@ class StreamHandler
     }
 
     /**
+     * Dispatch a rate_limit event to all registered callbacks.
+     *
+     * Non-terminal on purpose: a rate-limit notice is the provider reporting
+     * how much of a window is spent, not a failure. Treating it as terminal
+     * would abort a turn that is still running perfectly well.
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchRateLimit(string $provider, array $info): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        $this->dispatchCallbacks($this->rateLimitCallbacks, [$provider, $info], 'rateLimit');
+    }
+
+    /**
      * Dispatch a done event to all registered callbacks.
      *
      * Also dispatches the StreamCompleted Laravel event for logging/analytics.
      *
      * @internal Called by StreamableProvider implementations.
      */
-    public function dispatchDone(?array $usage = null): void
+    public function dispatchDone(?array $usage = null, array $meta = []): void
     {
         if ($this->cancelled || $this->terminated) {
+            // A turn that ends in an ERROR still gets a trailing `done`, and it
+            // carries what the turn cost — often more than a turn that
+            // succeeded. Returning here threw all of it away, so the cost of
+            // exactly the turns worth investigating was the cost nobody could
+            // see. It must not dispatch a second terminal, but there is no
+            // reason to discard the numbers: they are recorded for
+            // `lastDoneMeta()` and `lastDoneUsage()` to hand back.
+            if ($this->terminated && ! $this->cancelled) {
+                $this->lastDoneMeta = $meta;
+                $this->lastDoneUsage = $usage;
+            }
+
             return;
         }
+
+        // Before the flag goes up: dispatchToolResult refuses to run once the
+        // stream is terminated, so a partial result flushed after this line
+        // would be dropped by the very guard meant to protect it.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
-        $this->dispatchCallbacks($this->doneCallbacks, [$usage], 'done');
+        $this->lastDoneMeta = $meta;
+        $this->lastDoneUsage = $usage;
+
+        // $meta is passed as a second argument. PHP allows extra arguments to a
+        // userland closure, so callbacks written against the one-argument form
+        // keep working untouched.
+        $this->dispatchCallbacks($this->doneCallbacks, [$usage, $meta], 'done');
 
         $this->dispatchStreamCompleted(true, $usage, null, TerminatedBy::Success);
 
@@ -399,6 +550,11 @@ class StreamHandler
         if ($this->terminated) {
             return;
         }
+
+        // Same ordering as `done`: flush while dispatch is still permitted. An
+        // error is exactly when a half-delivered result is worth keeping.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
         $this->dispatchCallbacks($this->errorCallbacks, [$code, $message], 'error');
@@ -409,11 +565,236 @@ class StreamHandler
     }
 
     /**
+     * Take one tool_result frame off the wire, reassembling it if it is a chunk.
+     *
+     * A frame with no `chunk_index` is a whole result and goes straight through
+     * — the shape every result had before chunking existed, and the shape every
+     * result under the per-frame budget still has.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function receiveToolResult(array $data): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        $toolCallId = (string) ($data['tool_call_id'] ?? $data['call_id'] ?? '');
+        $isError = is_bool($data['is_error'] ?? null) ? $data['is_error'] : null;
+
+        if (! is_int($data['chunk_index'] ?? null)) {
+            // An unchunked result supersedes anything half-assembled for the
+            // same id. Left in place the buffer never finalises, and its bytes
+            // stay charged against the turn's ceiling until the terminal —
+            // starving every later result on this connection.
+            //
+            // Only when the frame actually CARRIES a result, though. A frame
+            // with no `result` key at all was throwing away everything already
+            // buffered and dispatching null in its place: the content gone, and
+            // nothing saying so.
+            // Marked partial BEFORE it is taken: its final chunk never arrived,
+            // and `takeToolResult` only appends the marker for a buffer already
+            // flagged. Without this the half-assembled content is handed over as
+            // if it were the whole result.
+            if (isset($this->toolResultChunks[$toolCallId])) {
+                $this->toolResultChunks[$toolCallId]['incomplete'] = true;
+            }
+
+            $superseded = $this->takeToolResult($toolCallId);
+            if (! array_key_exists('result', $data) && $superseded !== null) {
+                $this->dispatchToolResult($toolCallId, $superseded['result'], $superseded['is_error']);
+
+                return;
+            }
+
+            $this->dispatchToolResult($toolCallId, $data['result'] ?? null, $isError);
+
+            return;
+        }
+
+        $index = $data['chunk_index'];
+        $final = ($data['final'] ?? false) === true;
+        $piece = is_string($data['result'] ?? null) ? $data['result'] : '';
+
+        // The bridge names how much IT dropped at its own ceiling. Worked out
+        // before either path below can return, because both of them can carry a
+        // final chunk and this belongs on whichever one does.
+        $droppedByBridge = $data['truncated_bytes'] ?? null;
+        $droppedNote = is_int($droppedByBridge) && $droppedByBridge > 0
+            ? "\n…[the bridge dropped a further {$droppedByBridge} bytes at its own ceiling]"
+            : '';
+
+        $buffer = $this->toolResultChunks[$toolCallId] ?? null;
+
+        // A whole result that happens to be labelled as a chunk — index 0 and
+        // final in one frame — needs no buffer, so no buffering limit has any
+        // business refusing it. It used to be dropped outright once 64 buffers
+        // were open: no callback, no result on the block, and a chat drawing
+        // that call as still running for ever.
+        if ($buffer === null && $final && $index === 0) {
+            // Still bounded. Skipping the buffer is the point of this path;
+            // skipping the ceiling with it would quietly remove the bound —
+            // measured at 24 MB through a 16 MB limit.
+            if (strlen($piece) > self::MAX_TOTAL_RESULT_BYTES) {
+                $piece = mb_strcut($piece, 0, self::MAX_TOTAL_RESULT_BYTES, 'UTF-8')
+                    ."\n…[truncated by the server: this result alone exceeded the memory one result may use]";
+            }
+
+            $this->dispatchToolResult($toolCallId, $piece.$droppedNote, $isError);
+
+            return;
+        }
+
+        if ($buffer === null) {
+            if (count($this->toolResultChunks) >= self::MAX_OPEN_RESULT_BUFFERS) {
+                Log::warning('AI Bridge: refusing a new tool result buffer', [
+                    'request_id' => $this->requestId,
+                    'open' => count($this->toolResultChunks),
+                ]);
+
+                return;
+            }
+
+            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'refused' => false, 'incomplete' => false, 'dropped_note' => ''];
+        }
+
+        // The verdict rides on every chunk, so the last one seen wins and a
+        // result cut short still carries whether it was a failure.
+        if ($isError !== null) {
+            $buffer['is_error'] = $isError;
+        }
+
+        // Out of order means a chunk was lost or duplicated. Reordering would
+        // guess at content; recording what arrived and SAYING it is partial
+        // does not.
+        if ($index !== $buffer['next']) {
+            $buffer['incomplete'] = true;
+        } else {
+            $length = strlen($piece);
+            $overOne = $buffer['bytes'] + $length > self::MAX_TOTAL_RESULT_BYTES;
+            $overAll = $this->toolResultBytes + $length > self::MAX_OPEN_RESULT_BYTES;
+            if ($overOne || $overAll) {
+                // `refused`, not `incomplete`. Every chunk arrived; THIS side
+                // declined to hold them. Marking it the same way as a result
+                // the bridge never finished sending sends whoever debugs it to
+                // the wrong machine, and the two are not remotely the same
+                // problem.
+                $buffer['refused'] = $overOne ? 'result' : 'turn';
+                Log::warning('AI Bridge: dropping tool result content over a memory ceiling', [
+                    'request_id' => $this->requestId,
+                    'tool_call_id' => $toolCallId,
+                    'over_result_ceiling' => $overOne,
+                    'over_turn_ceiling' => $overAll,
+                ]);
+            } else {
+                $buffer['parts'][] = $piece;
+                $buffer['bytes'] += $length;
+                $this->toolResultBytes += $length;
+            }
+            $buffer['next'] = $index + 1;
+        }
+
+        // Carried into the text rather than a new field, so nothing downstream
+        // has to change in order to stop discarding it. Held until the flush
+        // rather than pushed in as it arrives: on a non-final chunk it would
+        // otherwise land in the MIDDLE of the content.
+        if ($droppedNote !== '') {
+            $buffer['dropped_note'] = $droppedNote;
+        }
+
+        $this->toolResultChunks[$toolCallId] = $buffer;
+
+        if ($final) {
+            $this->flushToolResult($toolCallId);
+        }
+    }
+
+    /**
+     * Take what has been assembled for one call, forgetting the buffer.
+     *
+     * @return array{result: string, is_error: bool|null}|null
+     */
+    private function takeToolResult(string $toolCallId): ?array
+    {
+        $buffer = $this->toolResultChunks[$toolCallId] ?? null;
+        if ($buffer === null) {
+            return null;
+        }
+
+        unset($this->toolResultChunks[$toolCallId]);
+        $this->toolResultBytes -= $buffer['bytes'];
+
+        $result = implode('', $buffer['parts']);
+
+        // BOTH, not one or the other. A buffer can hit a ceiling AND never
+        // receive its final chunk, and reporting only the refusal drops the
+        // second fault silently — they are different problems with different
+        // fixes.
+        if (($buffer['refused'] ?? false) === 'result') {
+            $result .= "\n…[truncated by the server: this result alone exceeded the memory one result may use]";
+        } elseif (($buffer['refused'] ?? false) === 'turn') {
+            $result .= "\n…[truncated by the server: this turn's tool results together exceeded the memory one turn may use]";
+        }
+
+        if ($buffer['incomplete']) {
+            $result .= "\n…[incomplete: the stream ended before this result finished]";
+        }
+
+        $result .= $buffer['dropped_note'] ?? '';
+
+        return ['result' => $result, 'is_error' => $buffer['is_error']];
+    }
+
+    /**
+     * Dispatch a completed result mid-stream, through the ordinary guard.
+     */
+    private function flushToolResult(string $toolCallId): void
+    {
+        $assembled = $this->takeToolResult($toolCallId);
+        if ($assembled === null) {
+            return;
+        }
+
+        $this->dispatchToolResult($toolCallId, $assembled['result'], $assembled['is_error']);
+    }
+
+    /**
+     * Dispatch every partially assembled result, in arrival order.
+     *
+     * Called at each of the three terminals. A result whose final chunk never
+     * arrived is worth more as a marked partial than as nothing at all, and the
+     * recorder already keeps partial TEXT on the same terminals — a tool result
+     * disappearing where the prose survives would be the odd one out.
+     *
+     * Dispatched to the callbacks directly rather than through
+     * `dispatchToolResult`, which refuses to run once the stream is cancelled
+     * or terminated. That guard is right for a result still arriving and wrong
+     * here: these are precisely the moments it would drop the results this
+     * exists to save.
+     */
+    private function flushPendingToolResults(): void
+    {
+        foreach (array_keys($this->toolResultChunks) as $toolCallId) {
+            $this->toolResultChunks[$toolCallId]['incomplete'] = true;
+            $assembled = $this->takeToolResult($toolCallId);
+            if ($assembled === null) {
+                continue;
+            }
+
+            $this->dispatchCallbacks(
+                $this->toolResultCallbacks,
+                [$toolCallId, $assembled['result'], $assembled['is_error']],
+                'toolResult',
+            );
+        }
+    }
+
+    /**
      * Dispatch a tool_result event to all registered callbacks.
      *
      * @internal Called when the bridge acknowledges receipt of a tool result.
      */
-    public function dispatchToolResult(string $toolCallId, mixed $result): void
+    public function dispatchToolResult(string $toolCallId, mixed $result, ?bool $isError = null): void
     {
         if ($this->cancelled || $this->terminated) {
             return;
@@ -424,7 +805,7 @@ class StreamHandler
             'tool_call_id' => $toolCallId,
         ]);
 
-        $this->dispatchCallbacks($this->toolResultCallbacks, [$toolCallId, $result], 'toolResult');
+        $this->dispatchCallbacks($this->toolResultCallbacks, [$toolCallId, $result, $isError], 'toolResult');
     }
 
     /**
@@ -473,6 +854,12 @@ class StreamHandler
         if ($this->terminated) {
             return;
         }
+
+        // Before the cancelled callbacks, not after: the recorder persists what
+        // it has from inside one of them, so a result flushed afterwards would
+        // be assembled correctly and then never written down.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
         $this->dispatchCallbacks($this->cancelledCallbacks, [$reason], 'cancelled');
@@ -498,12 +885,16 @@ class StreamHandler
                 $event->data['parameters'] ?? [],
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
             ),
-            MessageTypes::TOOL_RESULT => $this->dispatchToolResult(
-                $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
-                $event->data['result'] ?? null,
+            MessageTypes::TOOL_RESULT => $this->receiveToolResult($event->data),
+            MessageTypes::RATE_LIMIT => $this->dispatchRateLimit(
+                is_string($event->data['provider'] ?? null) ? $event->data['provider'] : 'unknown',
+                is_array($event->data['info'] ?? null) ? $event->data['info'] : [],
             ),
             MessageTypes::ATTACHMENT => $this->dispatchAttachment($event->data),
-            MessageTypes::DONE => $this->dispatchDone($event->data['usage'] ?? null),
+            MessageTypes::DONE => $this->dispatchDone(
+                $event->data['usage'] ?? null,
+                array_diff_key($event->data, ['usage' => true]),
+            ),
             MessageTypes::ERROR => $this->dispatchError(
                 $event->data['code'] ?? 'unknown',
                 $event->data['message'] ?? 'Unknown error',
@@ -528,7 +919,19 @@ class StreamHandler
         }
         $blockIndex = (int) ($event->data['block_index'] ?? 0);
         $this->blockTypes[$blockIndex] = $blockType;
-        $this->dispatchBlockStart($blockType, $blockIndex);
+
+        // The bridge sends these for every provider; rebuilding the event from
+        // only type and index is what threw them away, and is why a chat could
+        // say "4 tool calls" and never what any of them were.
+        $toolName = $event->data['tool_name'] ?? null;
+        $toolCallId = $event->data['tool_call_id'] ?? null;
+
+        $this->dispatchBlockStart(
+            $blockType,
+            $blockIndex,
+            is_string($toolName) && $toolName !== '' ? $toolName : null,
+            is_string($toolCallId) && $toolCallId !== '' ? $toolCallId : null,
+        );
     }
 
     /**

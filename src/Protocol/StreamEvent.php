@@ -26,13 +26,25 @@ final class StreamEvent
 
     /**
      * Create a block_start event.
+     *
+     * $toolName and $toolCallId apply to `tool_call` blocks. They are optional
+     * because a provider may not report them, but when the bridge sends them —
+     * and it does, for every provider — dropping them here left a chat able to
+     * say only "4 tool calls", never "3 commands, 1 file read".
      */
-    public static function blockStart(string $requestId, BlockType $blockType, int $blockIndex): self
-    {
-        return new self($requestId, MessageTypes::BLOCK_START, [
+    public static function blockStart(
+        string $requestId,
+        BlockType $blockType,
+        int $blockIndex,
+        ?string $toolName = null,
+        ?string $toolCallId = null,
+    ): self {
+        return new self($requestId, MessageTypes::BLOCK_START, array_filter([
             'block_type' => $blockType->value,
             'block_index' => $blockIndex,
-        ]);
+            'tool_name' => $toolName,
+            'tool_call_id' => $toolCallId,
+        ], static fn ($value) => $value !== null));
     }
 
     /**
@@ -76,13 +88,50 @@ final class StreamEvent
     }
 
     /**
-     * Create a done event.
+     * Create a tool_result event.
+     *
+     * $isError is the authoritative failure signal. It cannot be read back out
+     * of $result: a tool that legitimately prints "Error: no matches" looks
+     * exactly like one that failed.
      */
-    public static function done(string $requestId, ?array $usage = null): self
+    public static function toolResult(string $requestId, string $toolCallId, mixed $result, ?bool $isError = null): self
+    {
+        // Only is_error is conditional. Filtering `result` too would erase a
+        // null result — which a failing tool commonly has — and a consumer
+        // waiting for `result` to appear would show the call as still running
+        // for ever.
+        $data = ['tool_call_id' => $toolCallId, 'result' => $result];
+        if ($isError !== null) {
+            $data['is_error'] = $isError;
+        }
+
+        return new self($requestId, MessageTypes::TOOL_RESULT, $data);
+    }
+
+    /**
+     * Create a rate_limit event — informational, non-terminal.
+     */
+    public static function rateLimit(string $requestId, string $provider, array $info): self
+    {
+        return new self($requestId, MessageTypes::RATE_LIMIT, [
+            'provider' => $provider,
+            'info' => $info,
+        ]);
+    }
+
+    /**
+     * Create a done event.
+     *
+     * $meta carries everything the provider reported about the turn besides the
+     * token counts — the model that actually ran, cost, duration, stop reason,
+     * permission denials. Kept separate from $usage so that existing callbacks
+     * taking only usage keep working unchanged.
+     */
+    public static function done(string $requestId, ?array $usage = null, array $meta = []): self
     {
         return new self($requestId, MessageTypes::DONE, [
             'usage' => $usage,
-        ]);
+        ] + $meta);
     }
 
     /**

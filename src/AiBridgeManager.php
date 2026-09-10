@@ -488,6 +488,23 @@ class AiBridgeManager
             ]);
         });
 
+        // What a tool returned. For a tool that ran on the operator's own
+        // machine this is the only account of it there will ever be — and this
+        // sink powers the documented streamToResponse() API, so leaving it
+        // unwired meant half the fix reached one consumer and not the other.
+        $stream->onToolResult(function (string $toolCallId, mixed $result, ?bool $isError = null) use ($sink) {
+            $data = ['tool_call_id' => $toolCallId, 'result' => $result];
+            if ($isError !== null) {
+                $data['is_error'] = $isError;
+            }
+            $sink(['event' => MessageTypes::TOOL_RESULT, 'data' => $data]);
+        });
+
+        // Informational and non-terminal.
+        $stream->onRateLimit(function (string $provider, array $info) use ($sink) {
+            $sink(['event' => MessageTypes::RATE_LIMIT, 'data' => ['provider' => $provider, 'info' => $info]]);
+        });
+
         // A file the assistant produced. Forwarded like any other non-terminal
         // event: the id is the app's own, so a consumer renders it from the
         // app's attachment store.
@@ -495,11 +512,16 @@ class AiBridgeManager
             $sink(['event' => MessageTypes::ATTACHMENT, 'data' => $attachment]);
         });
 
-        $stream->onDone(function (?array $usage) use ($sink, $onTerminal) {
+        $stream->onDone(function (?array $usage, array $meta = []) use ($sink, $onTerminal) {
+            // One allowlist, not two copies — a future field must be reviewed
+            // once, not remembered in two places. cli_session_id is the
+            // server's to keep; see BufferingSink for the reasoning.
+            $meta = BufferingSink::publicDoneMeta($meta);
+
             // Wrap $sink() in try/finally so $onTerminal (the SSE [DONE] flush)
             // always runs even if the sink throws, preventing SSE clients from hanging.
             try {
-                $sink(['event' => MessageTypes::DONE, 'data' => ['usage' => $usage]]);
+                $sink(['event' => MessageTypes::DONE, 'data' => ['usage' => $usage] + $meta]);
             } finally {
                 if ($onTerminal) {
                     $onTerminal();

@@ -1,0 +1,126 @@
+[
+  {
+    "event": "rate_limit",
+    "data": {
+      "provider": "claude",
+      "info": {
+        "status": "allowed",
+        "resetsAt": 1789087800,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false,
+        "unifiedWindows": {
+          "five_hour": {
+            "utilization": 0.13,
+            "resetsAt": 1789087800
+          },
+          "seven_day": {
+            "utilization": 0.5,
+            "resetsAt": 1789308000
+          }
+        }
+      }
+    }
+  },
+  {
+    "event": "block_start",
+    "data": {
+      "block_index": 0,
+      "block_type": "tool_call",
+      "tool_name": "Bash",
+      "tool_call_id": "toolu_01TeCu2Xcsi9wdt9SqLvQFVY"
+    }
+  },
+  {
+    "event": "block_delta",
+    "data": {
+      "block_index": 0,
+      "content": "{\"command\":\"echo alpha\",\"description\":\"Print alpha\"}"
+    }
+  },
+  {
+    "event": "block_stop",
+    "data": {
+      "block_index": 0
+    }
+  },
+  {
+    "event": "tool_result",
+    "data": {
+      "tool_call_id": "toolu_01TeCu2Xcsi9wdt9SqLvQFVY",
+      "result": "alpha",
+      "is_error": false
+    }
+  },
+  {
+    "event": "block_start",
+    "data": {
+      "block_index": 1,
+      "block_type": "tool_call",
+      "tool_name": "Bash",
+      "tool_call_id": "toolu_01Lh4s3ZkLYLTBqne2TQHKaH"
+    }
+  },
+  {
+    "event": "block_delta",
+    "data": {
+      "block_index": 1,
+      "content": "{\"command\":\"echo beta\",\"description\":\"Print beta\"}"
+    }
+  },
+  {
+    "event": "block_stop",
+    "data": {
+      "block_index": 1
+    }
+  },
+  {
+    "event": "tool_result",
+    "data": {
+      "tool_call_id": "toolu_01Lh4s3ZkLYLTBqne2TQHKaH",
+      "result": "beta",
+      "is_error": false
+    }
+  },
+  {
+    "event": "block_start",
+    "data": {
+      "block_index": 2,
+      "block_type": "text"
+    }
+  },
+  {
+    "event": "block_delta",
+    "data": {
+      "block_index": 2,
+      "content": "done"
+    }
+  },
+  {
+    "event": "block_stop",
+    "data": {
+      "block_index": 2
+    }
+  },
+  {
+    "event": "done",
+    "data": {
+      "usage": {
+        "input_tokens": 66,
+        "output_tokens": 153,
+        "cache_creation_input_tokens": 3788,
+        "cache_read_input_tokens": 36571
+      },
+      "model": "claude-opus-5[1m]",
+      "provider_version": "2.1.261",
+      "stop_reason": "end_turn",
+      "cost_usd": 0.061303500000000004,
+      "duration_ms": 4844,
+      "duration_api_ms": 5269,
+      "num_turns": 3,
+      "permission_denials": [],
+      "cli_session_id": "0c1c78b2-c583-4eb3-ad49-8e5f808bbe60"
+    }
+  }
+]

@@ -81,6 +81,7 @@
     .tool b { color: #1d4ed8; }
     .tool pre { margin: 4px 0 0; overflow-x: auto; color: #2563eb; font-size: 11px; }
     .tool .res { margin-top: 4px; border-top: 1px solid #bfdbfe; padding-top: 4px; color: #2563eb; }
+    .tool .res.err { color: #b91c1c; border-top-color: #fecaca; }
     .pulse { display: flex; align-items: center; gap: 4px; background: #f3f4f6; color: #6b7280;
         border-radius: 16px; padding: 8px 14px; width: fit-content; }
     .pulse i { width: 6px; height: 6px; border-radius: 50%; background: #9ca3af; display: inline-block;
@@ -182,6 +183,7 @@
             // events are flowing, a long silence is a fair stall signal.
             this.WATCHDOG_FIRST_MS = 120000;
             this.WATCHDOG_STEADY_MS = 45000;
+            this._watchdogMisses = 0;
 
             this.root = this.attachShadow({ mode: 'open' });
             const style = document.createElement('style');
@@ -459,18 +461,49 @@
                     // Defensive: a tool_call block with no name carries nothing
                     // worth showing — never render an empty "🔧" block.
                     if (!b.tool_name) return '';
-                    return `<div class="tool"><b>🔧 ${this.esc(b.tool_name)}</b>
-                        <pre>${this.esc(JSON.stringify(b.parameters || {}, null, 2))}</pre>
-                        ${b.result !== undefined ? `<div class="res">→ ${this.esc(typeof b.result === 'string' ? b.result : JSON.stringify(b.result))}</div>` : ''}</div>`;
+                    // The wire carries the provider's name verbatim; trimming
+                    // the MCP namespace for display is this consumer's job.
+                    const shown = String(b.tool_name).replace(/^mcp__[^_]+(?:_[^_]+)*?__/, '') || String(b.tool_name);
+                    // "cut off" only when it really was. PHP also sets
+                    // parameters_raw for valid-but-not-an-object JSON, which was
+                    // not truncated at all — labelling that as cut off is a
+                    // false statement about the data.
+                    const argNote = b.parameters_truncated_bytes !== undefined
+                        ? `   ← cut off, ${b.parameters_truncated_bytes} bytes in total`
+                        : (b.parameters_raw !== undefined ? '   ← arguments could not be parsed' : '');
+                    // Matches the standalone tool_result branch below, so a
+                    // call reads the same live as it does after a reload.
+                    const emptyResult = (b.result === undefined || b.result === null || b.result === '');
+                    const resultBody = emptyResult
+                        ? '(no output)'
+                        : (typeof b.result === 'string' ? b.result : JSON.stringify(b.result));
+                    // The KEY, not its value. A result of null means the tool
+                    // returned nothing; no result key at all means it has not
+                    // returned. The recorder and StreamEvent both go out of
+                    // their way to keep that difference — and this drew them
+                    // identically, so a finished call with no output looked
+                    // exactly like one still running.
+                    const showResult = 'result' in b;
+                    return `<div class="tool"><b>🔧 ${this.esc(shown)}</b>
+                        <pre>${this.esc((b.parameters_raw !== undefined
+                            ? b.parameters_raw
+                            : this.showArgs(b.parameters)) + argNote)}</pre>
+                        ${showResult ? `<div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(resultBody)}</div>` : ''}</div>`;
                 }
                 if (b.type === 'tool_result') {
                     // Persisted conversations store tool results as their own
-                    // blocks. An empty result has nothing to show — rendering it
-                    // would leave a blank grey bubble. Show it only when there
-                    // is content.
+                    // blocks, so THIS is the branch a page reload takes — the
+                    // live path merges them into the call instead. It used to
+                    // ignore is_error entirely, so a failed command read as a
+                    // success the moment the reader refreshed.
                     const r = b.result;
-                    if (r === undefined || r === null || r === '') return '';
-                    return `<div class="tool"><div class="res">→ ${this.esc(typeof r === 'string' ? r : JSON.stringify(r))}</div></div>`;
+                    const empty = (r === undefined || r === null || r === '');
+                    // A standalone block exists BECAUSE a result was reported,
+                    // so it is always drawn. Returning nothing here deleted the
+                    // record of a call that completed with no output — the same
+                    // information the recorder took trouble to keep.
+                    const body = empty ? '(no output)' : (typeof r === 'string' ? r : JSON.stringify(r));
+                    return `<div class="tool"><div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(body)}</div></div>`;
                 }
                 // Skip empty text blocks — a blank bubble is just visual noise.
                 if (!b.text) return '';
@@ -679,6 +712,11 @@
                 this.s.messages.push(this.assistant);
                 this.s.streaming = true;
                 this.s.pulse = true;
+                // Reattaching to a turn still in flight is a new turn as far as
+                // this component is concerned; without clearing these it would
+                // be inert, having terminated a previous one.
+                this._terminated = false;
+                this._frameNames = [];
                 this.renderAll({ stick: true });
                 this.attachStreamSource(streamingRequestId, { fromIndex: -1 });
                 this.armWatchdog(this.WATCHDOG_FIRST_MS);
@@ -826,6 +864,8 @@
             this.current = null;
             this.s.streaming = true;
             this.s.pulse = true;
+            this._terminated = false;
+            this._frameNames = [];
             // Forced: the message the reader just sent, and the "Thinking"
             // pulse under it, are the whole point of this render. Leaving it
             // conditional appends both off-screen for anyone who had scrolled up.
@@ -890,6 +930,20 @@
             } catch (e) { /* the EventSource will deliver the terminal regardless */ }
         }
 
+        // A call's arguments, drawn the same whichever shape they arrive in.
+        //
+        // PHP's `json_decode($json, true)` cannot tell `{}` from `[]`, so a
+        // no-argument call is held as `{}` live and comes back from the
+        // transcript as `[]`. Rendered literally that is `{}` before a reload
+        // and `[]` after one, for the same call — a difference with no meaning
+        // that a reader is left to interpret.
+        showArgs(params) {
+            const empty = !params
+                || (Array.isArray(params) ? params.length === 0 : Object.keys(params).length === 0);
+
+            return empty ? '{}' : JSON.stringify(params, null, 2);
+        }
+
         // ── watchdog: never let the UI hang on "Thinking" ─────────────
         // The buffer + EventSource model already makes refresh/reconnect
         // recoverable — the watchdog only catches the case where a turn
@@ -898,12 +952,56 @@
         // immediate hard error, because the events may simply be lagging.
         armWatchdog(ms) {
             this.clearWatchdog();
-            this._watchdog = setTimeout(() => {
+            this._watchdog = setTimeout(async () => {
                 if (!this.s.streaming) return;
+                // ASK before declaring the turn dead. The comment above used to
+                // promise a status check and the code made none: silence is not
+                // evidence of a stall, because a tool running on the operator's
+                // own machine — npm install, a test run, a large grep — emits
+                // no events at all while it works. Any of those over 45 seconds
+                // abandoned a perfectly healthy turn, showed a false "stalled"
+                // error, left the tool call drawn as unfinished for ever, and
+                // dropped every later event including the answer.
+                const alive = await this.streamStillAlive();
+                if (!this.s.streaming) return;
+                if (alive) {
+                    this._watchdogMisses = 0;
+                    this.armWatchdog(ms);
+
+                    return;
+                }
+                // A failed check is not proof either — but it cannot re-arm for
+                // ever, or a server that has genuinely gone leaves the UI on
+                // "Thinking" permanently, which is the thing this exists to
+                // prevent. `null` means "could not tell"; three in a row is
+                // enough to stop asking.
+                if (alive === null && (this._watchdogMisses = (this._watchdogMisses || 0) + 1) < 3) {
+                    this.armWatchdog(ms);
+
+                    return;
+                }
                 this.s.error = 'No response received — the turn appears to be stalled. '
                     + 'Try refreshing the page; if the turn is still running, it will resume here.';
                 this.finish();
             }, ms || this.WATCHDOG_STEADY_MS);
+        }
+
+        // true = the server still considers this turn live, false = it does not,
+        // null = the question could not be answered.
+        async streamStillAlive() {
+            const rid = this._activeRequestId;
+            if (!rid) return false;
+            try {
+                const r = await fetch(this.api + '/streams/' + encodeURIComponent(rid) + '/status',
+                    { credentials: 'same-origin' });
+                if (r.status === 404) return false;
+                if (!r.ok) return null;
+                const body = await r.json();
+
+                return body.status === 'streaming';
+            } catch (e) {
+                return null;
+            }
         }
         clearWatchdog() {
             if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
@@ -928,7 +1026,7 @@
             // name and a `:`-prefixed body, so they never reach a listener.
             const wire = (name) => es.addEventListener(name, (e) => this.onSseEvent(name, e));
             ['block_start', 'block_delta', 'block_stop', 'tool_call', 'tool_result',
-             'done', 'error', 'cancelled'].forEach(wire);
+             'rate_limit', 'done', 'error', 'cancelled'].forEach(wire);
             // onerror fires both on transient disconnects (the browser will
             // reconnect automatically) and on terminal failures. Only treat
             // it as terminal once readyState is CLOSED.
@@ -964,6 +1062,13 @@
         }
 
         handleEvent(evt) {
+            // Nothing may change the turn once it has ended. StreamHandler
+            // guards every dispatch on `terminated` and this had no equivalent,
+            // so a late frame was shown live and absent after a reload. Repo
+            // A's frame guard made that reachable: an oversized frame emits a
+            // terminal error, the server stops recording, and the bridge keeps
+            // streaming the rest of the turn.
+            if (this._terminated) return;
             // Any event means the turn is alive — push the watchdog back.
             if (this.s.streaming) this.armWatchdog();
             const d = evt.data || {};
@@ -974,13 +1079,58 @@
                     // block_stop. Showing it on stop instead caused a flash on
                     // the final block: stop turned it on, done turned it off.
                     this.s.pulse = true;
-                    // A tool_call block is delivered whole by the dedicated
-                    // 'tool_call' event (tool_name + parsed parameters). Its
-                    // block_start carries none of that, so pushing a block here
-                    // would render an empty "🔧" placeholder next to the real
-                    // one. Skip it — tool-input deltas are not needed either.
+                    // Finalise a block the stream never closed, so it keeps its
+                    // arguments instead of rendering as "called with none" —
+                    // the recorder does the same, and disagreeing about the
+                    // same stream is worse than either answer alone.
+                    this.closeToolBlock();
                     if ((d.block_type || 'text') === 'tool_call') {
-                        this.current = null;
+                        // A tool the SERVER resolves arrives twice — as this
+                        // block and as the dedicated 'tool_call' event, which
+                        // carries the parsed arguments. Skip the block so the
+                        // same call is not drawn twice.
+                        //
+                        // A tool that ran on the operator's own machine (Bash,
+                        // Read, an editor) has no such event: this block is the
+                        // only thing that will ever describe it. Skipping those
+                        // too — which is what this used to do — is why a run of
+                        // them showed as nothing at all.
+                        if (typeof d.tool_name !== 'string' || !d.tool_name) {
+                            this.current = null;
+                            break;
+                        }
+                        this.current = {
+                            type: 'tool_call', tool_name: d.tool_name,
+                            tool_call_id: d.tool_call_id, text: '', parameters: {},
+                            _fromStream: true,
+                        };
+                        // A frame can arrive before its own block — PROTOCOL.md
+                        // does not pin the order down, which is why the recorder
+                        // reconciles at persist rather than on arrival. Drop the
+                        // frame's placeholder now that the richer block exists,
+                        // or the same call is drawn twice live and once after a
+                        // reload: the worst shape a bug can take.
+                        const early = this.assistant.blocks.findIndex((b) =>
+                            b.type === 'tool_call' && !b._fromStream && !b._claimed
+                            && (d.tool_name === 'mcp__bridge__' + b.tool_name || d.tool_name === b.tool_name));
+                        if (early !== -1) {
+                            const placeholder = this.assistant.blocks[early];
+                            this.current._frameParams = {
+                                parameters: placeholder.parameters || {},
+                                parameters_raw: placeholder.parameters_raw,
+                                parameters_truncated_bytes: placeholder.parameters_truncated_bytes,
+                            };
+                            // Carry over anything already attached to the
+                            // placeholder, so a result that arrived first is not
+                            // discarded with it.
+                            if ('result' in placeholder) {
+                                this.current.result = placeholder.result;
+                                this.current.is_error = placeholder.is_error;
+                            }
+                            this.assistant.blocks.splice(early, 1);
+                            this.current._claimed = true;
+                        }
+                        this.assistant.blocks.push(this.current);
                         break;
                     }
                     this.current = { type: d.block_type || 'text', text: '', _open: false };
@@ -991,10 +1141,95 @@
                     if (this.current) this.current.text += (d.content || '');
                     break;
                 case 'block_stop':
-                    this.s.pulse = false; this.current = null;
+                    this.s.pulse = false;
+                    // A locally-run tool's arguments arrive as the block's
+                    // delta text, as one complete JSON object. Parse it here;
+                    // keep the raw text if it does not parse, because a
+                    // truncated call and a call with no arguments should not
+                    // look the same.
+                    this.closeToolBlock();
+                    this.current = null;
                     break;
-                case 'tool_call':
-                    this.assistant.blocks.push({ type: 'tool_call', tool_name: d.tool_name, parameters: d.parameters || {} });
+                case 'tool_call': {
+                    // A server-resolved tool arrives twice: as a stream block
+                    // and as this frame. The FRAME is dropped, because the
+                    // block has everything it has and two things it does not —
+                    // the CLI's tool_call_id, which is what tool_result events
+                    // are keyed by, and its own arguments, so nothing is copied
+                    // between calls and two parallel calls to the same tool
+                    // cannot swap arguments when their frames return out of
+                    // order.
+                    //
+                    // Matched on the bridge's own namespace only. An
+                    // open-ended `__` suffix also matched the operator's own
+                    // MCP servers, whose calls have no frame at all.
+                    this._frameNames = this._frameNames || [];
+                    this._frameNames.push(d.tool_name);
+                    const claims = (b) => b && b.type === 'tool_call' && b._fromStream && !b._claimed
+                        && (b.tool_name === 'mcp__bridge__' + d.tool_name || b.tool_name === d.tool_name);
+                    const shadow = this.assistant.blocks.find(claims)
+                        || (claims(this.current) ? this.current : null);
+                    if (shadow) {
+                        shadow._claimed = true;
+                        // Remembered, not applied. The block is usually richer,
+                        // but its arguments are raw delta text and can arrive
+                        // truncated, unparsed or absent, and the recorder takes
+                        // the frame's in exactly that case.
+                        //
+                        // Whether that is SAFE depends on counts that are not
+                        // complete yet: with two parallel calls to one tool
+                        // there is no way to tell which frame belongs to which
+                        // block, and copying anyway swapped their arguments —
+                        // live showing a destructive write against the wrong
+                        // path, and changing on reload. So the copy waits for
+                        // the same moment the recorder makes it.
+                        // Capped like the other frame branch. Only one of the
+                        // two had a ceiling, so a large frame that CLAIMED a
+                        // block rendered in full live and truncated on reload.
+                        shadow._frameParams = this.capParameters(d.parameters || {});
+                        // Remember the frame's own id. A result keyed to it
+                        // would otherwise find no block — the frame is dropped
+                        // as a duplicate — and float loose, where the recorder
+                        // carries it onto the call.
+                        shadow._frameCallId = d.tool_call_id;
+                        break;
+                    }
+                    // tool_call_id included so a later tool_result can find it.
+                    this.assistant.blocks.push({
+                        type: 'tool_call', tool_name: d.tool_name,
+                        tool_call_id: d.tool_call_id, _fromFrame: true,
+                        ...this.capParameters(d.parameters || {}),
+                    });
+                    break;
+                }
+                case 'tool_result': {
+                    // Attach to the call it belongs to, so the output is shown
+                    // under the tool that produced it rather than floating
+                    // loose. Matched on the id the bridge carries on both.
+                    // `!('result' in b)` matters: a second result for the same
+                    // id would otherwise overwrite the first and lose it, where
+                    // the recorder keeps both. Two results for one call should
+                    // not happen — and when something that should not happen
+                    // does, keeping the evidence beats discarding half of it.
+                    const owner = d.tool_call_id && this.assistant.blocks.find(
+                        (b) => b.type === 'tool_call' && !('result' in b)
+                            && (b.tool_call_id === d.tool_call_id || b._frameCallId === d.tool_call_id));
+                    if (owner) {
+                        owner.result = d.result;
+                        if (d.is_error !== undefined) owner.is_error = d.is_error;
+                    } else {
+                        this.assistant.blocks.push({
+                            type: 'tool_result', tool_call_id: d.tool_call_id,
+                            result: d.result, is_error: d.is_error,
+                        });
+                    }
+                    break;
+                }
+                case 'rate_limit':
+                    // Informational and non-terminal. Recorded on the element so
+                    // a host app can read it; deliberately not drawn, since a
+                    // quota notice mid-answer is not what the reader is here for.
+                    this.s.rateLimit = { provider: d.provider, info: d.info };
                     break;
                 case 'done': this.finish(); return;
                 case 'error': this.s.error = d.message || d.code || 'Stream error'; this.finish(); return;
@@ -1003,11 +1238,159 @@
             this.scheduleRender();
         }
         finish() {
+            this._terminated = true;
+            // A turn killed mid-arguments never sends block_stop, so decode
+            // here too or the block keeps its raw text and renders as "called
+            // with no arguments" — the confusion the raw text exists to prevent.
+            this.closeToolBlock();
+            this.reconcileFrameParams();
             this.clearWatchdog();
             this.detachStreamSource();
             this.s.streaming = false; this.s.pulse = false; this.current = null;
             this.loadConversations().then(() => this.renderAll());
             this.renderAll();
+        }
+
+        // Decode the argument JSON a tool block's deltas accumulated.
+        //
+        // The raw text is kept as a SIBLING field, never as a `_raw` key inside
+        // parameters: a tool may genuinely take an argument called `_raw`, and a
+        // sentinel that can appear in the data is the same mistake as reading
+        // failure out of an "Error:" prefix.
+        closeToolBlock() {
+            const b = this.current;
+            if (!b || b.type !== 'tool_call' || b.text === undefined) return;
+            const raw = (b.text || '').trim();
+            delete b.text;
+            b.parameters = {};
+            if (raw) {
+                try {
+                    const v = JSON.parse(raw);
+                    // Capped like every other argument path. This one had no
+                    // ceiling at all, so a well-formed 200KB Write block kept
+                    // all of it live and 64KB of parameters_raw on reload —
+                    // the one rule this area keeps insisting must not have two
+                    // implementations.
+                    // Gated on the RAW delta text, which is what the recorder
+                    // measures — re-encoding first splits the two on any JSON
+                    // that is not already in canonical compact form, such as
+                    // whitespace padding or \uXXXX escapes.
+                    if (v && typeof v === 'object' && !Array.isArray(v)) {
+                        if (new TextEncoder().encode(raw).length > 65536) {
+                            b.parameters = {};
+                            b.parameters_raw = this.cutToBytes(raw, 65536);
+                            b.parameters_truncated_bytes = new TextEncoder().encode(raw).length;
+                        } else {
+                            b.parameters = v;
+                        }
+                    }
+                    else this.keepRawArguments(b, raw);
+                } catch (e) { this.keepRawArguments(b, raw); }
+            }
+        }
+
+        // Match ConversationRecorder's argument ceiling, so a large frame does
+        // not render in full live and truncated after a reload — the same
+        // stream giving two answers, which is the divergence this whole area
+        // keeps having to close. In BYOK and Managed modes EVERY tool call is a
+        // frame, so this is the common path there, not an edge.
+        capParameters(params) {
+            let encoded;
+            try { encoded = JSON.stringify(params); } catch (e) { encoded = undefined; }
+            if (encoded === undefined) {
+                return { parameters: {}, parameters_raw: '[arguments could not be encoded]' };
+            }
+            const bytes = new TextEncoder().encode(encoded).length;
+            if (bytes <= 65536) return { parameters: params };
+            return {
+                parameters: {},
+                // Cut by BYTES, like the recorder's mb_strcut. Slicing by
+                // UTF-16 units instead made the two disagree by 6x on how much
+                // they kept and 3x on the size they reported, for the same
+                // input — and the corpus could not see it, because its one
+                // large scenario was pure ASCII, where the units coincide.
+                parameters_raw: this.cutToBytes(encoded, 65536),
+                parameters_truncated_bytes: bytes,
+            };
+        }
+
+        // Keep unparsed argument text under the same ceiling the recorder uses.
+        // This path had no bound at all, so a truncated call rendered its whole
+        // payload live and a 64KB slice of it after a reload.
+        keepRawArguments(b, raw) {
+            const bytes = new TextEncoder().encode(raw).length;
+            if (bytes <= 65536) { b.parameters_raw = raw; return; }
+            b.parameters_raw = this.cutToBytes(raw, 65536);
+            b.parameters_truncated_bytes = bytes;
+        }
+
+        // Cut a string to a byte budget without splitting a character.
+        cutToBytes(text, budget) {
+            const encoder = new TextEncoder();
+            if (encoder.encode(text).length <= budget) return text;
+            let low = 0;
+            let high = text.length;
+            while (low < high) {
+                const mid = Math.ceil((low + high) / 2);
+                // Never end on a high surrogate: half a pair is not a character.
+                const code = text.charCodeAt(mid - 1);
+                const end = (code >= 0xd800 && code <= 0xdbff) ? mid - 1 : mid;
+                if (encoder.encode(text.slice(0, end)).length <= budget) low = mid;
+                else high = mid - 1;
+            }
+            const code = text.charCodeAt(low - 1);
+            return text.slice(0, (code >= 0xd800 && code <= 0xdbff) ? low - 1 : low);
+        }
+
+        // Fall back to a tool_call frame's parsed arguments where the block's
+        // own are unusable — the same rule, and the same guard, as
+        // ConversationRecorder::reconcileToolCalls. Run once the turn ends,
+        // because judging ambiguity needs counts that are only complete then.
+        //
+        // Ambiguity matters: with two parallel calls to one tool there is no
+        // way to tell which frame belongs to which block, and this file's PHP
+        // counterpart refuses the same guess about tool_results. Where it is
+        // ambiguous nothing moves and each block keeps what it has.
+        reconcileFrameParams() {
+            const names = this._frameNames || [];
+            const blocks = (this.assistant && this.assistant.blocks) || [];
+
+            for (const b of blocks) {
+                if (b.type !== 'tool_call' || b._frameParams === undefined) continue;
+
+                const own = b.parameters;
+                const usable = own && typeof own === 'object' && Object.keys(own).length > 0
+                    && b.parameters_raw === undefined;
+
+                // The bare name this block corresponds to, which is what a
+                // frame carries.
+                const logical = String(b.tool_name).indexOf('mcp__bridge__') === 0
+                    ? String(b.tool_name).slice('mcp__bridge__'.length)
+                    : String(b.tool_name);
+
+                const frameCount = names.filter((n) => n === logical).length;
+                const streamCount = blocks.filter((o) => o.type === 'tool_call' && o._fromStream
+                    && (o.tool_name === 'mcp__bridge__' + logical || o.tool_name === logical)).length;
+
+                const unambiguous = frameCount === 1 && streamCount === 1;
+
+                const framed = b._frameParams;
+                const hasFrameArgs = framed
+                    && (Object.keys(framed.parameters || {}).length > 0 || framed.parameters_raw !== undefined);
+
+                if (!usable && unambiguous && hasFrameArgs) {
+                    b.parameters = framed.parameters || {};
+                    delete b.parameters_raw;
+                    delete b.parameters_truncated_bytes;
+                    if (framed.parameters_raw !== undefined) b.parameters_raw = framed.parameters_raw;
+                    if (framed.parameters_truncated_bytes !== undefined) {
+                        b.parameters_truncated_bytes = framed.parameters_truncated_bytes;
+                    }
+                }
+                delete b._frameParams;
+            }
+
+            this._frameNames = [];
         }
 
         scrollDown(stick = true, keepTop = 0) {

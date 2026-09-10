@@ -1017,6 +1017,69 @@ $stream->onToolCall(function (string $name, array $params, string $callId) {
 $stream->start();
 ```
 
+### Listening for Tool Results
+
+A tool that runs on the operator's own machine — the CLI's shell, file reader
+or editor — never reaches your server any other way. This callback is the only
+account of what it did.
+
+```php
+$stream->onToolResult(function (string $callId, mixed $result, ?bool $isError) {
+    // $callId pairs this to the tool_call block that produced it.
+    //
+    // $isError is null when the provider did not report an outcome. Absent
+    // never means "succeeded" — do not read failure out of the text either, as
+    // a tool legitimately printing "Error: no matches" is indistinguishable
+    // from one that failed.
+    //
+    // $result is null when the tool returned nothing, which is different from
+    // not having returned yet.
+    Log::info("tool {$callId} finished", ['failed' => $isError]);
+});
+```
+
+A result too large for one WebSocket frame arrives in chunks and is reassembled
+before this callback runs, so you always receive it whole. See `PROTOCOL.md`
+for the size bounds that apply on the way in and on the way to the database.
+
+### What the turn cost
+
+`onDone` receives a second argument with everything the provider reported
+beyond the token counts — the model that actually ran, the CLI version, the
+stop reason, cost and durations, and any tool calls the operator refused.
+
+```php
+$stream->onDone(function (?array $usage, array $meta = []) {
+    // $usage includes the CACHE counters, which dominate a resumed
+    // conversation — a total built from input/output alone will not reconcile
+    // against your provider's bill.
+    Log::info('turn finished', [
+        'cache_read' => $usage['cache_read_input_tokens'] ?? null,
+        'model' => $meta['model'] ?? null,
+        'cost_usd' => $meta['cost_usd'] ?? null,
+        'denied' => $meta['permission_denials'] ?? [],
+    ]);
+});
+```
+
+A turn that ends in an **error** never fires `onDone` — the error is its
+terminal. What it cost is still recorded, and readable afterwards:
+
+```php
+$stream->lastDoneUsage();   // token counts, success or failure
+$stream->lastDoneMeta();    // model, cost_usd, num_turns, …
+```
+
+### Rate limit notices
+
+Informational and non-terminal: the turn continues.
+
+```php
+$stream->onRateLimit(function (string $provider, array $info) {
+    Log::notice("{$provider} reported a rate limit", $info);
+});
+```
+
 ## Bridge Server
 
 The `ai-bridge:serve` command starts a dedicated WebSocket server for CLI bridge connections. It runs on its own port and speaks the AI Bridge Protocol — separate from any other realtime infrastructure your app may use.

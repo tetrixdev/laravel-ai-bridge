@@ -878,7 +878,12 @@ class MessageHandler
         // next turn resumes it instead of starting cold.
         $this->persistCliSessionId($handler, $data['cli_session_id'] ?? null);
 
-        $handler->dispatchDone($usage);
+        // Everything the bridge reported about the turn besides the token
+        // counts — model, cost, duration, stop reason, permission denials.
+        // Rebuilding the event from `usage` alone is the same mistake that lost
+        // `tool_name` on block_start: a second place that quietly narrows what
+        // arrived.
+        $handler->dispatchDone($usage, array_diff_key($data, ['usage' => true]));
         $this->connectionManager->removePendingRequest($requestId);
         unset($this->recoveredRequests[$requestId]);
 
