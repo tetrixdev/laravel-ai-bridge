@@ -516,6 +516,10 @@ class StreamHandler
      */
     private function receiveToolResult(array $data): void
     {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
         $toolCallId = (string) ($data['tool_call_id'] ?? $data['call_id'] ?? '');
         $isError = is_bool($data['is_error'] ?? null) ? $data['is_error'] : null;
 
@@ -563,13 +567,15 @@ class StreamHandler
     }
 
     /**
-     * Dispatch what has been assembled for one call and forget it.
+     * Take what has been assembled for one call, forgetting the buffer.
+     *
+     * @return array{result: string, is_error: bool|null}|null
      */
-    private function flushToolResult(string $toolCallId): void
+    private function takeToolResult(string $toolCallId): ?array
     {
         $buffer = $this->toolResultChunks[$toolCallId] ?? null;
         if ($buffer === null) {
-            return;
+            return null;
         }
 
         unset($this->toolResultChunks[$toolCallId]);
@@ -579,21 +585,50 @@ class StreamHandler
             $result .= "\n…[incomplete: the bridge stopped sending this result before it finished]";
         }
 
-        $this->dispatchToolResult($toolCallId, $result, $buffer['is_error']);
+        return ['result' => $result, 'is_error' => $buffer['is_error']];
+    }
+
+    /**
+     * Dispatch a completed result mid-stream, through the ordinary guard.
+     */
+    private function flushToolResult(string $toolCallId): void
+    {
+        $assembled = $this->takeToolResult($toolCallId);
+        if ($assembled === null) {
+            return;
+        }
+
+        $this->dispatchToolResult($toolCallId, $assembled['result'], $assembled['is_error']);
     }
 
     /**
      * Dispatch every partially assembled result, in arrival order.
      *
-     * Called before a turn ends. A result whose final chunk never arrived is
-     * worth more as a marked partial than as nothing at all — silently dropping
-     * it is the failure this whole change exists to stop.
+     * Called at each of the three terminals. A result whose final chunk never
+     * arrived is worth more as a marked partial than as nothing at all, and the
+     * recorder already keeps partial TEXT on the same terminals — a tool result
+     * disappearing where the prose survives would be the odd one out.
+     *
+     * Dispatched to the callbacks directly rather than through
+     * `dispatchToolResult`, which refuses to run once the stream is cancelled
+     * or terminated. That guard is right for a result still arriving and wrong
+     * here: these are precisely the moments it would drop the results this
+     * exists to save.
      */
     private function flushPendingToolResults(): void
     {
         foreach (array_keys($this->toolResultChunks) as $toolCallId) {
             $this->toolResultChunks[$toolCallId]['incomplete'] = true;
-            $this->flushToolResult($toolCallId);
+            $assembled = $this->takeToolResult($toolCallId);
+            if ($assembled === null) {
+                continue;
+            }
+
+            $this->dispatchCallbacks(
+                $this->toolResultCallbacks,
+                [$toolCallId, $assembled['result'], $assembled['is_error']],
+                'toolResult',
+            );
         }
     }
 
@@ -662,6 +697,12 @@ class StreamHandler
         if ($this->terminated) {
             return;
         }
+
+        // Before the cancelled callbacks, not after: the recorder persists what
+        // it has from inside one of them, so a result flushed afterwards would
+        // be assembled correctly and then never written down.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
         $this->dispatchCallbacks($this->cancelledCallbacks, [$reason], 'cancelled');

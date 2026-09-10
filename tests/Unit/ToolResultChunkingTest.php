@@ -199,3 +199,42 @@ test('a chunked result reaches the transcript as one block', function () {
         ->and($tool['result'])->toBe('line one\nline two')
         ->and(collect($blocks)->where('type', 'tool_result'))->toHaveCount(0);
 });
+
+test('a partial result survives the turn being cancelled', function () {
+    // The third terminal, and the one that nearly got away: `cancel()` sets a
+    // flag that makes dispatchToolResult refuse, so a flush written the obvious
+    // way is dropped by the very guard meant to protect it. The recorder keeps
+    // partial TEXT on this same terminal, so a tool result vanishing here would
+    // be the odd one out.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'got this far', 'chunk_index' => 0, 'final' => false, 'is_error' => true,
+        ]));
+        $h->cancel();
+        $h->dispatchCancelled('user stopped it');
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('got this far')
+        ->and($seen[0][1])->toContain('incomplete')
+        ->and($seen[0][2])->toBe(true);
+});
+
+test('a cancelled stream stops accumulating chunks', function () {
+    // Otherwise a cancelled turn can still be made to allocate, one 1 MB frame
+    // at a time, by a sender that simply keeps going.
+    // Deliberately NOT final. A final chunk would be stopped by the guard on
+    // dispatchToolResult even if it had been buffered, so the test would pass
+    // whether or not the buffering was prevented — proving nothing. A partial
+    // one is only ever dispatched by the terminal flush, which bypasses that
+    // guard, so it appears if and only if it was retained.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->cancel();
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'after the cancel', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchCancelled('user stopped it');
+    });
+
+    expect($seen)->toBe([]);
+});
