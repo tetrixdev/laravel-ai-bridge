@@ -1122,6 +1122,11 @@
                         // two had a ceiling, so a large frame that CLAIMED a
                         // block rendered in full live and truncated on reload.
                         shadow._frameParams = this.capParameters(d.parameters || {});
+                        // Remember the frame's own id. A result keyed to it
+                        // would otherwise find no block — the frame is dropped
+                        // as a duplicate — and float loose, where the recorder
+                        // carries it onto the call.
+                        shadow._frameCallId = d.tool_call_id;
                         break;
                     }
                     // tool_call_id included so a later tool_result can find it.
@@ -1142,8 +1147,8 @@
                     // not happen — and when something that should not happen
                     // does, keeping the evidence beats discarding half of it.
                     const owner = d.tool_call_id && this.assistant.blocks.find(
-                        (b) => b.type === 'tool_call' && b.tool_call_id === d.tool_call_id
-                            && !('result' in b));
+                        (b) => b.type === 'tool_call' && !('result' in b)
+                            && (b.tool_call_id === d.tool_call_id || b._frameCallId === d.tool_call_id));
                     if (owner) {
                         owner.result = d.result;
                         if (d.is_error !== undefined) owner.is_error = d.is_error;
@@ -1197,8 +1202,8 @@
                 try {
                     const v = JSON.parse(raw);
                     if (v && typeof v === 'object' && !Array.isArray(v)) b.parameters = v;
-                    else b.parameters_raw = raw;
-                } catch (e) { b.parameters_raw = raw; }
+                    else this.keepRawArguments(b, raw);
+                } catch (e) { this.keepRawArguments(b, raw); }
             }
         }
 
@@ -1225,6 +1230,16 @@
                 parameters_raw: this.cutToBytes(encoded, 65536),
                 parameters_truncated_bytes: bytes,
             };
+        }
+
+        // Keep unparsed argument text under the same ceiling the recorder uses.
+        // This path had no bound at all, so a truncated call rendered its whole
+        // payload live and a 64KB slice of it after a reload.
+        keepRawArguments(b, raw) {
+            const bytes = new TextEncoder().encode(raw).length;
+            if (bytes <= 65536) { b.parameters_raw = raw; return; }
+            b.parameters_raw = this.cutToBytes(raw, 65536);
+            b.parameters_truncated_bytes = bytes;
         }
 
         // Cut a string to a byte budget without splitting a character.

@@ -139,13 +139,19 @@ final class ConversationRecorder
         // on terminal events so a tool_call without a matching block_stop
         // (truncated stream) can't make us swallow subsequent block_deltas.
         $inStreamToolCall = false;
+        /**
+         * Frames that arrived while a block was open, waiting for it to close.
+         *
+         * @var array<int, array<string, mixed>>
+         */
+        $pendingFrames = [];
 
-        $handler->onBlockStart(function (StreamEvent $event) use (&$blocks, &$current, &$inStreamToolCall) {
+        $handler->onBlockStart(function (StreamEvent $event) use (&$blocks, &$current, &$inStreamToolCall, &$pendingFrames) {
             // A block the stream never closed used to be overwritten here and
             // lost outright — flushCurrent only rescues one still open when the
             // TURN ends, so a truncated block followed by any other block
             // vanished from the record, arguments and all.
-            self::flushCurrent($blocks, $current);
+            self::flushCurrent($blocks, $current, $pendingFrames);
 
             $blockType = $event->data['block_type'] ?? 'text';
             if ($blockType === 'tool_call') {
@@ -196,7 +202,7 @@ final class ConversationRecorder
                 $current['text'] .= $event->data['content'] ?? '';
             }
         });
-        $handler->onBlockStop(function () use (&$blocks, &$current, &$inStreamToolCall) {
+        $handler->onBlockStop(function () use (&$blocks, &$current, &$inStreamToolCall, &$pendingFrames) {
             if ($inStreamToolCall) {
                 $inStreamToolCall = false;
 
@@ -211,15 +217,34 @@ final class ConversationRecorder
                 $blocks[] = $current;
                 $current = null;
             }
+
+            // Frames that arrived while this block was open now follow it.
+            foreach ($pendingFrames as $frame) {
+                $blocks[] = $frame;
+            }
+            $pendingFrames = [];
         });
-        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks) {
-            // Recorded as-is. Reconciliation against the stream block happens
-            // at persist time, where the ordering of the two is irrelevant.
-            $blocks[] = ['type' => 'tool_call', 'tool_name' => $name]
+        $handler->onToolCall(function (string $name, array $params, string $callId) use (&$blocks, &$current, &$pendingFrames) {
+            $frame = ['type' => 'tool_call', 'tool_name' => $name]
                 + self::capParameters($params)
                 + ['tool_call_id' => $callId, '_from_frame' => true];
+
+            // Behind the block still open, not in front of it — and WAITING for
+            // it, not closing it. A frame is recorded the moment it arrives
+            // while an open block is only recorded at block_stop, so a tool call
+            // announced mid-sentence was stored before the prose introducing it
+            // and drawn after; 150 of 400 randomly generated streams diverged on
+            // order alone. Flushing the open block instead would end it early
+            // and drop the deltas still to come.
+            if ($current !== null) {
+                $pendingFrames[] = $frame;
+
+                return;
+            }
+
+            $blocks[] = $frame;
         });
-        $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks) {
+        $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks, &$current) {
             // Record the tool_result with the id the dispatcher provided. In
             // bridge mode that's the CLI's own id (which won't match the WS
             // tool_call block's `mcp-<rid>-<n>` id) — but the chat UI renders
@@ -237,6 +262,21 @@ final class ConversationRecorder
             // harmless "because the chat UI renders tool_result blocks
             // STANDALONE". That stopped being true on this branch, and nothing
             // noticed until the two implementations were run against one corpus.
+            // The block still OPEN counts too. Searching only closed blocks
+            // orphaned a result that arrived before its own block_stop, and
+            // placed the standalone block it made in front of the call it
+            // belongs to.
+            if (($current['type'] ?? '') === 'tool_call'
+                && ($current['tool_call_id'] ?? null) === $callId
+                && ! isset($current['result'])) {
+                $current['result'] = $result;
+                if ($isError !== null) {
+                    $current['is_error'] = $isError;
+                }
+
+                return;
+            }
+
             foreach ($blocks as $i => $candidate) {
                 if (($candidate['type'] ?? '') !== 'tool_call') {
                     continue;
@@ -262,21 +302,21 @@ final class ConversationRecorder
             }
             $blocks[] = $block;
         });
-        $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+        $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, &$pendingFrames, $conversation) {
             $inStreamToolCall = false;
-            self::flushCurrent($blocks, $current);
+            self::flushCurrent($blocks, $current, $pendingFrames);
             self::persist($conversation, $blocks, $usage, false);
             self::clearStreamingRequestId($conversation);
         });
 
-        $persistPartial = function () use (&$blocks, &$current, &$inStreamToolCall, $conversation) {
+        $persistPartial = function () use (&$blocks, &$current, &$inStreamToolCall, &$pendingFrames, $conversation) {
             // A truncated stream may have left $inStreamToolCall set without a
             // matching block_stop. Clearing it isn't strictly necessary here
             // (this is a terminal — no more events arrive), but resetting
             // keeps the closure state consistent if a future refactor reuses
             // the recorder across turns.
             $inStreamToolCall = false;
-            self::flushCurrent($blocks, $current);
+            self::flushCurrent($blocks, $current, $pendingFrames);
             if (config('ai-bridge.persistence.persist_partial_on_error', true) && self::hasContent($blocks)) {
                 self::persist($conversation, $blocks, null, true);
             }
@@ -311,7 +351,7 @@ final class ConversationRecorder
      * @param  array<int, array<string, mixed>>  $blocks
      * @param  array<string, mixed>|null  $current
      */
-    private static function flushCurrent(array &$blocks, ?array &$current): void
+    private static function flushCurrent(array &$blocks, ?array &$current, array &$pendingFrames = []): void
     {
         if ($current !== null) {
             // Also on this path, which is the one a TRUNCATED turn takes. A
@@ -323,6 +363,12 @@ final class ConversationRecorder
             $blocks[] = self::finaliseToolCall($current);
             $current = null;
         }
+
+        // Anything that arrived while it was open now follows it.
+        foreach ($pendingFrames as $frame) {
+            $blocks[] = $frame;
+        }
+        $pendingFrames = [];
     }
 
     /**
@@ -469,6 +515,15 @@ final class ConversationRecorder
                 // One frame cancels against one block; a third call with no
                 // frame of its own keeps its block rather than being consumed.
                 $claimed[$candidate] = true;
+
+                // Carry over anything attached to the frame before dropping it.
+                // The component does this explicitly; without it here a result
+                // keyed to the frame's id was destroyed outright.
+                foreach (['result', 'is_error'] as $carried) {
+                    if (array_key_exists($carried, $block) && ! array_key_exists($carried, $blocks[$candidate])) {
+                        $blocks[$candidate][$carried] = $block[$carried];
+                    }
+                }
 
                 // The block is USUALLY richer — it has the id results are keyed
                 // by — but not always: its arguments are raw delta text, which
