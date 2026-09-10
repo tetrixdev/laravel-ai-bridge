@@ -477,7 +477,13 @@
                     const resultBody = emptyResult
                         ? '(no output)'
                         : (typeof b.result === 'string' ? b.result : JSON.stringify(b.result));
-                    const showResult = 'result' in b && (!emptyResult || b.is_error);
+                    // The KEY, not its value. A result of null means the tool
+                    // returned nothing; no result key at all means it has not
+                    // returned. The recorder and StreamEvent both go out of
+                    // their way to keep that difference — and this drew them
+                    // identically, so a finished call with no output looked
+                    // exactly like one still running.
+                    const showResult = 'result' in b;
                     return `<div class="tool"><b>🔧 ${this.esc(shown)}</b>
                         <pre>${this.esc((b.parameters_raw !== undefined
                             ? b.parameters_raw
@@ -492,10 +498,10 @@
                     // success the moment the reader refreshed.
                     const r = b.result;
                     const empty = (r === undefined || r === null || r === '');
-                    // An empty SUCCESS has nothing to show. An empty FAILURE
-                    // still has to appear, or the failed call vanishes from the
-                    // transcript while its successful neighbours are drawn.
-                    if (empty && !b.is_error) return '';
+                    // A standalone block exists BECAUSE a result was reported,
+                    // so it is always drawn. Returning nothing here deleted the
+                    // record of a call that completed with no output — the same
+                    // information the recorder took trouble to keep.
                     const body = empty ? '(no output)' : (typeof r === 'string' ? r : JSON.stringify(r));
                     return `<div class="tool"><div class="res${b.is_error ? ' err' : ''}">${b.is_error ? '✕' : '→'} ${this.esc(body)}</div></div>`;
                 }

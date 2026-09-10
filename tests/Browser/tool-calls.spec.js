@@ -353,3 +353,44 @@ test('a rate limit notice is recorded but not drawn into the answer', async ({ p
   expect(text).toContain('the answer');
   expect(text).not.toContain('utilization');
 });
+
+/** Render a fixed set of persisted blocks, as a page reload would. */
+async function renderBlocks(page, blocks) {
+  return page.evaluate((bs) => {
+    const el = document.querySelector('ai-bridge-chat');
+    el.s.streaming = false;
+    el.s.messages = [{ role: 'assistant', blocks: bs }];
+    el.renderAll();
+
+    return el.shadowRoot.querySelector('.messages').innerHTML;
+  }, blocks);
+}
+
+test('a call that returned nothing is drawn as finished, not as still running', async ({ page }) => {
+  // `result: null` means the tool returned nothing; no `result` key at all
+  // means it has not returned. StreamEvent and ConversationRecorder both take
+  // trouble to keep that difference — and the renderer drew them identically,
+  // so a finished call with no output was indistinguishable from one still
+  // running. That is the exact confusion the null was preserved to prevent.
+  await ready(page);
+  const html = await renderBlocks(page, [
+    { type: 'tool_call', tool_name: 'Bash', tool_call_id: 't1', parameters: { command: 'true' }, result: null },
+    { type: 'tool_call', tool_name: 'Bash', tool_call_id: 't2', parameters: { command: 'sleep 60' } },
+  ]);
+
+  const tools = html.split('class="tool"');
+  expect(tools.length).toBe(3);
+  expect(tools[1]).toContain('(no output)');
+  expect(tools[2]).not.toContain('(no output)');
+});
+
+test('a standalone result that returned nothing is not deleted', async ({ page }) => {
+  // The block exists BECAUSE a result was reported. Rendering nothing removed
+  // the only record that the call completed.
+  await ready(page);
+  const html = await renderBlocks(page, [
+    { type: 'tool_result', tool_call_id: 'orphan', result: null },
+  ]);
+
+  expect(html).toContain('(no output)');
+});
