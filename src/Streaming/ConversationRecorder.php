@@ -551,9 +551,15 @@ final class ConversationRecorder
                 // Carry over anything attached to the frame before dropping it.
                 // The component does this explicitly; without it here a result
                 // keyed to the frame's id was destroyed outright.
-                foreach (['result', 'is_error'] as $carried) {
-                    if (array_key_exists($carried, $block) && ! array_key_exists($carried, $blocks[$candidate])) {
-                        $blocks[$candidate][$carried] = $block[$carried];
+                // `is_error` describes a result, so it travels with one.
+                // Carried on its own — the block having a result of its own and
+                // no verdict — it would label the block's OWN result with the
+                // frame's verdict on a different one, and then be attached to
+                // the orphaned result below as well: wrong in two places at once.
+                if (array_key_exists('result', $block) && ! array_key_exists('result', $blocks[$candidate])) {
+                    $blocks[$candidate]['result'] = $block['result'];
+                    if (array_key_exists('is_error', $block)) {
+                        $blocks[$candidate]['is_error'] = $block['is_error'];
                     }
                 }
 

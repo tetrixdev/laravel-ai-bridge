@@ -53,6 +53,8 @@ composer test -- --filter=Conformance                         # the recorded hal
 ```
 
 **When a divergence is found, add a scenario.** Both suites pick it up with no
-further wiring. Only `tool_call` blocks are compared, and only the fields both
-sides model — `tool_name`, `parameters`, `tool_call_id`, `parameters_raw` —
-because those are what a consumer of either can rely on.
+further wiring. Every block is compared, and every field either side models —
+`tool_name`, `parameters`, `parameters_raw`, `parameters_truncated_bytes`,
+`tool_call_id`, `result`, `is_error`, `text`, `type` — with internal bookkeeping
+keys (those prefixed `_`) excluded. A comparison narrower than the thing it
+compares proves nothing.
