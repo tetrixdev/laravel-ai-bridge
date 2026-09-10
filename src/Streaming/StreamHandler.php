@@ -63,6 +63,28 @@ class StreamHandler
     private array $rateLimitCallbacks = [];
 
     /**
+     * Partially received tool results, keyed by tool_call_id.
+     *
+     * A result larger than one frame crosses in chunks. They are reassembled
+     * HERE, at the first thing to touch the wire, so everything downstream —
+     * the recorder, the buffering sink, the browser component — keeps seeing a
+     * single complete result and needs no knowledge of chunking at all.
+     *
+     * @var array<string, array{parts: list<string>, bytes: int, next: int, is_error: bool|null, incomplete: bool}>
+     */
+    private array $toolResultChunks = [];
+
+    /**
+     * The largest result this will assemble, matching the bridge's own ceiling.
+     *
+     * Chunks are held in memory until the result completes, so without a limit
+     * a stream could ask this process for an unbounded allocation. The bridge
+     * stops sending at the same number; this is the belt to that braces, since
+     * a server must not depend on a client to bound its memory.
+     */
+    private const MAX_TOTAL_RESULT_BYTES = 16 * 1024 * 1024;
+
+    /**
      * Everything the provider reported about the last turn besides usage —
      * model, cost, duration, stop reason, permission denials.
      *
@@ -437,6 +459,12 @@ class StreamHandler
         if ($this->cancelled || $this->terminated) {
             return;
         }
+
+        // Before the flag goes up: dispatchToolResult refuses to run once the
+        // stream is terminated, so a partial result flushed after this line
+        // would be dropped by the very guard meant to protect it.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
         $this->lastDoneMeta = $meta;
@@ -463,6 +491,11 @@ class StreamHandler
         if ($this->terminated) {
             return;
         }
+
+        // Same ordering as `done`: flush while dispatch is still permitted. An
+        // error is exactly when a half-delivered result is worth keeping.
+        $this->flushPendingToolResults();
+
         $this->terminated = true;
 
         $this->dispatchCallbacks($this->errorCallbacks, [$code, $message], 'error');
@@ -470,6 +503,98 @@ class StreamHandler
         $this->dispatchStreamCompleted(false, null, "{$code}: {$message}", TerminatedBy::Error);
 
         $this->provider->markCompleted();
+    }
+
+    /**
+     * Take one tool_result frame off the wire, reassembling it if it is a chunk.
+     *
+     * A frame with no `chunk_index` is a whole result and goes straight through
+     * — the shape every result had before chunking existed, and the shape every
+     * result under the per-frame budget still has.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function receiveToolResult(array $data): void
+    {
+        $toolCallId = (string) ($data['tool_call_id'] ?? $data['call_id'] ?? '');
+        $isError = is_bool($data['is_error'] ?? null) ? $data['is_error'] : null;
+
+        if (! is_int($data['chunk_index'] ?? null)) {
+            $this->dispatchToolResult($toolCallId, $data['result'] ?? null, $isError);
+
+            return;
+        }
+
+        $index = $data['chunk_index'];
+        $final = ($data['final'] ?? false) === true;
+        $piece = is_string($data['result'] ?? null) ? $data['result'] : '';
+
+        $buffer = $this->toolResultChunks[$toolCallId] ?? [
+            'parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'incomplete' => false,
+        ];
+
+        // The verdict rides on every chunk, so the last one seen wins and a
+        // result cut short still carries whether it was a failure.
+        if ($isError !== null) {
+            $buffer['is_error'] = $isError;
+        }
+
+        // Out of order means a chunk was lost or duplicated. Reordering would
+        // guess at content; recording what arrived and SAYING it is partial
+        // does not.
+        if ($index !== $buffer['next']) {
+            $buffer['incomplete'] = true;
+        } else {
+            $length = strlen($piece);
+            if ($buffer['bytes'] + $length > self::MAX_TOTAL_RESULT_BYTES) {
+                $buffer['incomplete'] = true;
+            } else {
+                $buffer['parts'][] = $piece;
+                $buffer['bytes'] += $length;
+            }
+            $buffer['next'] = $index + 1;
+        }
+
+        $this->toolResultChunks[$toolCallId] = $buffer;
+
+        if ($final) {
+            $this->flushToolResult($toolCallId);
+        }
+    }
+
+    /**
+     * Dispatch what has been assembled for one call and forget it.
+     */
+    private function flushToolResult(string $toolCallId): void
+    {
+        $buffer = $this->toolResultChunks[$toolCallId] ?? null;
+        if ($buffer === null) {
+            return;
+        }
+
+        unset($this->toolResultChunks[$toolCallId]);
+
+        $result = implode('', $buffer['parts']);
+        if ($buffer['incomplete']) {
+            $result .= "\n…[incomplete: the bridge stopped sending this result before it finished]";
+        }
+
+        $this->dispatchToolResult($toolCallId, $result, $buffer['is_error']);
+    }
+
+    /**
+     * Dispatch every partially assembled result, in arrival order.
+     *
+     * Called before a turn ends. A result whose final chunk never arrived is
+     * worth more as a marked partial than as nothing at all — silently dropping
+     * it is the failure this whole change exists to stop.
+     */
+    private function flushPendingToolResults(): void
+    {
+        foreach (array_keys($this->toolResultChunks) as $toolCallId) {
+            $this->toolResultChunks[$toolCallId]['incomplete'] = true;
+            $this->flushToolResult($toolCallId);
+        }
     }
 
     /**
@@ -562,11 +687,7 @@ class StreamHandler
                 $event->data['parameters'] ?? [],
                 $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
             ),
-            MessageTypes::TOOL_RESULT => $this->dispatchToolResult(
-                $event->data['tool_call_id'] ?? $event->data['call_id'] ?? '',
-                $event->data['result'] ?? null,
-                is_bool($event->data['is_error'] ?? null) ? $event->data['is_error'] : null,
-            ),
+            MessageTypes::TOOL_RESULT => $this->receiveToolResult($event->data),
             MessageTypes::RATE_LIMIT => $this->dispatchRateLimit(
                 is_string($event->data['provider'] ?? null) ? $event->data['provider'] : 'unknown',
                 is_array($event->data['info'] ?? null) ? $event->data['info'] : [],
