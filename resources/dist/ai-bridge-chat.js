@@ -1201,7 +1201,12 @@
             if (raw) {
                 try {
                     const v = JSON.parse(raw);
-                    if (v && typeof v === 'object' && !Array.isArray(v)) b.parameters = v;
+                    // Capped like every other argument path. This one had no
+                    // ceiling at all, so a well-formed 200KB Write block kept
+                    // all of it live and 64KB of parameters_raw on reload —
+                    // the one rule this area keeps insisting must not have two
+                    // implementations.
+                    if (v && typeof v === 'object' && !Array.isArray(v)) Object.assign(b, this.capParameters(v));
                     else this.keepRawArguments(b, raw);
                 } catch (e) { this.keepRawArguments(b, raw); }
             }

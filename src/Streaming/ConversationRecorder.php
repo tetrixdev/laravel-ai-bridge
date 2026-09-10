@@ -118,7 +118,11 @@ final class ConversationRecorder
         // `[]` is both — array_is_list() reports true for an empty array, so a
         // tool called with `{}` was being recorded as "could not be parsed"
         // with a stray parameters_raw of '{}'.
-        if (is_array($decoded) && ($decoded === [] || ! array_is_list($decoded))) {
+        // The TEXT decides, not the decoded shape: json_decode(assoc) turns
+        // {"0":"a"} and ["a"] into the same PHP array, so array_is_list alone
+        // recorded a genuine object with numeric keys as "could not be parsed"
+        // — a false statement about the data.
+        if (is_array($decoded) && ($trimmed[0] === '{' || $decoded === [])) {
             return ['parameters' => $decoded];
         }
 
@@ -244,28 +248,27 @@ final class ConversationRecorder
 
             $blocks[] = $frame;
         });
-        $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks, &$current) {
-            // Record the tool_result with the id the dispatcher provided. In
-            // bridge mode that's the CLI's own id (which won't match the WS
-            // tool_call block's `mcp-<rid>-<n>` id) — but the chat UI renders
-            // tool_result blocks STANDALONE (see msgHtml in ai-bridge-chat.js:
-            // type === 'tool_result' branch), so the mismatch is harmless. An
-            // earlier draft tried to remap ids by FIFO arrival order; that
-            // assumed CLIs emit results in invocation order, which is not
-            // guaranteed under parallel tool_use, so it was dropped.
-            // Attach to the call it belongs to, when there is one. The chat
-            // component does this — it has since a commit on this branch — and
-            // a standalone block here meant the same turn showed the result
-            // under its call live and floating loose after a reload.
+        $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError = null) use (&$blocks, &$current, &$pendingFrames) {
+            // Attach to the call it belongs to, wherever that call currently
+            // is. There are three places, and each was found by a divergence
+            // against the chat component rather than by reading:
             //
-            // The comment that used to sit here argued the mismatch was
+            //   - the block still OPEN, for a result that arrives before its
+            //     own block_stop;
+            //   - the closed blocks;
+            //   - a frame still QUEUED behind an open block, which is in
+            //     neither of the other two.
+            //
+            // A standalone block is the last resort, not the default. The
+            // comment that used to sit here argued a mismatch of ids was
             // harmless "because the chat UI renders tool_result blocks
-            // STANDALONE". That stopped being true on this branch, and nothing
-            // noticed until the two implementations were run against one corpus.
-            // The block still OPEN counts too. Searching only closed blocks
-            // orphaned a result that arrived before its own block_stop, and
-            // placed the standalone block it made in front of the call it
-            // belongs to.
+            // STANDALONE" — that stopped being true earlier on this branch, and
+            // nothing noticed until the two implementations were run against
+            // one corpus.
+            //
+            // Ids are never remapped by arrival order. That assumes CLIs emit
+            // results in invocation order, which is not guaranteed under
+            // parallel tool use.
             if (($current['type'] ?? '') === 'tool_call'
                 && ($current['tool_call_id'] ?? null) === $callId
                 && ! isset($current['result'])) {
@@ -293,6 +296,21 @@ final class ConversationRecorder
                 return;
             }
 
+            // A frame still waiting behind an open block is in neither place
+            // searched above, so its result was detached from the call it
+            // belongs to — and the carry-over at reconciliation then had
+            // nothing to carry.
+            foreach ($pendingFrames as $i => $frame) {
+                if (($frame['tool_call_id'] ?? null) === $callId && ! isset($frame['result'])) {
+                    $pendingFrames[$i]['result'] = $result;
+                    if ($isError !== null) {
+                        $pendingFrames[$i]['is_error'] = $isError;
+                    }
+
+                    return;
+                }
+            }
+
             $block = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
             // Only when the provider actually said. Absent must not be read as
             // success — a tool printing "Error: no matches" is not a failure,
@@ -300,6 +318,17 @@ final class ConversationRecorder
             if ($isError !== null) {
                 $block['is_error'] = $isError;
             }
+
+            // Behind the block still open, for the same reason a tool_call
+            // frame is: appended now it would sit in front of the prose that
+            // introduces it. The queue was given to frames and not to their
+            // sibling emitter here.
+            if ($current !== null) {
+                $pendingFrames[] = $block;
+
+                return;
+            }
+
             $blocks[] = $block;
         });
         $handler->onDone(function (?array $usage) use (&$blocks, &$current, &$inStreamToolCall, &$pendingFrames, $conversation) {
@@ -597,7 +626,9 @@ final class ConversationRecorder
     private static function hasContent(array $blocks): bool
     {
         foreach ($blocks as $block) {
-            if (($block['type'] ?? '') === 'tool_call' || ($block['text'] ?? '') !== '') {
+            // tool_result counts too: a turn cancelled after a tool ran and
+            // returned is precisely a turn worth keeping.
+            if (in_array($block['type'] ?? '', ['tool_call', 'tool_result'], true) || ($block['text'] ?? '') !== '') {
                 return true;
             }
         }
