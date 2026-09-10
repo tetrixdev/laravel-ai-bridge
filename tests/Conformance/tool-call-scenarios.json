@@ -1385,6 +1385,325 @@
           "result": "17"
         }
       ]
+    },
+    {
+      "name": "two frames queued behind one open block keep their order",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "a",
+            "parameters": {
+              "i": 1
+            },
+            "tool_call_id": "m1"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "b",
+            "parameters": {
+              "i": 2
+            },
+            "tool_call_id": "m2"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "prose"
+          }
+        },
+        {
+          "event": "block_stop",
+          "data": {
+            "block_index": 0
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "text",
+          "text": "prose"
+        },
+        {
+          "type": "tool_call",
+          "tool_name": "a",
+          "tool_call_id": "m1",
+          "parameters": {
+            "i": 1
+          }
+        },
+        {
+          "type": "tool_call",
+          "tool_name": "b",
+          "tool_call_id": "m2",
+          "parameters": {
+            "i": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "a queued frame survives the turn erroring",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "a",
+            "parameters": {
+              "i": 1
+            },
+            "tool_call_id": "m1"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "half"
+          }
+        },
+        {
+          "event": "error",
+          "data": {
+            "code": "provider_error",
+            "message": "boom"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "text",
+          "text": "half"
+        },
+        {
+          "type": "tool_call",
+          "tool_name": "a",
+          "tool_call_id": "m1",
+          "parameters": {
+            "i": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a frame queued behind its own tool block reconciles to one call",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "tool_call",
+            "tool_name": "mcp__bridge__a",
+            "tool_call_id": "t1"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "a",
+            "parameters": {
+              "i": 1
+            },
+            "tool_call_id": "m1"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "{\"i\":1}"
+          }
+        },
+        {
+          "event": "block_stop",
+          "data": {
+            "block_index": 0
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "tool_call",
+          "tool_name": "mcp__bridge__a",
+          "tool_call_id": "t1",
+          "parameters": {
+            "i": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a queued frame is released when the next block opens",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "a",
+            "parameters": {
+              "i": 1
+            },
+            "tool_call_id": "m1"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "one"
+          }
+        },
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 1,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 1,
+            "content": "two"
+          }
+        },
+        {
+          "event": "block_stop",
+          "data": {
+            "block_index": 1
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "text",
+          "text": "one"
+        },
+        {
+          "type": "tool_call",
+          "tool_name": "a",
+          "tool_call_id": "m1",
+          "parameters": {
+            "i": 1
+          }
+        },
+        {
+          "type": "text",
+          "text": "two"
+        }
+      ]
+    },
+    {
+      "name": "a frame arriving after done is ignored",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "answer"
+          }
+        },
+        {
+          "event": "block_stop",
+          "data": {
+            "block_index": 0
+          }
+        },
+        {
+          "event": "done",
+          "data": {
+            "usage": null
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "late",
+            "parameters": {},
+            "tool_call_id": "m9"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "text",
+          "text": "answer"
+        }
+      ]
+    },
+    {
+      "name": "a queued frame survives a turn with no terminal",
+      "events": [
+        {
+          "event": "block_start",
+          "data": {
+            "block_index": 0,
+            "block_type": "text"
+          }
+        },
+        {
+          "event": "tool_call",
+          "data": {
+            "tool_name": "a",
+            "parameters": {
+              "i": 1
+            },
+            "tool_call_id": "m1"
+          }
+        },
+        {
+          "event": "block_delta",
+          "data": {
+            "block_index": 0,
+            "content": "dangling"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "type": "text",
+          "text": "dangling"
+        },
+        {
+          "type": "tool_call",
+          "tool_name": "a",
+          "tool_call_id": "m1",
+          "parameters": {
+            "i": 1
+          }
+        }
+      ]
     }
   ]
 }
