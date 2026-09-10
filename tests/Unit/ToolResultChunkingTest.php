@@ -1012,3 +1012,43 @@ test('a cancelled turn does not record a late done', function () {
 
     expect($handler->lastDoneUsage())->toBeNull();
 });
+
+test('the callbacks the README documents receive what it says they do', function () {
+    // A README with a wrong signature is worse than no README: it is confidently
+    // wrong, and a reader has no reason to doubt it. These are the exact shapes
+    // documented under "Listening for Tool Results", "What the turn cost" and
+    // "Rate limit notices".
+    $handler = recordingHandler();
+    $seen = [];
+
+    $handler->onToolResult(function (string $callId, mixed $result, ?bool $isError) use (&$seen) {
+        $seen['tool_result'] = [$callId, $result, $isError];
+    });
+    $handler->onRateLimit(function (string $provider, array $info) use (&$seen) {
+        $seen['rate_limit'] = [$provider, $info];
+    });
+    $handler->onDone(function (?array $usage, array $meta = []) use (&$seen) {
+        $seen['done'] = [$usage, $meta];
+    });
+
+    $handler->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+        'tool_call_id' => 't1', 'result' => 'out', 'is_error' => false,
+    ]));
+    $handler->dispatchEvent(wire(MessageTypes::RATE_LIMIT, [
+        'provider' => 'claude', 'info' => ['status' => 'allowed'],
+    ]));
+    $handler->dispatchEvent(wire(MessageTypes::DONE, [
+        'usage' => ['input_tokens' => 3, 'cache_read_input_tokens' => 9],
+        'model' => 'claude-x', 'cost_usd' => 0.1,
+    ]));
+
+    expect($seen['tool_result'])->toBe(['t1', 'out', false])
+        ->and($seen['rate_limit'])->toBe(['claude', ['status' => 'allowed']])
+        ->and($seen['done'][0]['cache_read_input_tokens'])->toBe(9)
+        ->and($seen['done'][1]['model'])->toBe('claude-x')
+        ->and($seen['done'][1]['cost_usd'])->toBe(0.1);
+
+    // And the two accessors the README tells a reader to use after a failure.
+    expect($handler->lastDoneUsage()['input_tokens'])->toBe(3)
+        ->and($handler->lastDoneMeta()['model'])->toBe('claude-x');
+});

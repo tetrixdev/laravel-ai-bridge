@@ -506,7 +506,6 @@ class StreamHandler
             // `lastDoneMeta()` and `lastDoneUsage()` to hand back.
             if ($this->terminated && ! $this->cancelled) {
                 $this->lastDoneMeta = $meta;
-        $this->lastDoneUsage = $usage;
                 $this->lastDoneUsage = $usage;
             }
 
@@ -521,6 +520,7 @@ class StreamHandler
         $this->terminated = true;
 
         $this->lastDoneMeta = $meta;
+        $this->lastDoneUsage = $usage;
 
         // $meta is passed as a second argument. PHP allows extra arguments to a
         // userland closure, so callbacks written against the one-argument form
