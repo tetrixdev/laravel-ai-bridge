@@ -564,17 +564,20 @@ final class ConversationRecorder
             if (is_string($block['text'] ?? null) && $block['text'] !== '') {
                 $size = strlen($block['text']);
                 if ($size > max(0, $textRemaining)) {
-                    $block['text_truncated_bytes'] = $size;
-                    $block['text'] = mb_strcut($block['text'], 0, max(0, $textRemaining), 'UTF-8')
+                    $cut = mb_strcut($block['text'], 0, max(0, $textRemaining), 'UTF-8')
                         ."\n…[truncated by the server: this turn's text exceeded the space kept for one turn]";
+
+                    // Only if it actually helps. Past the budget the notice is
+                    // longer than a short block, and swapping one for the other
+                    // makes the row BIGGER — the exact opposite of the job.
+                    if (strlen($cut) < $size) {
+                        $block['text_truncated_bytes'] = $size;
+                        $block['text'] = $cut;
+                    }
                 }
                 $textRemaining -= $size;
             }
 
-            // Arguments are already capped per call at 64 KB, but the NUMBER of
-            // calls is the model's choice, so they are charged against the same
-            // budget as results. 130 calls at 64 KB is another 8 MB, and what
-            // has to fit is the ROW — not either half of it.
             // Charged AND capped. Charging alone only starves the results:
             // two hundred calls carrying 64 KB of arguments each is twelve
             // megabytes on its own, and the row is that size whatever the
@@ -629,7 +632,6 @@ final class ConversationRecorder
                 return $block;
             }
 
-            $block['result_truncated_bytes'] = $size;
             $remaining -= $keep;
 
             // Which limit was reached decides what the reader is told. "Too
@@ -644,7 +646,18 @@ final class ConversationRecorder
             // a half-formed UTF-8 character, which fails the `blocks` cast and
             // destroys the entire turn — the same destruction this bound exists
             // to prevent, arrived at from the other direction.
-            $block['result'] = mb_strcut($text, 0, $keep, 'UTF-8').$why;
+            $cut = mb_strcut($text, 0, $keep, 'UTF-8').$why;
+
+            // Only if it actually helps. Once the budget is spent, `$keep` is
+            // zero and this notice is ninety-odd bytes, so a twelve-byte result
+            // would be replaced by something eight times its size. A bound that
+            // grows the row is not a bound.
+            if (strlen($cut) >= $size) {
+                return $block;
+            }
+
+            $block['result_truncated_bytes'] = $size;
+            $block['result'] = $cut;
 
             return $block;
         }, $blocks);

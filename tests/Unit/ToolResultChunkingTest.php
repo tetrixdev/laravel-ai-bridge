@@ -906,3 +906,66 @@ test('bounding prose does not cut a character in half', function () {
         ->and(mb_check_encoding($text['text'], 'UTF-8'))->toBeTrue()
         ->and(json_encode($blocks))->not->toBeFalse();
 });
+
+test('a bound never makes a block bigger than it was', function () {
+    // Once the budget is spent, `$keep` is zero and the notice is ninety-odd
+    // bytes — so a twelve-byte `echo` would be replaced by something eight
+    // times its size. A bound that grows the row is not a bound, and this is
+    // the case it is most likely to hit: many small results after one large one.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        // Spend the whole turn budget first.
+        for ($i = 0; $i < 9; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "big{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "big{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+
+        // Then a run of tiny ones, which must survive intact.
+        foreach (['ok', 'done', 'exit 0'] as $n => $tiny) {
+            $idx = 100 + $n;
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $idx, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "tiny{$n}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $idx]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "tiny{$n}", 'result' => $tiny,
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $byId = collect($blocks)->where('type', 'tool_call')->keyBy('tool_call_id');
+
+    foreach (['tiny0' => 'ok', 'tiny1' => 'done', 'tiny2' => 'exit 0'] as $id => $expected) {
+        expect($byId[$id]['result'])->toBe($expected)
+            ->and($byId[$id])->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('a short text block past the prose budget is left alone, not inflated', function () {
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('p', 5 * 1024 * 1024),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 1, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 1, 'content' => 'Done.']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 1]));
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $texts = collect($blocks)->where('type', 'text')->values();
+
+    expect($texts[1]['text'])->toBe('Done.')
+        ->and($texts[1])->not->toHaveKey('text_truncated_bytes');
+});
