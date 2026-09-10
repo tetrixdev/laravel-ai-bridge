@@ -806,3 +806,103 @@ test('a superseded half-assembled result is marked partial, not passed off as wh
         ->and($seen[0][1])->toStartWith('only the start')
         ->and($seen[0][1])->toContain('incomplete');
 });
+
+test("a turn's prose is bounded too, or the row still is not", function () {
+    // Text and thinking blocks accumulate delta by delta with no ceiling and
+    // share a row with everything else, so bounding results and arguments while
+    // leaving prose unbounded does not bound the row — it just moves where the
+    // failure comes from.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        for ($i = 0; $i < 12; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+                'block_index' => 0, 'content' => str_repeat('p', 1024 * 1024),
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text)->not->toBeNull()
+        ->and(strlen($text['text']))->toBeLessThan(4 * 1024 * 1024 + 500)
+        ->and($text['text'])->toContain("this turn's text exceeded")
+        ->and($text['text_truncated_bytes'])->toBe(12 * 1024 * 1024);
+});
+
+test('an ordinary answer is left completely alone', function () {
+    // The bound has to be invisible in normal use, or it is a worse bug than
+    // the one it prevents.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => 0, 'content' => 'A normal answer.']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text['text'])->toBe('A normal answer.')
+        ->and($text)->not->toHaveKey('text_truncated_bytes');
+});
+
+test('prose does not compete with tool output for the same budget', function () {
+    // A large answer must not make tool results start truncating, nor the
+    // reverse — they are different things a reader wants for different reasons.
+    //
+    // The sizes are chosen to REACH that: 3.5 MB of prose plus seven 1 MB
+    // results fits comfortably in two separate budgets and does not fit in one
+    // shared 8 MB budget, where the last three results would be starved. An
+    // earlier version of this test used a small result, which fit either way
+    // and so proved nothing.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('p', 3584 * 1024),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+
+        for ($i = 1; $i <= 7; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => str_repeat('r', 1024 * 1024),
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect(collect($blocks)->firstWhere('type', 'text')['text'])->not->toContain('truncated');
+
+    foreach (collect($blocks)->where('type', 'tool_call') as $tool) {
+        expect($tool['result'])->not->toContain('truncated by the server')
+            ->and($tool)->not->toHaveKey('result_truncated_bytes');
+    }
+});
+
+test('bounding prose does not cut a character in half', function () {
+    // ASCII proves nothing here: substr and mb_strcut agree on it. The
+    // multi-byte characters are placed so the 4 MB mark lands INSIDE one, and
+    // an invalid byte there fails the blocks cast and destroys the whole turn.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_START, ['block_index' => 0, 'block_type' => 'text']));
+        // An odd-length ASCII head puts every following character boundary one
+        // byte off the 4 MB mark.
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, [
+            'block_index' => 0, 'content' => str_repeat('a', 4194303).str_repeat('é', 200_000),
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => 0]));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $text = collect($blocks)->firstWhere('type', 'text');
+
+    expect($text)->not->toBeNull()
+        ->and(mb_check_encoding($text['text'], 'UTF-8'))->toBeTrue()
+        ->and(json_encode($blocks))->not->toBeFalse();
+});

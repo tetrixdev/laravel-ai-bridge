@@ -66,6 +66,18 @@ final class ConversationRecorder
      */
     private const MAX_TURN_BLOCK_BYTES = 8388608;
 
+    /**
+     * How much of a turn's PROSE to persist.
+     *
+     * Separate from, and far larger than, the tool-output budget: an answer is
+     * the thing a reader came for, and cutting it to make room for a `cat` would
+     * be the wrong trade. But it cannot be unbounded either — text and thinking
+     * blocks accumulate delta by delta with no ceiling, and they share a row
+     * with everything else. Four megabytes is beyond any real answer by orders
+     * of magnitude and still leaves the row comfortably writable.
+     */
+    private const MAX_TURN_TEXT_BYTES = 4194304;
+
     /** The MCP namespace the bridge registers its own tools under. */
     private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
 
@@ -542,8 +554,23 @@ final class ConversationRecorder
     private static function capForStorage(array $blocks): array
     {
         $remaining = self::MAX_TURN_BLOCK_BYTES;
+        $textRemaining = self::MAX_TURN_TEXT_BYTES;
 
-        return array_map(static function (array $block) use (&$remaining): array {
+        return array_map(static function (array $block) use (&$remaining, &$textRemaining): array {
+            // Prose has its own budget. It is what a reader came for, so it is
+            // not made to compete with tool output — but it is not exempt
+            // either: text and thinking blocks grow delta by delta with no
+            // ceiling of their own, in the same row as everything else.
+            if (is_string($block['text'] ?? null) && $block['text'] !== '') {
+                $size = strlen($block['text']);
+                if ($size > max(0, $textRemaining)) {
+                    $block['text_truncated_bytes'] = $size;
+                    $block['text'] = mb_strcut($block['text'], 0, max(0, $textRemaining), 'UTF-8')
+                        ."\n…[truncated by the server: this turn's text exceeded the space kept for one turn]";
+                }
+                $textRemaining -= $size;
+            }
+
             // Arguments are already capped per call at 64 KB, but the NUMBER of
             // calls is the model's choice, so they are charged against the same
             // budget as results. 130 calls at 64 KB is another 8 MB, and what
