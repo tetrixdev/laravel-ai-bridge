@@ -85,6 +85,28 @@ class StreamHandler
     private const MAX_TOTAL_RESULT_BYTES = 16 * 1024 * 1024;
 
     /**
+     * The same ceiling, applied across ALL open buffers at once.
+     *
+     * The per-result limit above bounds one buffer. The number of buffers is
+     * chosen by the sender, which picks the `tool_call_id` each one is keyed
+     * by, so on its own that limit bounds nothing: a thousand ids carrying one
+     * unfinished chunk each is a thousand buffers, and none of them individually
+     * near its ceiling.
+     */
+    private const MAX_OPEN_RESULT_BYTES = 32 * 1024 * 1024;
+
+    /**
+     * How many results may be assembling at once.
+     *
+     * Parallel tool calls are real, but a handful — this is far above any
+     * genuine turn and far below the number needed to hurt.
+     */
+    private const MAX_OPEN_RESULT_BUFFERS = 64;
+
+    /** Bytes held across every open buffer, so the aggregate can be checked. */
+    private int $toolResultBytes = 0;
+
+    /**
      * Everything the provider reported about the last turn besides usage —
      * model, cost, duration, stop reason, permission denials.
      *
@@ -533,9 +555,19 @@ class StreamHandler
         $final = ($data['final'] ?? false) === true;
         $piece = is_string($data['result'] ?? null) ? $data['result'] : '';
 
-        $buffer = $this->toolResultChunks[$toolCallId] ?? [
-            'parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'incomplete' => false,
-        ];
+        $buffer = $this->toolResultChunks[$toolCallId] ?? null;
+        if ($buffer === null) {
+            if (count($this->toolResultChunks) >= self::MAX_OPEN_RESULT_BUFFERS) {
+                Log::warning('AI Bridge: refusing a new tool result buffer', [
+                    'request_id' => $this->requestId,
+                    'open' => count($this->toolResultChunks),
+                ]);
+
+                return;
+            }
+
+            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'incomplete' => false];
+        }
 
         // The verdict rides on every chunk, so the last one seen wins and a
         // result cut short still carries whether it was a failure.
@@ -550,11 +582,14 @@ class StreamHandler
             $buffer['incomplete'] = true;
         } else {
             $length = strlen($piece);
-            if ($buffer['bytes'] + $length > self::MAX_TOTAL_RESULT_BYTES) {
+            $overOne = $buffer['bytes'] + $length > self::MAX_TOTAL_RESULT_BYTES;
+            $overAll = $this->toolResultBytes + $length > self::MAX_OPEN_RESULT_BYTES;
+            if ($overOne || $overAll) {
                 $buffer['incomplete'] = true;
             } else {
                 $buffer['parts'][] = $piece;
                 $buffer['bytes'] += $length;
+                $this->toolResultBytes += $length;
             }
             $buffer['next'] = $index + 1;
         }
@@ -579,6 +614,7 @@ class StreamHandler
         }
 
         unset($this->toolResultChunks[$toolCallId]);
+        $this->toolResultBytes -= $buffer['bytes'];
 
         $result = implode('', $buffer['parts']);
         if ($buffer['incomplete']) {

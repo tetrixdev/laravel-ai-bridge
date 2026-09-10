@@ -297,3 +297,67 @@ test('bounding the result does not cut a character in half', function () {
         ->and(mb_check_encoding($tool['result'], 'UTF-8'))->toBeTrue()
         ->and(json_encode($tool['result']))->not->toBeFalse();
 });
+
+test('many ids cannot allocate what one id may not', function () {
+    // The per-result ceiling bounds ONE buffer, and the sender picks the
+    // tool_call_id every buffer is keyed by — so on its own it bounds nothing.
+    // A thousand ids carrying an unfinished chunk each is a thousand buffers,
+    // none of them individually near its limit.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('x', 1024 * 1024);
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "t{$i}", 'result' => $piece, 'chunk_index' => 0, 'final' => false,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // Never more buffers than the cap allows...
+    expect(count($seen))->toBeLessThanOrEqual(64);
+
+    // ...and never more bytes across all of them than the aggregate ceiling.
+    $total = array_sum(array_map(fn ($r) => strlen($r[1]), $seen));
+    expect($total)->toBeLessThanOrEqual(32 * 1024 * 1024 + 64 * 200);
+});
+
+test('one large result still assembles under the aggregate ceiling', function () {
+    // The aggregate limit must not make the ordinary case worse: a single
+    // result up to its own ceiling still arrives whole.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('y', 1024 * 1024);
+        for ($i = 0; $i < 8; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => 't1', 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 7,
+            ]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and(strlen($seen[0][1]))->toBe(8 * 1024 * 1024)
+        ->and($seen[0][1])->not->toContain('incomplete');
+});
+
+test('flushing a buffer gives its bytes back to the aggregate', function () {
+    // Without the release, a long turn of ordinary results walks the running
+    // total up to the ceiling and then refuses everything after it.
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $piece = str_repeat('z', 1024 * 1024);
+        for ($call = 0; $call < 40; $call++) {
+            for ($i = 0; $i < 2; $i++) {
+                $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                    'tool_call_id' => "c{$call}", 'result' => $piece, 'chunk_index' => $i, 'final' => $i === 1,
+                ]));
+            }
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // 80 MB in total, one call at a time, each completed and released before
+    // the next begins. Every one arrives whole.
+    expect($seen)->toHaveCount(40);
+    foreach ($seen as $result) {
+        expect(strlen($result[1]))->toBe(2 * 1024 * 1024);
+    }
+});
