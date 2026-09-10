@@ -31,3 +31,28 @@ two things load-bearing that were previously too rare to matter:
 
 Sending a message and opening a conversation deliberately override that and
 force the bottom, since the new content is the whole point of those renders.
+
+## Conformance: one corpus, two readers
+
+`tests/Conformance/tool-call-scenarios.json` is replayed through **both**
+implementations of the tool-call rules:
+
+- `tests/Unit/ToolCallConformanceTest.php` → `ConversationRecorder` (what a
+  reload shows)
+- `tests/Browser/conformance.spec.js` → the chat component (what the reader
+  sees live)
+
+They are independent readers of the same protocol, and every parity bug in this
+area came from asserting by hand that they agree — which they repeatedly did
+not, in ways only a reviewer replaying the same input through both would notice.
+The corpus makes that a test.
+
+```bash
+~/.local/bin/pw test tests/Browser/conformance.spec.js        # the live half
+composer test -- --filter=Conformance                         # the recorded half
+```
+
+**When a divergence is found, add a scenario.** Both suites pick it up with no
+further wiring. Only `tool_call` blocks are compared, and only the fields both
+sides model — `tool_name`, `parameters`, `tool_call_id`, `parameters_raw` —
+because those are what a consumer of either can rely on.

@@ -1080,28 +1080,34 @@
                     // Matched on the bridge's own namespace only. An
                     // open-ended `__` suffix also matched the operator's own
                     // MCP servers, whose calls have no frame at all.
+                    this._frameNames = this._frameNames || [];
+                    this._frameNames.push(d.tool_name);
                     const claims = (b) => b && b.type === 'tool_call' && b._fromStream && !b._claimed
                         && (b.tool_name === 'mcp__bridge__' + d.tool_name || b.tool_name === d.tool_name);
                     const shadow = this.assistant.blocks.find(claims)
                         || (claims(this.current) ? this.current : null);
                     if (shadow) {
                         shadow._claimed = true;
-                        // Remember the frame's parsed arguments. The block is
-                        // usually richer, but its arguments are raw delta text
-                        // and can arrive truncated, unparsed or absent — the
-                        // recorder takes the frame's in exactly that case, and
-                        // a component that did not would disagree with the
-                        // record about the same stream.
+                        // Remembered, not applied. The block is usually richer,
+                        // but its arguments are raw delta text and can arrive
+                        // truncated, unparsed or absent, and the recorder takes
+                        // the frame's in exactly that case.
+                        //
+                        // Whether that is SAFE depends on counts that are not
+                        // complete yet: with two parallel calls to one tool
+                        // there is no way to tell which frame belongs to which
+                        // block, and copying anyway swapped their arguments —
+                        // live showing a destructive write against the wrong
+                        // path, and changing on reload. So the copy waits for
+                        // the same moment the recorder makes it.
                         shadow._frameParams = d.parameters || {};
-                        // Applied now if the block has already closed; otherwise
-                        // closeToolBlock() applies it once the deltas are in.
-                        if (shadow.text === undefined) this.applyFrameParams(shadow);
                         break;
                     }
                     // tool_call_id included so a later tool_result can find it.
                     this.assistant.blocks.push({
                         type: 'tool_call', tool_name: d.tool_name,
-                        parameters: d.parameters || {}, tool_call_id: d.tool_call_id,
+                        tool_call_id: d.tool_call_id, _fromFrame: true,
+                        ...this.capParameters(d.parameters || {}),
                     });
                     break;
                 }
@@ -1139,6 +1145,7 @@
             // here too or the block keeps its raw text and renders as "called
             // with no arguments" — the confusion the raw text exists to prevent.
             this.closeToolBlock();
+            this.reconcileFrameParams();
             this.clearWatchdog();
             this.detachStreamSource();
             this.s.streaming = false; this.s.pulse = false; this.current = null;
@@ -1165,25 +1172,69 @@
                     else b.parameters_raw = raw;
                 } catch (e) { b.parameters_raw = raw; }
             }
-            // Only after parsing: an unconditional reset here is what made the
-            // frame copy dead code the first time.
-            this.applyFrameParams(b);
         }
 
-        // Fall back to a tool_call frame's parsed arguments when the block's own
-        // are unusable. Mirrors ConversationRecorder, so the same stream reads
-        // the same live as it does after a reload.
-        applyFrameParams(b) {
-            if (!b || b._frameParams === undefined) return;
-            const own = b.parameters;
-            const usable = own && typeof own === 'object' && Object.keys(own).length > 0
-                && b.parameters_raw === undefined;
-            if (!usable && Object.keys(b._frameParams).length > 0) {
-                b.parameters = b._frameParams;
-                delete b.parameters_raw;
-                delete b.parameters_truncated_bytes;
+        // Match ConversationRecorder's argument ceiling, so a large frame does
+        // not render in full live and truncated after a reload — the same
+        // stream giving two answers, which is the divergence this whole area
+        // keeps having to close. In BYOK and Managed modes EVERY tool call is a
+        // frame, so this is the common path there, not an edge.
+        capParameters(params) {
+            let encoded;
+            try { encoded = JSON.stringify(params); } catch (e) { encoded = undefined; }
+            if (encoded === undefined) {
+                return { parameters: {}, parameters_raw: '[arguments could not be encoded]' };
             }
-            delete b._frameParams;
+            const bytes = new TextEncoder().encode(encoded).length;
+            if (bytes <= 65536) return { parameters: params };
+            return {
+                parameters: {},
+                parameters_raw: encoded.slice(0, 65536),
+                parameters_truncated_bytes: bytes,
+            };
+        }
+
+        // Fall back to a tool_call frame's parsed arguments where the block's
+        // own are unusable — the same rule, and the same guard, as
+        // ConversationRecorder::reconcileToolCalls. Run once the turn ends,
+        // because judging ambiguity needs counts that are only complete then.
+        //
+        // Ambiguity matters: with two parallel calls to one tool there is no
+        // way to tell which frame belongs to which block, and this file's PHP
+        // counterpart refuses the same guess about tool_results. Where it is
+        // ambiguous nothing moves and each block keeps what it has.
+        reconcileFrameParams() {
+            const names = this._frameNames || [];
+            const blocks = (this.assistant && this.assistant.blocks) || [];
+
+            for (const b of blocks) {
+                if (b.type !== 'tool_call' || b._frameParams === undefined) continue;
+
+                const own = b.parameters;
+                const usable = own && typeof own === 'object' && Object.keys(own).length > 0
+                    && b.parameters_raw === undefined;
+
+                // The bare name this block corresponds to, which is what a
+                // frame carries.
+                const logical = String(b.tool_name).indexOf('mcp__bridge__') === 0
+                    ? String(b.tool_name).slice('mcp__bridge__'.length)
+                    : String(b.tool_name);
+
+                const frameCount = names.filter((n) => n === logical).length;
+                const streamCount = blocks.filter((o) => o.type === 'tool_call' && o._fromStream
+                    && (o.tool_name === 'mcp__bridge__' + logical || o.tool_name === logical)).length;
+
+                const unambiguous = frameCount === 1 && streamCount === 1;
+
+                if (!usable && unambiguous && Object.keys(b._frameParams).length > 0) {
+                    b.parameters = b._frameParams;
+                    delete b.parameters_raw;
+                    delete b.parameters_truncated_bytes;
+                }
+                delete b._frameParams;
+            }
+
+            this._frameNames = [];
         }
 
         scrollDown(stick = true, keepTop = 0) {

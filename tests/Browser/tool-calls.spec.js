@@ -161,6 +161,7 @@ test('a frame supplies the arguments when the block could not parse its own', as
     { event: 'block_delta', data: { block_index: 0, content: '{"notation":"1d2' } },
     { event: 'block_stop', data: { block_index: 0 } },
     { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { notation: '1d20+5' }, tool_call_id: 'mcp-1' } },
+    { event: 'done', data: {} },
   ]);
 
   const b = await blocks(page);
@@ -177,6 +178,7 @@ test('a frame supplies the arguments for a block with no deltas', async ({ page 
     { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
     { event: 'block_stop', data: { block_index: 0 } },
     { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { notation: '1d20' }, tool_call_id: 'mcp-1' } },
+    { event: 'done', data: {} },
   ]);
 
   expect((await blocks(page))[0].parameters).toEqual({ notation: '1d20' });
@@ -190,6 +192,7 @@ test('a frame arriving first still supplies its arguments', async ({ page }) => 
     { event: 'tool_call', data: { tool_name: 'roll_dice', parameters: { sides: 20 }, tool_call_id: 'mcp-1' } },
     { event: 'block_start', data: { block_index: 0, block_type: 'tool_call', tool_name: 'mcp__bridge__roll_dice', tool_call_id: 't1' } },
     { event: 'block_stop', data: { block_index: 0 } },
+    { event: 'done', data: {} },
   ]);
 
   const b = await blocks(page);
