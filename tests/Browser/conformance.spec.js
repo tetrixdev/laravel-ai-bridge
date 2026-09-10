@@ -35,31 +35,33 @@ for (const scenario of corpus.scenarios) {
 
     const actual = await page.evaluate((events) => {
       const el = document.querySelector('ai-bridge-chat');
+      const terminals = ['done', 'error', 'cancelled'];
       for (const e of events) el.handleEvent(e);
-      el.finish();
+      // The terminal is part of the scenario. Calling finish() unconditionally
+      // made it impossible to express a turn that ends in an error or a
+      // cancellation, which is where several divergences lived.
+      if (!events.some((e) => terminals.includes(e.event))) el.finish();
 
-      // Only the fields both implementations model.
-      return el.assistant.blocks
-        .filter((b) => b.type === 'tool_call')
-        .map((b) => {
-          const shape = {
-            tool_name: b.tool_name ?? null,
-            tool_call_id: b.tool_call_id ?? null,
-            parameters: b.parameters ?? {},
-          };
-          if (b.parameters_raw !== undefined) shape.parameters_raw = b.parameters_raw;
-          return shape;
-        });
+      // EVERY block, EVERY field — a comparison narrower than the thing it is
+      // comparing is decoration, and this one used to check four fields of one
+      // block type.
+      const clean = (b) => {
+        const out = {};
+        for (const k of Object.keys(b).sort()) {
+          if (k === '_open') continue;          // presentation-only
+          if (k.startsWith('_')) continue;      // internal bookkeeping
+          if (b[k] !== undefined) out[k] = b[k];
+        }
+        return out;
+      };
+
+      return el.assistant.blocks.map(clean);
     }, scenario.events);
 
-    const expected = scenario.expected.map((e) => {
-      const shape = {
-        tool_name: e.tool_name ?? null,
-        tool_call_id: e.tool_call_id ?? null,
-        parameters: e.parameters ?? {},
-      };
-      if (e.parameters_raw !== undefined) shape.parameters_raw = e.parameters_raw;
-      return shape;
+    const expected = scenario.expected.map((b) => {
+      const out = {};
+      for (const k of Object.keys(b).sort()) out[k] = b[k];
+      return out;
     });
 
     expect(actual).toEqual(expected);

@@ -79,7 +79,10 @@ test('a real turn is recorded with its tool names, arguments and results', funct
     $blocks = $conversation->messages()->where('role', 'assistant')->latest('id')->first()?->blocks ?? [];
 
     $names = collect($blocks)->where('type', 'tool_call')->pluck('tool_name')->all();
-    $results = collect($blocks)->where('type', 'tool_result')->pluck('result')->all();
+    // Results are attached to the call they belong to, matching what the chat
+    // component draws — a standalone block here meant the same turn showed the
+    // result under its call live and floating loose after a reload.
+    $results = collect($blocks)->where('type', 'tool_call')->pluck('result')->all();
 
     // Enough to be counted AND grouped by kind, which is the whole point:
     // "3 commands, 1 file read" rather than "4 tool calls".

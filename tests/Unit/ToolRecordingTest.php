@@ -126,9 +126,11 @@ test('a result still finds a server-resolved call after reconciliation', functio
     });
 
     $call = collect($blocks)->firstWhere('type', 'tool_call');
-    $result = collect($blocks)->firstWhere('type', 'tool_result');
 
-    expect($call['tool_call_id'])->toBe($result['tool_call_id']);
+    // Attached to the call, which is only possible because the id kept is the
+    // one results are keyed by.
+    expect($call['result'])->toBe('17')
+        ->and(collect($blocks)->where('type', 'tool_result'))->toHaveCount(0);
 });
 
 test('parallel calls to one tool do not swap arguments when frames return out of order', function () {

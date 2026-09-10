@@ -115,7 +115,10 @@ final class ConversationRecorder
         // object, and json_decode also returns null past its depth limit. All
         // of those keep the text rather than pretending to a shape they do not
         // have.
-        if (is_array($decoded) && ! array_is_list($decoded)) {
+        // `[]` is both — array_is_list() reports true for an empty array, so a
+        // tool called with `{}` was being recorded as "could not be parsed"
+        // with a stray parameters_raw of '{}'.
+        if (is_array($decoded) && ($decoded === [] || ! array_is_list($decoded))) {
             return ['parameters' => $decoded];
         }
 
@@ -225,6 +228,31 @@ final class ConversationRecorder
             // earlier draft tried to remap ids by FIFO arrival order; that
             // assumed CLIs emit results in invocation order, which is not
             // guaranteed under parallel tool_use, so it was dropped.
+            // Attach to the call it belongs to, when there is one. The chat
+            // component does this — it has since a commit on this branch — and
+            // a standalone block here meant the same turn showed the result
+            // under its call live and floating loose after a reload.
+            //
+            // The comment that used to sit here argued the mismatch was
+            // harmless "because the chat UI renders tool_result blocks
+            // STANDALONE". That stopped being true on this branch, and nothing
+            // noticed until the two implementations were run against one corpus.
+            foreach ($blocks as $i => $candidate) {
+                if (($candidate['type'] ?? '') !== 'tool_call') {
+                    continue;
+                }
+                if (($candidate['tool_call_id'] ?? null) !== $callId || isset($candidate['result'])) {
+                    continue;
+                }
+
+                $blocks[$i]['result'] = $result;
+                if ($isError !== null) {
+                    $blocks[$i]['is_error'] = $isError;
+                }
+
+                return;
+            }
+
             $block = ['type' => 'tool_result', 'tool_call_id' => $callId, 'result' => $result];
             // Only when the provider actually said. Absent must not be read as
             // success — a tool printing "Error: no matches" is not a failure,
@@ -366,7 +394,12 @@ final class ConversationRecorder
      */
     private static function capParameters(array $params): array
     {
-        $encoded = json_encode($params);
+        // The same flags JavaScript's JSON.stringify uses, so the two
+        // implementations produce the same bytes for the same arguments.
+        // Without them PHP writes "\u00e9" where JS writes "é", and the pair
+        // then disagree about both the size of the thing they are reporting and
+        // how much of it they kept.
+        $encoded = json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
         // Written the other way round the first time, which put the one case
         // that must NEVER be stored verbatim — parameters that cannot be

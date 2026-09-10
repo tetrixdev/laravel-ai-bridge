@@ -37,22 +37,27 @@ function conformanceScenarios(): array
     return collect($data['scenarios'])->mapWithKeys(fn ($s) => [$s['name'] => [$s]])->all();
 }
 
-/** Only the fields both implementations model. */
-function comparableToolCalls(array $blocks): array
+/**
+ * Every block, every field.
+ *
+ * This compared four fields of `tool_call` blocks only, which made it blind to
+ * the branch's own headline feature — where a tool RESULT ends up — and to the
+ * very bug it was written for, on the code path it did not cover. A comparison
+ * narrower than the thing it is comparing is decoration.
+ *
+ * Keys are sorted so the two implementations are not held to an insertion order
+ * neither promises.
+ */
+function comparableBlocks(array $blocks): array
 {
     return collect($blocks)
-        ->where('type', 'tool_call')
         ->map(function (array $block): array {
-            $shape = [
-                'tool_name' => $block['tool_name'] ?? null,
-                'tool_call_id' => $block['tool_call_id'] ?? null,
-                'parameters' => $block['parameters'] ?? [],
-            ];
-            if (isset($block['parameters_raw'])) {
-                $shape['parameters_raw'] = $block['parameters_raw'];
-            }
+            // Presentation-only state the component keeps and the record does
+            // not; neither side promises it and no consumer reads it.
+            unset($block['_open']);
+            ksort($block);
 
-            return $shape;
+            return $block;
         })
         ->values()
         ->all();
@@ -91,18 +96,25 @@ it('records the same tool calls the chat component draws', function (array $scen
         ]));
     }
 
-    $handler->dispatchEvent(StreamEvent::fromArray([
-        'type' => MessageTypes::STREAM, 'request_id' => 'req-conf',
-        'event' => MessageTypes::DONE, 'data' => ['usage' => null],
-    ]));
+    // The terminal is part of the scenario. Appending `done` unconditionally —
+    // which this used to do — made it impossible to express a turn that ends in
+    // an error or a cancellation, which is where several divergences lived.
+    $terminals = [MessageTypes::DONE, MessageTypes::ERROR, 'cancelled'];
+    $endsItself = collect($scenario['events'])->contains(fn ($e) => in_array($e['event'], $terminals, true));
+    if (! $endsItself) {
+        $handler->dispatchEvent(StreamEvent::fromArray([
+            'type' => MessageTypes::STREAM, 'request_id' => 'req-conf',
+            'event' => MessageTypes::DONE, 'data' => ['usage' => null],
+        ]));
+    }
 
     $blocks = $conversation->messages()->where('role', 'assistant')->latest('id')->first()?->blocks ?? [];
 
-    $expected = collect($scenario['expected'])->map(fn ($e) => [
-        'tool_name' => $e['tool_name'] ?? null,
-        'tool_call_id' => $e['tool_call_id'] ?? null,
-        'parameters' => $e['parameters'] ?? [],
-    ] + (isset($e['parameters_raw']) ? ['parameters_raw' => $e['parameters_raw']] : []))->all();
+    $expected = collect($scenario['expected'])->map(function (array $block): array {
+        ksort($block);
 
-    expect(comparableToolCalls($blocks))->toEqual($expected);
+        return $block;
+    })->all();
+
+    expect(comparableBlocks($blocks))->toEqual($expected);
 })->with(conformanceScenarios());

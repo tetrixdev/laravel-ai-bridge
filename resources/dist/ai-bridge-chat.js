@@ -705,6 +705,11 @@
                 this.s.messages.push(this.assistant);
                 this.s.streaming = true;
                 this.s.pulse = true;
+                // Reattaching to a turn still in flight is a new turn as far as
+                // this component is concerned; without clearing these it would
+                // be inert, having terminated a previous one.
+                this._terminated = false;
+                this._frameNames = [];
                 this.renderAll({ stick: true });
                 this.attachStreamSource(streamingRequestId, { fromIndex: -1 });
                 this.armWatchdog(this.WATCHDOG_FIRST_MS);
@@ -852,6 +857,8 @@
             this.current = null;
             this.s.streaming = true;
             this.s.pulse = true;
+            this._terminated = false;
+            this._frameNames = [];
             // Forced: the message the reader just sent, and the "Thinking"
             // pulse under it, are the whole point of this render. Leaving it
             // conditional appends both off-screen for anyone who had scrolled up.
@@ -990,6 +997,13 @@
         }
 
         handleEvent(evt) {
+            // Nothing may change the turn once it has ended. StreamHandler
+            // guards every dispatch on `terminated` and this had no equivalent,
+            // so a late frame was shown live and absent after a reload. Repo
+            // A's frame guard made that reachable: an oversized frame emits a
+            // terminal error, the server stops recording, and the bridge keeps
+            // streaming the rest of the turn.
+            if (this._terminated) return;
             // Any event means the turn is alive — push the watchdog back.
             if (this.s.streaming) this.armWatchdog();
             const d = evt.data || {};
@@ -1036,7 +1050,11 @@
                             && (d.tool_name === 'mcp__bridge__' + b.tool_name || d.tool_name === b.tool_name));
                         if (early !== -1) {
                             const placeholder = this.assistant.blocks[early];
-                            this.current._frameParams = placeholder.parameters || {};
+                            this.current._frameParams = {
+                                parameters: placeholder.parameters || {},
+                                parameters_raw: placeholder.parameters_raw,
+                                parameters_truncated_bytes: placeholder.parameters_truncated_bytes,
+                            };
                             // Carry over anything already attached to the
                             // placeholder, so a result that arrived first is not
                             // discarded with it.
@@ -1100,7 +1118,10 @@
                         // live showing a destructive write against the wrong
                         // path, and changing on reload. So the copy waits for
                         // the same moment the recorder makes it.
-                        shadow._frameParams = d.parameters || {};
+                        // Capped like the other frame branch. Only one of the
+                        // two had a ceiling, so a large frame that CLAIMED a
+                        // block rendered in full live and truncated on reload.
+                        shadow._frameParams = this.capParameters(d.parameters || {});
                         break;
                     }
                     // tool_call_id included so a later tool_result can find it.
@@ -1141,6 +1162,7 @@
             this.scheduleRender();
         }
         finish() {
+            this._terminated = true;
             // A turn killed mid-arguments never sends block_stop, so decode
             // here too or the block keeps its raw text and renders as "called
             // with no arguments" — the confusion the raw text exists to prevent.
@@ -1189,9 +1211,32 @@
             if (bytes <= 65536) return { parameters: params };
             return {
                 parameters: {},
-                parameters_raw: encoded.slice(0, 65536),
+                // Cut by BYTES, like the recorder's mb_strcut. Slicing by
+                // UTF-16 units instead made the two disagree by 6x on how much
+                // they kept and 3x on the size they reported, for the same
+                // input — and the corpus could not see it, because its one
+                // large scenario was pure ASCII, where the units coincide.
+                parameters_raw: this.cutToBytes(encoded, 65536),
                 parameters_truncated_bytes: bytes,
             };
+        }
+
+        // Cut a string to a byte budget without splitting a character.
+        cutToBytes(text, budget) {
+            const encoder = new TextEncoder();
+            if (encoder.encode(text).length <= budget) return text;
+            let low = 0;
+            let high = text.length;
+            while (low < high) {
+                const mid = Math.ceil((low + high) / 2);
+                // Never end on a high surrogate: half a pair is not a character.
+                const code = text.charCodeAt(mid - 1);
+                const end = (code >= 0xd800 && code <= 0xdbff) ? mid - 1 : mid;
+                if (encoder.encode(text.slice(0, end)).length <= budget) low = mid;
+                else high = mid - 1;
+            }
+            const code = text.charCodeAt(low - 1);
+            return text.slice(0, (code >= 0xd800 && code <= 0xdbff) ? low - 1 : low);
         }
 
         // Fall back to a tool_call frame's parsed arguments where the block's
@@ -1226,10 +1271,18 @@
 
                 const unambiguous = frameCount === 1 && streamCount === 1;
 
-                if (!usable && unambiguous && Object.keys(b._frameParams).length > 0) {
-                    b.parameters = b._frameParams;
+                const framed = b._frameParams;
+                const hasFrameArgs = framed
+                    && (Object.keys(framed.parameters || {}).length > 0 || framed.parameters_raw !== undefined);
+
+                if (!usable && unambiguous && hasFrameArgs) {
+                    b.parameters = framed.parameters || {};
                     delete b.parameters_raw;
                     delete b.parameters_truncated_bytes;
+                    if (framed.parameters_raw !== undefined) b.parameters_raw = framed.parameters_raw;
+                    if (framed.parameters_truncated_bytes !== undefined) {
+                        b.parameters_truncated_bytes = framed.parameters_truncated_bytes;
+                    }
                 }
                 delete b._frameParams;
             }
