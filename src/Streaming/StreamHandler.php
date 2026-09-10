@@ -546,6 +546,12 @@ class StreamHandler
         $isError = is_bool($data['is_error'] ?? null) ? $data['is_error'] : null;
 
         if (! is_int($data['chunk_index'] ?? null)) {
+            // An unchunked result supersedes anything half-assembled for the
+            // same id. Left in place the buffer never finalises, and its bytes
+            // stay charged against the turn's ceiling until the terminal —
+            // starving every later result on this connection.
+            $this->takeToolResult($toolCallId);
+
             $this->dispatchToolResult($toolCallId, $data['result'] ?? null, $isError);
 
             return;
@@ -555,7 +561,27 @@ class StreamHandler
         $final = ($data['final'] ?? false) === true;
         $piece = is_string($data['result'] ?? null) ? $data['result'] : '';
 
+        // The bridge names how much IT dropped at its own ceiling. Worked out
+        // before either path below can return, because both of them can carry a
+        // final chunk and this belongs on whichever one does.
+        $droppedByBridge = $data['truncated_bytes'] ?? null;
+        $droppedNote = is_int($droppedByBridge) && $droppedByBridge > 0
+            ? "\n…[the bridge dropped a further {$droppedByBridge} bytes at its own ceiling]"
+            : '';
+
         $buffer = $this->toolResultChunks[$toolCallId] ?? null;
+
+        // A whole result that happens to be labelled as a chunk — index 0 and
+        // final in one frame — needs no buffer, so no buffering limit has any
+        // business refusing it. It used to be dropped outright once 64 buffers
+        // were open: no callback, no result on the block, and a chat drawing
+        // that call as still running for ever.
+        if ($buffer === null && $final && $index === 0) {
+            $this->dispatchToolResult($toolCallId, $piece.$droppedNote, $isError);
+
+            return;
+        }
+
         if ($buffer === null) {
             if (count($this->toolResultChunks) >= self::MAX_OPEN_RESULT_BUFFERS) {
                 Log::warning('AI Bridge: refusing a new tool result buffer', [
@@ -566,7 +592,7 @@ class StreamHandler
                 return;
             }
 
-            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'incomplete' => false];
+            $buffer = ['parts' => [], 'bytes' => 0, 'next' => 0, 'is_error' => null, 'refused' => false, 'incomplete' => false];
         }
 
         // The verdict rides on every chunk, so the last one seen wins and a
@@ -585,13 +611,30 @@ class StreamHandler
             $overOne = $buffer['bytes'] + $length > self::MAX_TOTAL_RESULT_BYTES;
             $overAll = $this->toolResultBytes + $length > self::MAX_OPEN_RESULT_BYTES;
             if ($overOne || $overAll) {
-                $buffer['incomplete'] = true;
+                // `refused`, not `incomplete`. Every chunk arrived; THIS side
+                // declined to hold them. Marking it the same way as a result
+                // the bridge never finished sending sends whoever debugs it to
+                // the wrong machine, and the two are not remotely the same
+                // problem.
+                $buffer['refused'] = true;
+                Log::warning('AI Bridge: dropping tool result content over a memory ceiling', [
+                    'request_id' => $this->requestId,
+                    'tool_call_id' => $toolCallId,
+                    'over_result_ceiling' => $overOne,
+                    'over_turn_ceiling' => $overAll,
+                ]);
             } else {
                 $buffer['parts'][] = $piece;
                 $buffer['bytes'] += $length;
                 $this->toolResultBytes += $length;
             }
             $buffer['next'] = $index + 1;
+        }
+
+        // Carried into the text rather than a new field, so nothing downstream
+        // has to change in order to stop discarding it.
+        if ($droppedNote !== '') {
+            $buffer['parts'][] = $droppedNote;
         }
 
         $this->toolResultChunks[$toolCallId] = $buffer;
@@ -617,8 +660,10 @@ class StreamHandler
         $this->toolResultBytes -= $buffer['bytes'];
 
         $result = implode('', $buffer['parts']);
-        if ($buffer['incomplete']) {
-            $result .= "\n…[incomplete: the bridge stopped sending this result before it finished]";
+        if ($buffer['refused'] ?? false) {
+            $result .= "\n…[truncated by the server: this turn's tool results exceeded the memory one turn may use]";
+        } elseif ($buffer['incomplete']) {
+            $result .= "\n…[incomplete: the stream ended before this result finished]";
         }
 
         return ['result' => $result, 'is_error' => $buffer['is_error']];

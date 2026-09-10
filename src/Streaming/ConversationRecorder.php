@@ -53,6 +53,19 @@ final class ConversationRecorder
      */
     private const MAX_RESULT_BYTES = 1048576;
 
+    /**
+     * How much of a turn's tool output to persist IN TOTAL.
+     *
+     * Bounding one result bounds nothing on its own: the number of tool calls
+     * in a turn is chosen by the model, not by this package. Seventy calls
+     * returning two megabytes each is a seventy-megabyte `blocks` value in one
+     * row — past a default `max_allowed_packet`, and the write is caught,
+     * logged and swallowed, so the ENTIRE assistant turn goes with it, prose
+     * included. That is the outcome the per-result bound was written to
+     * prevent, reached by multiplying instead of by growing.
+     */
+    private const MAX_TURN_RESULT_BYTES = 8388608;
+
     /** The MCP namespace the bridge registers its own tools under. */
     private const BRIDGE_TOOL_PREFIX = 'mcp__bridge__';
 
@@ -526,18 +539,38 @@ final class ConversationRecorder
      * @param  array<string, mixed>  $block
      * @return array<string, mixed>
      */
-    private static function capResult(array $block): array
+    private static function capResults(array $blocks): array
     {
-        $result = $block['result'] ?? null;
-        if (! is_string($result) || strlen($result) <= self::MAX_RESULT_BYTES) {
+        $remaining = self::MAX_TURN_RESULT_BYTES;
+
+        return array_map(static function (array $block) use (&$remaining): array {
+            $result = $block['result'] ?? null;
+            if (! is_string($result)) {
+                return $block;
+            }
+
+            // Whichever runs out first: this result's own ceiling, or what is
+            // left of the turn's. Spending the budget in arrival order means an
+            // early result is whole and a late one is cut, which is the same
+            // order a reader meets them in.
+            $keep = min(self::MAX_RESULT_BYTES, max(0, $remaining));
+            if (strlen($result) <= $keep) {
+                $remaining -= strlen($result);
+
+                return $block;
+            }
+
+            $block['result_truncated_bytes'] = strlen($result);
+            // mb_strcut, NOT substr: substr cuts at a byte offset and can leave
+            // a half-formed UTF-8 character, which fails the `blocks` cast and
+            // destroys the entire turn — the same destruction this bound exists
+            // to prevent, arrived at from the other direction.
+            $block['result'] = mb_strcut($result, 0, $keep, 'UTF-8')
+                ."\n…[truncated by the server: the full result was streamed but is too large to keep]";
+            $remaining = 0;
+
             return $block;
-        }
-
-        $block['result_truncated_bytes'] = strlen($result);
-        $block['result'] = mb_strcut($result, 0, self::MAX_RESULT_BYTES, 'UTF-8')
-            ."\n…[truncated by the server: the full result was streamed but is too large to keep]";
-
-        return $block;
+        }, $blocks);
     }
 
     /**
@@ -669,7 +702,7 @@ final class ConversationRecorder
      */
     private static function persist(Conversation $conversation, array $blocks, ?array $usage, bool $incomplete): void
     {
-        $blocks = array_map(self::capResult(...), self::reconcileToolCalls($blocks));
+        $blocks = self::capResults(self::reconcileToolCalls($blocks));
 
         $text = '';
         foreach ($blocks as $block) {
