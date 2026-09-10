@@ -160,3 +160,35 @@ it('does not 409 when the previous streaming_request_id points to a completed bu
     expect($response->getStatusCode())->toBe(200);
     expect(jsonOf($response)['request_id'])->toBe('rid-new');
 });
+
+test('the resumable session handle never reaches the browser', function () {
+    // BufferingSink::publicDoneMeta() withholds cli_session_id from the SSE
+    // stream on the grounds that it is a handle the server keeps to itself.
+    // That was the whole allowlist — and this endpoint returned the model whole
+    // and handed the same value straight back. An allowlist on one door is not
+    // an allowlist.
+    $conversation = Conversation::create([
+        'mode' => 'bridge',
+        'provider' => 'claude',
+        'cli_session_id' => 'SECRET-SESSION-abc',
+        'working_dir' => '/repos/studio',
+    ]);
+
+    $json = $conversation->toArray();
+
+    expect($json)->not->toHaveKey('cli_session_id')
+        // The directory the operator chose is theirs to see; the workspace
+        // picker reads it back. Only the handle is withheld.
+        ->and($json['working_dir'])->toBe('/repos/studio');
+
+    expect(json_encode($conversation))->not->toContain('SECRET-SESSION-abc');
+});
+
+test('hiding the handle does not stop the server using it', function () {
+    // Hidden from JSON, not from the code — a resumed turn still needs it.
+    $conversation = Conversation::create([
+        'mode' => 'bridge', 'provider' => 'claude', 'cli_session_id' => 'sess-42',
+    ]);
+
+    expect($conversation->fresh()->cli_session_id)->toBe('sess-42');
+});

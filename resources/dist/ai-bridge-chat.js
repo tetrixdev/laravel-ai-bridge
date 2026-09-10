@@ -183,6 +183,7 @@
             // events are flowing, a long silence is a fair stall signal.
             this.WATCHDOG_FIRST_MS = 120000;
             this.WATCHDOG_STEADY_MS = 45000;
+            this._watchdogMisses = 0;
 
             this.root = this.attachShadow({ mode: 'open' });
             const style = document.createElement('style');
@@ -931,12 +932,56 @@
         // immediate hard error, because the events may simply be lagging.
         armWatchdog(ms) {
             this.clearWatchdog();
-            this._watchdog = setTimeout(() => {
+            this._watchdog = setTimeout(async () => {
                 if (!this.s.streaming) return;
+                // ASK before declaring the turn dead. The comment above used to
+                // promise a status check and the code made none: silence is not
+                // evidence of a stall, because a tool running on the operator's
+                // own machine — npm install, a test run, a large grep — emits
+                // no events at all while it works. Any of those over 45 seconds
+                // abandoned a perfectly healthy turn, showed a false "stalled"
+                // error, left the tool call drawn as unfinished for ever, and
+                // dropped every later event including the answer.
+                const alive = await this.streamStillAlive();
+                if (!this.s.streaming) return;
+                if (alive) {
+                    this._watchdogMisses = 0;
+                    this.armWatchdog(ms);
+
+                    return;
+                }
+                // A failed check is not proof either — but it cannot re-arm for
+                // ever, or a server that has genuinely gone leaves the UI on
+                // "Thinking" permanently, which is the thing this exists to
+                // prevent. `null` means "could not tell"; three in a row is
+                // enough to stop asking.
+                if (alive === null && (this._watchdogMisses = (this._watchdogMisses || 0) + 1) < 3) {
+                    this.armWatchdog(ms);
+
+                    return;
+                }
                 this.s.error = 'No response received — the turn appears to be stalled. '
                     + 'Try refreshing the page; if the turn is still running, it will resume here.';
                 this.finish();
             }, ms || this.WATCHDOG_STEADY_MS);
+        }
+
+        // true = the server still considers this turn live, false = it does not,
+        // null = the question could not be answered.
+        async streamStillAlive() {
+            const rid = this._activeRequestId;
+            if (!rid) return false;
+            try {
+                const r = await fetch(this.api + '/streams/' + encodeURIComponent(rid) + '/status',
+                    { credentials: 'same-origin' });
+                if (r.status === 404) return false;
+                if (!r.ok) return null;
+                const body = await r.json();
+
+                return body.status === 'streaming';
+            } catch (e) {
+                return null;
+            }
         }
         clearWatchdog() {
             if (this._watchdog) { clearTimeout(this._watchdog); this._watchdog = null; }
