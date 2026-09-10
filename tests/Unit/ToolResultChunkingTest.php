@@ -1052,3 +1052,48 @@ test('the callbacks the README documents receive what it says they do', function
     expect($handler->lastDoneUsage()['input_tokens'])->toBe(3)
         ->and($handler->lastDoneMeta()['model'])->toBe('claude-x');
 });
+
+test('a long tail of short results cannot walk the row past a packet limit', function () {
+    // Once the budget is spent, a short result is kept WHOLE rather than being
+    // replaced by a notice eight times its size. That means the budget can be
+    // exceeded — so the question is by how much, and whether it can ever reach
+    // the limit that actually matters. Five hundred short results after the
+    // budget is gone is the shape that would do it.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        // Spend the 8 MB budget.
+        for ($i = 0; $i < 9; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "big{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "big{$i}", 'result' => str_repeat('x', 1024 * 1024),
+            ]));
+        }
+
+        // Then a long tail of tiny ones.
+        for ($i = 0; $i < 500; $i++) {
+            $idx = 1000 + $i;
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $idx, 'block_type' => 'tool_call',
+                'tool_name' => 'Bash', 'tool_call_id' => "tiny{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $idx]));
+            $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+                'tool_call_id' => "tiny{$i}", 'result' => 'ok',
+            ]));
+        }
+
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    // The turn survived, every call is recorded, and the row is nowhere near a
+    // default max_allowed_packet.
+    expect(collect($blocks)->where('type', 'tool_call'))->toHaveCount(509)
+        ->and(strlen((string) json_encode($blocks)))->toBeLessThan(16 * 1024 * 1024);
+
+    // And the tiny results were kept as they were, not inflated into notices.
+    $tiny = collect($blocks)->firstWhere('tool_call_id', 'tiny499');
+    expect($tiny['result'])->toBe('ok');
+});

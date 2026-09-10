@@ -575,7 +575,13 @@ final class ConversationRecorder
                         $block['text'] = $cut;
                     }
                 }
-                $textRemaining -= $size;
+
+                // Charge what is actually KEPT, not what was allowed. Once the
+                // budget is gone a short block is kept whole, and subtracting
+                // the allowance rather than the block made the running total
+                // stop reflecting the row — so the number could not be trusted
+                // to say how far over it had gone.
+                $textRemaining -= strlen($block['text']);
             }
 
             // Charged AND capped. Charging alone only starves the results:
@@ -653,6 +659,10 @@ final class ConversationRecorder
             // would be replaced by something eight times its size. A bound that
             // grows the row is not a bound.
             if (strlen($cut) >= $size) {
+                // Kept whole because cutting it would GROW it. Charged for what
+                // it really costs, so the running total keeps meaning something.
+                $remaining -= $size - $keep;
+
                 return $block;
             }
 
