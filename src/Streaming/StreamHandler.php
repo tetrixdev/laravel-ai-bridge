@@ -555,6 +555,14 @@ class StreamHandler
             // with no `result` key at all was throwing away everything already
             // buffered and dispatching null in its place: the content gone, and
             // nothing saying so.
+            // Marked partial BEFORE it is taken: its final chunk never arrived,
+            // and `takeToolResult` only appends the marker for a buffer already
+            // flagged. Without this the half-assembled content is handed over as
+            // if it were the whole result.
+            if (isset($this->toolResultChunks[$toolCallId])) {
+                $this->toolResultChunks[$toolCallId]['incomplete'] = true;
+            }
+
             $superseded = $this->takeToolResult($toolCallId);
             if (! array_key_exists('result', $data) && $superseded !== null) {
                 $this->dispatchToolResult($toolCallId, $superseded['result'], $superseded['is_error']);

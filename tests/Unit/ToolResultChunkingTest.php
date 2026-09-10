@@ -672,6 +672,13 @@ test("a turn's arguments are charged against the same budget as its results", fu
         $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
     });
 
+    // The turn has to SURVIVE first. `persist` catches a failed write and
+    // swallows it, so `recordTurn` returns [] on total loss — and an empty
+    // array encodes to two bytes, which passes a size assertion with flying
+    // colours. The test would have been green on exactly the catastrophe it
+    // was written to detect.
+    expect(collect($blocks)->where('type', 'tool_call'))->toHaveCount(200);
+
     // The whole persisted value, which is the thing max_allowed_packet sees.
     expect(strlen((string) json_encode($blocks)))->toBeLessThan(16 * 1024 * 1024);
 });
@@ -758,4 +765,44 @@ test("the bridge's dropped-byte note lands at the end, not inside the content", 
 
     expect($seen[0][1])->toStartWith('AAABBB')
         ->and($seen[0][1])->toContain('99 bytes');
+});
+
+test('arguments cut by the turn budget keep the head they were cut to', function () {
+    // The cap loop ran over ['parameters', 'parameters_raw'] on the same block,
+    // so the pass that wrote `parameters_raw` was followed by one that found
+    // its own output, re-encoded it, and cut it to nothing against a budget now
+    // at zero. The record then said "arguments were truncated" and kept none of
+    // them — the one thing the raw-text key exists to prevent.
+    $blocks = recordTurn(function (StreamHandler $h) {
+        $big = json_encode(['content' => str_repeat('a', 60 * 1024)]);
+        for ($i = 0; $i < 200; $i++) {
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_START, [
+                'block_index' => $i, 'block_type' => 'tool_call',
+                'tool_name' => 'Write', 'tool_call_id' => "t{$i}",
+            ]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_DELTA, ['block_index' => $i, 'content' => $big]));
+            $h->dispatchEvent(wire(MessageTypes::BLOCK_STOP, ['block_index' => $i]));
+        }
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    $cut = collect($blocks)->first(fn ($b) => isset($b['parameters_truncated_bytes']));
+
+    expect($cut)->not->toBeNull()
+        // It reports the size of the ORIGINAL arguments, not of its own output.
+        ->and($cut['parameters_truncated_bytes'])->toBeGreaterThan(50 * 1024);
+});
+
+test('a superseded half-assembled result is marked partial, not passed off as whole', function () {
+    $seen = collectToolResults(function (StreamHandler $h) {
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, [
+            'tool_call_id' => 't1', 'result' => 'only the start', 'chunk_index' => 0, 'final' => false,
+        ]));
+        $h->dispatchEvent(wire(MessageTypes::TOOL_RESULT, ['tool_call_id' => 't1']));
+        $h->dispatchEvent(wire(MessageTypes::DONE, ['usage' => null]));
+    });
+
+    expect($seen)->toHaveCount(1)
+        ->and($seen[0][1])->toStartWith('only the start')
+        ->and($seen[0][1])->toContain('incomplete');
 });

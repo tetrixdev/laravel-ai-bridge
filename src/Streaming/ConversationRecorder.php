@@ -568,6 +568,15 @@ final class ConversationRecorder
                 $block['parameters_truncated_bytes'] = strlen($encoded);
                 $block['parameters_raw'] = mb_strcut($encoded, 0, max(0, $remaining), 'UTF-8');
                 $remaining = 0;
+
+                // Stop. The next pass would find the `parameters_raw` this one
+                // just wrote, re-encode it, and truncate it again against a
+                // budget now at zero — leaving an empty string and a
+                // `parameters_truncated_bytes` measuring the already-cut text
+                // rather than the original. The record would then say the
+                // arguments were truncated and keep none of them, which is the
+                // one thing the raw-text key exists to prevent.
+                break;
             }
 
             if (! array_key_exists('result', $block) || $block['result'] === null) {
