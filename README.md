@@ -428,7 +428,9 @@ Full reference for `config/ai-bridge.php`:
 | `token.secret` | `AI_BRIDGE_TOKEN_SECRET` | `null` | JWT signing secret (required) |
 | `token.ttl` | `AI_BRIDGE_TOKEN_TTL` | `86400` | Token TTL in seconds (24h) |
 | `websocket.heartbeat_interval` | -- | `30` | Seconds between ping/pong |
-| `websocket.request_timeout` | -- | `300` | Seconds before AI request timeout |
+
+| `websocket.silence_timeout` | -- | `900` | Seconds a turn may produce **nothing** before the CLI is presumed wedged. This is the bound that stops a turn; `0` disables it |
+| `websocket.request_timeout` | -- | `86400` | Wall-clock backstop for one turn, in seconds. `0` means no ceiling |
 | `chat_completions.endpoint` | `AI_BRIDGE_ENDPOINT` | `null` | Chat Completions API base URL |
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
 | `chat_completions.model` | `AI_BRIDGE_MODEL` | `null` | Model name (e.g. `gpt-4o`) |
@@ -449,6 +451,15 @@ Full reference for `config/ai-bridge.php`:
 | `cli.isolation` | `AI_BRIDGE_CLI_ISOLATION` | `isolated` | How much the CLI on the developer's machine may do. `isolated` — server-declared tools only, no shell, no edits; the right posture when end users can send chat messages. `workspace` — the CLI also gets its own file and shell tools, inside the directory the request named, while the operator's own MCP servers, hooks and plugins stay out. `native` — everything on, including the operator's environment; never appropriate when the server is reachable by end users. Anything unrecognised falls back to `isolated`. `workspace` needs a bridge started with `--allow-dir` and a `working_dir` on the conversation, and **is not a sandbox** — see [Letting the assistant work in a repository](#letting-the-assistant-work-in-a-repository). |
 | `cli.local_path` | `AI_BRIDGE_CLI_LOCAL_PATH` | `null` | Absolute path to an `ai-bridge` repo checkout. When set **and `APP_ENV=local`**, the "Add a CLI bridge" command runs that checkout's build (`node <path>/dist/cli.js`) instead of `npx @tetrixdev/ai-bridge@latest` — for testing CLI changes without an npm publish. Build the checkout first (`npm run build`). |
 | `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE output and the per-turn buffer. Set to `false` only when intentionally displaying AI reasoning to users. |
+
+> **Upgrading from 0.12 or earlier with a published `config/ai-bridge.php`:**
+> the package merges defaults only for keys your file does not already have, so
+> a published `'request_timeout' => 300` still wins — and the bridge honours it
+> as a **wall clock**, which kills a turn that has been working for five
+> minutes. That is the bug this release fixes, and a published config keeps it.
+> Add `'silence_timeout' => 900` and raise `request_timeout` (or set it to `0`
+> to opt out of a ceiling entirely).
+
 
 ### Relay-path logging
 

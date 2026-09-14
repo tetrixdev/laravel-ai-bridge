@@ -15,6 +15,7 @@ declare(strict_types=1);
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tetrix\AiBridge\Protocol\MessageTypes;
 use Tetrix\AiBridge\Streaming\StreamHandler;
+use Tetrix\AiBridge\WebSocket\MessageHandler;
 
 uses(RefreshDatabase::class);
 
@@ -1102,12 +1103,16 @@ test('the welcome tells the bridge to bound turns by silence', function () {
     // Shipping the bridge fix alone changes nothing for anyone on the package
     // default: the server would still send request_timeout 300, and the bridge
     // honours it as a wall clock — the original bug, intact.
-    $config = [
-        'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
-        'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 86400),
-        'silence_timeout' => (int) config('ai-bridge.websocket.silence_timeout', 900),
-    ];
+    //
+    // Built from the REAL welcome, not from a local array rebuilt to match.
+    // The first version of this test assembled its own config and would have
+    // passed if the production response dropped or renamed the field, which is
+    // precisely the failure it exists to catch.
+    $handler = app(MessageHandler::class);
+    $welcome = (new ReflectionClass($handler))
+        ->getMethod('buildWelcomeResponse')
+        ->invoke($handler, 'conn-1', 'user-1');
 
-    expect($config['silence_timeout'])->toBe(900)
-        ->and($config['request_timeout'])->toBeGreaterThan(3600);
+    expect($welcome['config']['silence_timeout'])->toBe(900)
+        ->and($welcome['config']['request_timeout'])->toBeGreaterThan(3600);
 });
