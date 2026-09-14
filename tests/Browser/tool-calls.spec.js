@@ -424,3 +424,39 @@ test('arguments that are actually present are still shown', async ({ page }) => 
 
   expect(html).toContain('echo hi');
 });
+
+test('a turn stopped by the bridge shows why, and keeps what it wrote', async ({ page }) => {
+  // The user-visible end of the silence-timeout change. Before it, a stopped
+  // turn surfaced "claude CLI exited with code 143" — a signal number — and
+  // the reader saw a reply that simply stopped. Now the reason is a sentence,
+  // and the partial answer it had already produced is still on screen.
+  await ready(page);
+  await feed(page, [
+    { event: 'block_start', data: { block_index: 0, block_type: 'text' } },
+    { event: 'block_delta', data: { block_index: 0, content: 'Half an answer, then nothing.' } },
+    { event: 'block_stop', data: { block_index: 0 } },
+    {
+      event: 'error',
+      data: {
+        code: 'silence_timeout_exceeded',
+        message: 'The claude CLI produced nothing for 900s and was stopped.',
+        limit_seconds: 900,
+      },
+    },
+  ]);
+
+  const state = await page.evaluate(() => {
+    const el = document.querySelector('ai-bridge-chat');
+
+    return {
+      error: el.s.error,
+      streaming: el.s.streaming,
+      html: el.shadowRoot.querySelector('.messages').innerHTML,
+    };
+  });
+
+  expect(state.error).toContain('produced nothing for 900s');
+  expect(state.error).not.toContain('143');
+  expect(state.html).toContain('Half an answer, then nothing.');
+  expect(state.streaming).toBe(false);
+});
