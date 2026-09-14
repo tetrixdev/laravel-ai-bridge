@@ -429,7 +429,7 @@ Full reference for `config/ai-bridge.php`:
 | `token.ttl` | `AI_BRIDGE_TOKEN_TTL` | `86400` | Token TTL in seconds (24h) |
 | `websocket.heartbeat_interval` | -- | `30` | Seconds between ping/pong |
 
-| `websocket.silence_timeout` | -- | `900` | Seconds a turn may produce **nothing** before the CLI is presumed wedged. This is the bound that stops a turn; `0` disables it |
+| `websocket.silence_timeout` | -- | `900` | Seconds a turn may produce **nothing** before the CLI is presumed wedged. This is the bound that stops a turn; `0` disables it. A long-running tool counts as silence — a `sleep 20` produces a 17-second gap — so this must exceed the longest build or test run you expect |
 | `websocket.request_timeout` | -- | `86400` | Wall-clock backstop for one turn, in seconds. `0` means no ceiling |
 | `chat_completions.endpoint` | `AI_BRIDGE_ENDPOINT` | `null` | Chat Completions API base URL |
 | `chat_completions.api_key` | `AI_BRIDGE_API_KEY` | `null` | API key for BYOK/managed |
