@@ -121,7 +121,12 @@ test('stream_store config defaults', function () {
 
 test('websocket config defaults', function () {
     expect(config('ai-bridge.websocket.heartbeat_interval'))->toBe(30);
-    expect(config('ai-bridge.websocket.request_timeout'))->toBe(300);
+
+    // Silence is the bound that kills. A wall clock cannot tell a stuck CLI
+    // from a busy one, and at 300 seconds it killed turns that were visibly
+    // working — so request_timeout is a backstop now and sized like one.
+    expect(config('ai-bridge.websocket.silence_timeout'))->toBe(900);
+    expect(config('ai-bridge.websocket.request_timeout'))->toBe(86400);
 });
 
 test('chat_completions config defaults', function () {

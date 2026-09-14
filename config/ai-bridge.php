@@ -74,7 +74,29 @@ return [
 
     'websocket' => [
         'heartbeat_interval' => 30,   // seconds between ping/pong
-        'request_timeout' => 300,     // seconds before an AI request times out
+
+        /*
+         * How long a turn may produce NOTHING before the bridge presumes the
+         * CLI is wedged and stops it. This is the bound that kills, because
+         * silence is the only measure that separates stuck from busy: an
+         * assistant reading a codebase, waiting on a build or running a test
+         * suite emits nothing for minutes and is working the whole time.
+         *
+         * 0 disables it, leaving the turn bounded only by request_timeout.
+         */
+        'silence_timeout' => 900,
+
+        /*
+         * A wall-clock ceiling for one turn, as a backstop.
+         *
+         * Was 300, which killed turns that were visibly working — a research
+         * turn that had streamed 370 events died at exactly 300 seconds,
+         * mid-work. A wall clock cannot tell a stuck CLI from a busy one, so
+         * it is no longer the bound doing the work; silence_timeout is.
+         *
+         * 0 means no ceiling at all, for a server that bounds turns itself.
+         */
+        'request_timeout' => 86400,
     ],
 
     /*

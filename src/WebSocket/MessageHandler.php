@@ -345,7 +345,11 @@ class MessageHandler
             'tools' => $this->toolRegistry->toArray(),
             'config' => [
                 'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
-                'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 300),
+                'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 86400),
+                // The bound that actually kills. A bridge too old to know the
+                // field ignores it and keeps its own behaviour, so this can
+                // ship without the two moving in step.
+                'silence_timeout' => (int) config('ai-bridge.websocket.silence_timeout', 900),
             ],
             // How much the local CLI environment is allowed to influence
             // behaviour. The bridge translates this into a different per-

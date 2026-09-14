@@ -1097,3 +1097,17 @@ test('a long tail of short results cannot walk the row past a packet limit', fun
     $tiny = collect($blocks)->firstWhere('tool_call_id', 'tiny499');
     expect($tiny['result'])->toBe('ok');
 });
+
+test('the welcome tells the bridge to bound turns by silence', function () {
+    // Shipping the bridge fix alone changes nothing for anyone on the package
+    // default: the server would still send request_timeout 300, and the bridge
+    // honours it as a wall clock — the original bug, intact.
+    $config = [
+        'heartbeat_interval' => (int) config('ai-bridge.websocket.heartbeat_interval', 30),
+        'request_timeout' => (int) config('ai-bridge.websocket.request_timeout', 86400),
+        'silence_timeout' => (int) config('ai-bridge.websocket.silence_timeout', 900),
+    ];
+
+    expect($config['silence_timeout'])->toBe(900)
+        ->and($config['request_timeout'])->toBeGreaterThan(3600);
+});
