@@ -240,7 +240,12 @@ class ConnectionController extends Controller
             return "node {$cli} --server {$wsUrl} --token {$token}";
         }
 
-        return "npx @tetrixdev/ai-bridge@latest --server {$wsUrl} --token {$token}";
+        // --ignore-scripts, because npm runs a package's install hooks as the
+        // person pasting this, before the bridge itself has started. A bad
+        // release would not need them to run anything: fetching it would be
+        // enough. The bridge ships a prebuilt dist and its dependencies are
+        // pure JavaScript, so no hook here is worth running.
+        return "npx -y --ignore-scripts @tetrixdev/ai-bridge@latest --server {$wsUrl} --token {$token}";
     }
 
     /**
