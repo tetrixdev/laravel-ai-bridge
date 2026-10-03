@@ -16,6 +16,7 @@ use Tetrix\AiBridge\Protocol\StreamEvent;
 use Tetrix\AiBridge\Streaming\RelayStream;
 use Tetrix\AiBridge\Streaming\StreamHandler;
 use Tetrix\AiBridge\Support\BridgeLog;
+use Tetrix\AiBridge\Support\DesiredBridgeVersion;
 use Tetrix\AiBridge\Tools\ToolRegistry;
 
 /**
@@ -178,6 +179,7 @@ class MessageHandler
             $providers = self::asList($message['providers'] ?? null);
             $this->connectionManager->setProviders($existingUserId, $providers);
             $this->connectionManager->setWorkspaces($existingUserId, self::asList($message['workspaces'] ?? null));
+            $this->recordSelfReport($existingUserId, $message);
 
             $this->logBridgeConnection($existingUserId, $connectionId, $protocolVersion, $providers, 'pre-authenticated');
 
@@ -225,10 +227,32 @@ class MessageHandler
         // Recorded after addConnection(), which is what creates the entry the
         // setter writes into.
         $this->connectionManager->setWorkspaces($userId, self::asList($message['workspaces'] ?? null));
+        $this->recordSelfReport($userId, $message);
 
         $this->logBridgeConnection($userId, $connectionId, $protocolVersion, $providers, 'connected');
 
         return $this->buildWelcomeResponse($connectionId, $userId);
+    }
+
+    /**
+     * Store what the bridge says about itself on `hello`: the version it runs
+     * and whether it will follow `desired_bridge_version`.
+     *
+     * Type-checked rather than trusted, for the same reason as asList(). An
+     * absent or non-boolean `self_update` is false: a bridge older than
+     * 0.24.0 never sends it, and cannot follow a desired version anyway.
+     *
+     * @param  array<string, mixed>  $message
+     */
+    private function recordSelfReport(string $userId, array $message): void
+    {
+        $bridgeVersion = $message['bridge_version'] ?? null;
+
+        $this->connectionManager->setBridgeVersion(
+            $userId,
+            is_string($bridgeVersion) && $bridgeVersion !== '' ? $bridgeVersion : null,
+        );
+        $this->connectionManager->setSelfUpdate($userId, ($message['self_update'] ?? null) === true);
     }
 
     /**
@@ -455,6 +479,16 @@ class MessageHandler
             // we send it explicitly for clarity.
             'cli_isolation' => $this->resolveCliIsolation(),
         ];
+
+        // The bridge version this server wants the machine on. A bridge
+        // running as a managed service (0.24.0+) moves to exactly this
+        // version once idle, upgrade or downgrade. Omitted entirely when
+        // unset or refused — a malformed or below-floor value is "no
+        // opinion", never an instruction. Older bridges ignore the key.
+        $desiredVersion = DesiredBridgeVersion::resolve();
+        if ($desiredVersion !== null) {
+            $welcome['desired_bridge_version'] = $desiredVersion;
+        }
 
         $refreshedToken = $this->maybeRefreshToken($userId);
         if ($refreshedToken !== null) {

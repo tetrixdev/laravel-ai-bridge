@@ -356,6 +356,32 @@ silently unpin a workspace and throw away the session.
 > [the bridge's security note](https://github.com/tetrixdev/ai-bridge#read-this-before-using-it)
 > before enabling it.
 
+#### Keeping bridges on one version
+
+Set `AI_BRIDGE_DESIRED_VERSION` to the bridge version every machine should run:
+
+```env
+AI_BRIDGE_DESIRED_VERSION=0.24.1
+```
+
+The welcome then carries `desired_bridge_version`, and a bridge running as a
+managed service (0.24.0 or newer) moves to exactly that version once it is idle
+— upgrade or downgrade. Bridges read it when they connect, so restarting the
+serve process (as a deploy does) is what rolls it out. The value must be a plain
+semver version no lower than `0.24.0`, the first bridge that can update itself;
+anything else is logged once and ignored rather than sent.
+
+What each machine runs comes back on its status, live while it is connected:
+
+```php
+$status = app(ConnectionStatus::class)->for($connection);
+$status['bridge_version'];  // '0.24.1', or null when offline / not reported
+$status['self_update'];     // true only if this bridge will follow the desired version
+```
+
+`self_update` is `false` for a bridge started by hand, one whose operator opted
+out, and every bridge older than 0.24.0 — those keep the version they run.
+
 #### Attachments
 
 A file attached in the chat does not travel over the WebSocket — the message cap
@@ -450,6 +476,7 @@ Full reference for `config/ai-bridge.php`:
 | `logging.verbose` | `AI_BRIDGE_LOG_VERBOSE` | `false` | When `true`, also log per-event detail (every stream event, relayed payloads) at `debug` level. Useful in development; noisy in production. |
 | `cli.isolation` | `AI_BRIDGE_CLI_ISOLATION` | `isolated` | How much the CLI on the developer's machine may do. `isolated` — server-declared tools only, no shell, no edits; the right posture when end users can send chat messages. `workspace` — the CLI also gets its own file and shell tools, inside the directory the request named, while the operator's own MCP servers, hooks and plugins stay out. `native` — everything on, including the operator's environment; never appropriate when the server is reachable by end users. Anything unrecognised falls back to `isolated`. `workspace` needs a bridge started with `--allow-dir` and a `working_dir` on the conversation, and **is not a sandbox** — see [Letting the assistant work in a repository](#letting-the-assistant-work-in-a-repository). |
 | `cli.local_path` | `AI_BRIDGE_CLI_LOCAL_PATH` | `null` | Absolute path to an `ai-bridge` repo checkout. When set **and `APP_ENV=local`**, the "Add a CLI bridge" command runs that checkout's build (`node <path>/dist/cli.js`) instead of `npx @tetrixdev/ai-bridge@latest` — for testing CLI changes without an npm publish. Build the checkout first (`npm run build`). |
+| `bridge.desired_version` | `AI_BRIDGE_DESIRED_VERSION` | `null` | The `@tetrixdev/ai-bridge` version every bridge should run, sent as `desired_bridge_version` in the welcome. Each connected bridge running as a managed service (0.24.0+, reporting `self_update: true`) moves to **exactly** this version once idle — upgrade or downgrade. Takes effect when the serve process restarts and bridges reconnect, as on a deploy. A plain semver version (`0.24.1`, `1.0.0-rc.2`; no `v`, build metadata, range, tag or URL), never below `0.24.0`, the first bridge that can update itself. A malformed or below-floor value is logged once as an error and treated as unset. `null`/empty = no opinion. Additive: older bridges ignore the field. |
 | `streaming.suppress_thinking_blocks` | `AI_BRIDGE_SUPPRESS_THINKING` | `true` | Suppress AI chain-of-thought / thinking blocks from SSE output and the per-turn buffer. Set to `false` only when intentionally displaying AI reasoning to users. |
 
 > **Upgrading from 0.12 or earlier with a published `config/ai-bridge.php`:**
@@ -840,7 +867,7 @@ Eloquent `deleting` event on `Tetrix\AiBridge\Models\Connection`.
 | `GET /ai-bridge/streams/{rid}/status` | Status snapshot of an in-flight or recently-completed turn |
 | `GET /ai-bridge/streams/{rid}/events` | SSE tail of the per-turn event buffer; resumes by `Last-Event-ID` |
 | `POST /ai-bridge/streams/{rid}/abort` | Cancel an in-flight turn. Sets a flag; the WebSocket process acts on it at the turn's next event, or at the next heartbeat when the turn has gone quiet — so a stop takes effect within the heartbeat interval (30s by default) at worst. **Stopping the CLI itself needs `@tetrixdev/ai-bridge` 0.11.0 or newer**: older bridges ignore `cancel`, so the chat ends the turn but the CLI runs on to the end on the operator's machine |
-| `GET /ai-bridge/connections` | List connections with their advertised providers/models + live `connected` flag |
+| `GET /ai-bridge/connections` | List connections with their advertised providers/models + live `connected` flag, plus the `bridge_version` a connected bridge runs and whether it will follow `bridge.desired_version` (`self_update`) |
 | `POST /ai-bridge/connections` | Register a CLI bridge or BYOK connection |
 | `PATCH /ai-bridge/connections/{id}` | Rename a connection |
 | `POST /ai-bridge/connections/{id}/regenerate` | Rotate a bridge's token (revokes the old one, disconnects any live bridge) |

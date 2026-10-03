@@ -591,6 +591,10 @@ class BridgeWebSocketServer
             // What the bridge is actually running as, which only this process
             // knows and which a PHP-FPM worker otherwise cannot see.
             $response['posture'] = $this->connectionManager->getPosture($userId);
+            // What the bridge runs, and whether it will follow the server's
+            // desired_bridge_version. Both from its hello.
+            $response['bridge_version'] = $this->connectionManager->getBridgeVersion($userId);
+            $response['self_update'] = $this->connectionManager->getSelfUpdate($userId);
         }
 
         $this->httpResponse($tcpConnection, 200, $response);
