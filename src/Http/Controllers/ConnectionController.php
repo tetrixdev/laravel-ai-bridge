@@ -52,11 +52,16 @@ class ConnectionController extends Controller
             // declined what the server asked for, and `message` says what the
             // bridge operator would have to change.
             $data['posture'] = $status['posture'] ?? [];
-            // The bridge version the machine runs, and whether it will follow
-            // ai-bridge.bridge.desired_version. Null / false while offline.
+            // The ai-bridge release the machine runs (or last ran), so the UI
+            // can say it is behind, and whether it will follow
+            // ai-bridge.bridge.desired_version (false while offline). Null /
+            // false for BYOK.
             $data['bridge_version'] = $status['bridge_version'] ?? null;
             $data['self_update'] = $status['self_update'] ?? false;
             if ($connection->isBridge()) {
+                // Its attachment caps and the optional frames it knows.
+                $data['attachment_limits'] = $status['attachment_limits'] ?? null;
+                $data['capabilities'] = $status['capabilities'] ?? [];
                 $data['connected'] = $status['connected'];
             }
 

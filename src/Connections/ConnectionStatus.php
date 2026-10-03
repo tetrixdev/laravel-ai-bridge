@@ -42,20 +42,32 @@ class ConnectionStatus
      * Empty for BYOK, and empty for a bridge that predates the report — which
      * means unknown, not agreement.
      *
-     * `bridge_version` is the version the bridge said it runs on its hello,
-     * and `self_update` whether it said it will follow the server's
-     * `desired_bridge_version` (a managed service, not opted out). Both are
-     * live only: null / false for BYOK, for a bridge that is not connected,
-     * and — for `self_update` — for any bridge older than 0.24.0. They are
-     * not cached, because a version remembered from an earlier connection is
-     * exactly the thing a self-update makes wrong.
+     * `bridge_version` is the ai-bridge release the machine runs (`0.21.0`), from
+     * its `hello`: compare it with the version the application pins (or with
+     * `ai-bridge.bridge.desired_version`) to tell a person their machine is
+     * behind. Kept from the last connection while the machine is off — check
+     * `connected` to tell a live report from a remembered one; a bridge that
+     * self-updates reconnects with a new hello, which replaces it. Null for
+     * BYOK and for a machine never seen. The protocol version is a different
+     * number and is not this.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool}
+     * `self_update` is whether the bridge said it will follow the server's
+     * `desired_bridge_version` (a managed service, not opted out). Live only:
+     * false for BYOK, for a bridge that is not connected, and for any bridge
+     * older than 0.24.0, because a promise made on an earlier connection is
+     * not one the machine is keeping now.
+     *
+     * `attachment_limits` is the per-file / per-request caps the bridge enforces
+     * (bytes; bridge 0.16+), or null. `capabilities` lists the optional frames
+     * it announced: `turn_input`, `file_uploads`, `file_downloads`,
+     * `app_backends`. Test a capability, not a version.
+     *
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>}
      */
     public function for(Connection $connection): array
     {
         if ($connection->isByok()) {
-            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => [], 'posture' => [], 'bridge_version' => null, 'self_update' => false];
+            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => [], 'posture' => []] + self::bridgeFields([], false);
         }
 
         return $this->bridgeLiveStatus($connection);
@@ -84,6 +96,41 @@ class ConnectionStatus
         return $this->for($connection)['posture'];
     }
 
+    /** The ai-bridge release this connection's machine runs (or last ran), or null. */
+    public function bridgeVersion(Connection $connection): ?string
+    {
+        return $this->for($connection)['bridge_version'];
+    }
+
+    /** Whether this connection's bridge announced a capability (see for()). */
+    public function supports(Connection $connection, string $capability): bool
+    {
+        return in_array($capability, $this->for($connection)['capabilities'], true);
+    }
+
+    /**
+     * The bridge-description fields of for(), from a stored or reported `bridge` array.
+     *
+     * `self_update` is only ever true while connected (see for()).
+     *
+     * @param  mixed  $bridge
+     * @return array{bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>}
+     */
+    private static function bridgeFields(mixed $bridge, bool $connected): array
+    {
+        $bridge = is_array($bridge) ? $bridge : [];
+        $version = $bridge['bridge_version'] ?? null;
+        $limits = $bridge['attachment_limits'] ?? null;
+        $capabilities = $bridge['capabilities'] ?? [];
+
+        return [
+            'bridge_version' => is_string($version) && $version !== '' ? $version : null,
+            'self_update' => $connected && ($bridge['self_update'] ?? null) === true,
+            'attachment_limits' => is_array($limits) && $limits !== [] ? $limits : null,
+            'capabilities' => is_array($capabilities) ? array_values(array_filter($capabilities, 'is_string')) : [],
+        ];
+    }
+
     /** Whether the connection is currently usable. */
     public function isConnected(Connection $connection): bool
     {
@@ -94,7 +141,7 @@ class ConnectionStatus
      * Query the bridge server for a bridge connection's live status, refreshing the cached
      * capabilities. Falls back to cached providers + connected=false when unreachable.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool}
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>}
      */
     private function bridgeLiveStatus(Connection $connection): array
     {
@@ -104,9 +151,7 @@ class ConnectionStatus
                 'providers' => $connection->last_providers ?? [],
                 'workspaces' => $connection->last_workspaces ?? [],
                 'posture' => $connection->last_posture ?? [],
-                'bridge_version' => null,
-                'self_update' => false,
-            ];
+            ] + self::bridgeFields($connection->last_bridge, false);
         }
 
         try {
@@ -149,33 +194,36 @@ class ConnectionStatus
                 $posture = $connected && is_array($reportedPosture)
                     ? $reportedPosture
                     : ($connection->last_posture ?? []);
+                // Same rule again. A serve process that predates `bridge`
+                // reports none, and a disconnected poll reports none: keep
+                // what the machine said last time it connected.
+                $reportedBridge = $response->json('bridge');
+                // A serve process running the desired-version build without
+                // the `bridge` object reports the version and self_update at
+                // the top level; take those rather than nothing.
+                if (! is_array($reportedBridge) && is_string($response->json('bridge_version'))) {
+                    $reportedBridge = [
+                        'bridge_version' => $response->json('bridge_version'),
+                        'self_update' => $response->json('self_update') === true,
+                    ];
+                }
+                $bridge = $connected && is_array($reportedBridge)
+                    ? $reportedBridge
+                    : ($connection->last_bridge ?? []);
                 $connectedAt = $response->json('connected_at');
 
                 $connection->forceFill([
                     'last_providers' => $providers,
                     'last_workspaces' => $workspaces,
                     'last_posture' => $posture,
+                    'last_bridge' => $bridge,
                     'last_connected_at' => $connected && $connectedAt !== null
                         ? $connectedAt
                         : $connection->last_connected_at,
                 ])->save();
 
-                // Live only, never cached: see for(). A serve process that
-                // predates these fields reports neither, which reads as unknown.
-                $reportedVersion = $response->json('bridge_version');
-                $bridgeVersion = $connected && is_string($reportedVersion) && $reportedVersion !== ''
-                    ? $reportedVersion
-                    : null;
-                $selfUpdate = $connected && $response->json('self_update') === true;
-
-                return [
-                    'connected' => $connected,
-                    'providers' => $providers,
-                    'workspaces' => $workspaces,
-                    'posture' => $posture,
-                    'bridge_version' => $bridgeVersion,
-                    'self_update' => $selfUpdate,
-                ];
+                return ['connected' => $connected, 'providers' => $providers, 'workspaces' => $workspaces, 'posture' => $posture]
+                    + self::bridgeFields($bridge, $connected);
             }
         } catch (\Throwable $e) {
             Log::info('AI Bridge: bridge status unreachable', [
@@ -189,9 +237,7 @@ class ConnectionStatus
             'providers' => $connection->last_providers ?? [],
             'workspaces' => $connection->last_workspaces ?? [],
             'posture' => $connection->last_posture ?? [],
-            'bridge_version' => null,
-            'self_update' => false,
-        ];
+        ] + self::bridgeFields($connection->last_bridge, false);
     }
 
     /**
@@ -233,9 +279,10 @@ class ConnectionStatus
      * Nothing is stored for the same reason, so there is no `last_usage` column to match
      * `last_posture`. That absence is deliberate.
      *
-     * @return array{ok: bool, limits?: array<int, array<string, mixed>>, reason?: string}
+     * @return array{ok: bool, limits?: array<int, array<string, mixed>>, reason?: string, retry_after?: int}
      *                                 `reason` is `not_connected`, `unsupported`,
-     *                                 `no_credential` or `failed`.
+     *                                 `no_credential`, `rate_limited` (with `retry_after`
+     *                                 seconds when the machine was told) or `failed`.
      */
     public function usage(Connection $connection, ?string $provider = null): array
     {
@@ -291,8 +338,15 @@ class ConnectionStatus
         }
 
         $reason = $response->json('reason');
+        $failure = ['ok' => false, 'reason' => is_string($reason) && $reason !== '' ? $reason : 'failed'];
 
-        return ['ok' => false, 'reason' => is_string($reason) && $reason !== '' ? $reason : 'failed'];
+        // Only a rate limit says when to ask again; the serve process already bounded it.
+        $retryAfter = $response->json('retry_after');
+        if ($failure['reason'] === 'rate_limited' && is_int($retryAfter) && $retryAfter > 0) {
+            $failure['retry_after'] = $retryAfter;
+        }
+
+        return $failure;
     }
 
     private function internalApiBase(): string
