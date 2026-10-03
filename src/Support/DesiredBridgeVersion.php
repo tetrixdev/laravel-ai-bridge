@@ -34,9 +34,12 @@ final class DesiredBridgeVersion
 
     /**
      * Strict semver: MAJOR.MINOR.PATCH with an optional prerelease and no
-     * build metadata.
+     * build metadata. A numeric prerelease identifier has no leading zero.
+     * `D` so `$` is the end of the string: without it PCRE also matches before
+     * a final newline, and "0.24.0\n" would go out as a version. The same
+     * rule as the bridge's own check (src/selfupdate/version.ts).
      */
-    private const PATTERN = '/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/';
+    private const PATTERN = '/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/D';
 
     /**
      * Rejected values already logged by this process, so a bad value is

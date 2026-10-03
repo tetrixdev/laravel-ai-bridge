@@ -104,6 +104,8 @@ describe('the welcome message', function () {
         ' 0.24.0',
         '00.24.0',
         '0.24.0-',
+        'trailing newline' => ["0.24.0\n"],
+        'leading zero in a numeric prerelease' => ['0.24.1-01'],
         'array' => [['0.24.0']],
     ]);
 
