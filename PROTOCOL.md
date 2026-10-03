@@ -205,6 +205,25 @@ This is what makes the feature usable: the server shows a picker of the checkout
 
 The field is **omitted entirely** when the operator allowed nothing, so "this bridge has no workspaces" and "this bridge predates workspaces" look the same to the server — correctly, because in both cases naming a directory is refused. An older server ignores the field.
 
+#### `bridge_version` and additive field: `self_update`
+
+```json
+{
+  "type": "hello",
+  "version": "0.1",
+  "bridge_version": "0.24.0",
+  "self_update": true,
+  "providers": [ "..." ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `bridge_version` | The `@tetrixdev/ai-bridge` version this bridge runs, e.g. `"0.24.0"`. |
+| `self_update` | `true` only when this bridge will actually follow [`desired_bridge_version`](#desired_bridge_version): it runs as a managed service and its operator has not opted out. Sent by 0.24.0 and newer. |
+
+The server records both per connection and reports them on the connection status (`bridge_version`, `self_update`) while the bridge is connected. An absent or non-boolean `self_update` is `false` — a bridge older than 0.24.0 never sends it, and cannot update itself anyway. An older server ignores the field.
+
 ### Bridge → Server: `providers_update`
 
 Sent mid-connection when the bridge's set of available provider CLIs changes after the `hello` — for example, the user installs or removes a CLI while the bridge stays connected.
@@ -292,7 +311,8 @@ Sent whether or not the posture matches the request, so a server always knows wh
     "request_timeout": 86400,
     "silence_timeout": 900
   },
-  "refreshed_token": "<new JWT>"
+  "refreshed_token": "<new JWT>",
+  "desired_bridge_version": "0.24.1"
 }
 ```
 
@@ -411,6 +431,16 @@ It also sets how long the bridge waits for the server to answer a [`tool_call`](
 When either bound fires, the bridge sends `error` with code **`silence_timeout_exceeded`** or **`request_timeout_exceeded`** and a `limit_seconds` field, then `done`. It does not surface the signal: `exited with code 143` is true, describes the mechanism rather than the decision, and leaves a consumer unable to say "stopped after 15 minutes".
 
 **`refreshed_token`** *(optional)*: Present when the server topped up an aging connection token at the handshake. The bridge replaces its current token with this value for future reconnects. See [Token lifetime](#token-lifetime).
+
+#### `desired_bridge_version`
+
+*(optional, additive)* The bridge version the server wants this machine to run, from the server's `ai-bridge.bridge.desired_version` (`AI_BRIDGE_DESIRED_VERSION`). A bridge that runs as a managed service and reports `self_update: true` fetches **exactly** this version when it differs from its own — an upgrade or a downgrade — waits until it is idle, pins it and restarts. Any other bridge ignores it, as does every bridge older than 0.24.0: bridges read only the welcome keys they know.
+
+- **Format:** a plain semver version — `MAJOR.MINOR.PATCH` with an optional prerelease (`0.24.1`, `1.0.0-rc.2`). Never a leading `v`, build metadata, a range, a dist-tag or a URL.
+- **Floor:** never below `0.24.0`, the first bridge that can update itself, compared by semver precedence (so `0.24.0-rc.1` is below it). Pinning a machine to an older version would strand it there: that version never reads this field, so nothing could move it back.
+- **Absent** means no opinion, and bridges keep what they run. The server leaves the key out — never sends `null` or `""` — when nothing is configured, and also when the configured value is malformed or below the floor (it logs an error once instead of passing on an instruction it cannot vouch for).
+
+Bridges read it at the handshake, so a change takes effect when the serve process restarts (as a deploy does) and every bridge reconnects.
 
 ### Server → Bridge: `token_refresh`
 

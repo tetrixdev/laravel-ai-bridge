@@ -286,6 +286,62 @@ class BridgeConnectionManager
     }
 
     /**
+     * Store the version the bridge said it runs.
+     *
+     * Arrives on `hello` as `bridge_version`. Null when the bridge sent none
+     * (or something that was not a string).
+     *
+     * @param  int|string  $userId  The user ID.
+     */
+    public function setBridgeVersion(int|string $userId, ?string $version): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['bridge_version'] = $version;
+        }
+    }
+
+    /**
+     * Get the version this user's bridge said it runs.
+     *
+     * @param  int|string  $userId  The user ID.
+     * @return string|null  Null when the bridge never said.
+     */
+    public function getBridgeVersion(int|string $userId): ?string
+    {
+        return $this->connections[(string) $userId]['bridge_version'] ?? null;
+    }
+
+    /**
+     * Store whether the bridge will follow `welcome.desired_bridge_version`.
+     *
+     * Arrives on `hello` as `self_update`, true only for a bridge that will
+     * actually act on it (a managed service that has not opted out). A bridge
+     * older than 0.24.0 sends nothing, which is false: it cannot.
+     *
+     * @param  int|string  $userId  The user ID.
+     */
+    public function setSelfUpdate(int|string $userId, bool $selfUpdate): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['self_update'] = $selfUpdate;
+        }
+    }
+
+    /**
+     * Whether this user's bridge said it will follow the desired version.
+     *
+     * @param  int|string  $userId  The user ID.
+     */
+    public function getSelfUpdate(int|string $userId): bool
+    {
+        return $this->connections[(string) $userId]['self_update'] ?? false;
+    }
+
+    /**
      * Get the provider capabilities for a user's bridge connection.
      *
      * @param  int|string  $userId  The user ID.

@@ -331,6 +331,37 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Bridge Version
+    |--------------------------------------------------------------------------
+    |
+    | 'desired_version' is the @tetrixdev/ai-bridge version this server wants
+    | every bridge to run. It is sent as `desired_bridge_version` in the
+    | welcome, and every connected bridge running as a managed service moves
+    | to EXACTLY this version once it is idle — an upgrade or a downgrade. A
+    | bridge started by hand (npx, a terminal) only reports what it runs.
+    |
+    | Bridges read it at the handshake, so a deploy that changes it takes
+    | effect when the serve process restarts: every bridge reconnects and
+    | picks the new value up from its welcome.
+    |
+    | Format: a plain semver version, e.g. 0.24.1 or 1.0.0-rc.2. No leading
+    | `v`, no build metadata, no range, dist-tag or URL.
+    |
+    | Floor: 0.24.0, the first bridge that can update itself. Anything below
+    | it would strand a machine on a version that never moves again, so it is
+    | refused — as is a malformed value. Either is logged once as an error and
+    | treated as unset.
+    |
+    | null or empty (default) = no opinion; bridges keep what they run.
+    |
+    */
+
+    'bridge' => [
+        'desired_version' => env('AI_BRIDGE_DESIRED_VERSION'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Streaming Options
     |--------------------------------------------------------------------------
     */

@@ -42,12 +42,20 @@ class ConnectionStatus
      * Empty for BYOK, and empty for a bridge that predates the report — which
      * means unknown, not agreement.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>}
+     * `bridge_version` is the version the bridge said it runs on its hello,
+     * and `self_update` whether it said it will follow the server's
+     * `desired_bridge_version` (a managed service, not opted out). Both are
+     * live only: null / false for BYOK, for a bridge that is not connected,
+     * and — for `self_update` — for any bridge older than 0.24.0. They are
+     * not cached, because a version remembered from an earlier connection is
+     * exactly the thing a self-update makes wrong.
+     *
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool}
      */
     public function for(Connection $connection): array
     {
         if ($connection->isByok()) {
-            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => [], 'posture' => []];
+            return ['connected' => true, 'providers' => $this->byokProviders(), 'workspaces' => [], 'posture' => [], 'bridge_version' => null, 'self_update' => false];
         }
 
         return $this->bridgeLiveStatus($connection);
@@ -86,7 +94,7 @@ class ConnectionStatus
      * Query the bridge server for a bridge connection's live status, refreshing the cached
      * capabilities. Falls back to cached providers + connected=false when unreachable.
      *
-     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>}
+     * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool}
      */
     private function bridgeLiveStatus(Connection $connection): array
     {
@@ -96,6 +104,8 @@ class ConnectionStatus
                 'providers' => $connection->last_providers ?? [],
                 'workspaces' => $connection->last_workspaces ?? [],
                 'posture' => $connection->last_posture ?? [],
+                'bridge_version' => null,
+                'self_update' => false,
             ];
         }
 
@@ -150,7 +160,22 @@ class ConnectionStatus
                         : $connection->last_connected_at,
                 ])->save();
 
-                return ['connected' => $connected, 'providers' => $providers, 'workspaces' => $workspaces, 'posture' => $posture];
+                // Live only, never cached: see for(). A serve process that
+                // predates these fields reports neither, which reads as unknown.
+                $reportedVersion = $response->json('bridge_version');
+                $bridgeVersion = $connected && is_string($reportedVersion) && $reportedVersion !== ''
+                    ? $reportedVersion
+                    : null;
+                $selfUpdate = $connected && $response->json('self_update') === true;
+
+                return [
+                    'connected' => $connected,
+                    'providers' => $providers,
+                    'workspaces' => $workspaces,
+                    'posture' => $posture,
+                    'bridge_version' => $bridgeVersion,
+                    'self_update' => $selfUpdate,
+                ];
             }
         } catch (\Throwable $e) {
             Log::info('AI Bridge: bridge status unreachable', [
@@ -164,6 +189,8 @@ class ConnectionStatus
             'providers' => $connection->last_providers ?? [],
             'workspaces' => $connection->last_workspaces ?? [],
             'posture' => $connection->last_posture ?? [],
+            'bridge_version' => null,
+            'self_update' => false,
         ];
     }
 

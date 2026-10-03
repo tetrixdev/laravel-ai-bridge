@@ -52,6 +52,10 @@ class ConnectionController extends Controller
             // declined what the server asked for, and `message` says what the
             // bridge operator would have to change.
             $data['posture'] = $status['posture'] ?? [];
+            // The bridge version the machine runs, and whether it will follow
+            // ai-bridge.bridge.desired_version. Null / false while offline.
+            $data['bridge_version'] = $status['bridge_version'] ?? null;
+            $data['self_update'] = $status['self_update'] ?? false;
             if ($connection->isBridge()) {
                 $data['connected'] = $status['connected'];
             }
