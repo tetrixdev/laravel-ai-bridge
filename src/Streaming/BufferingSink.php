@@ -159,6 +159,12 @@ final class BufferingSink
             $append(MessageTypes::MAIN_STATE, $data);
         });
 
+        // The turn's input closed while it runs. Buffered so a browser knows,
+        // on reconnect too, that a message typed now waits for the turn's end.
+        $handler->onInputClosed(function (array $data) use ($append): void {
+            $append(MessageTypes::INPUT_CLOSED, $data);
+        });
+
         // Terminal events both write the event AND flip the buffer status, so
         // the SSE tail and the status endpoint can tell the turn is finished.
         $handler->onDone(function (?array $usage, array $meta = []) use ($append, $store, $rid): void {

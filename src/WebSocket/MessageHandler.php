@@ -553,7 +553,7 @@ class MessageHandler
      * Absent from a bridge that predates the feature, which is what makes them
      * safe to test: absence means "cannot", never "unknown but probably".
      */
-    public const HELLO_CAPABILITIES = ['turn_input', 'file_uploads', 'file_downloads', 'app_backends'];
+    public const HELLO_CAPABILITIES = ['turn_input', 'input_closed', 'file_uploads', 'file_downloads', 'app_backends'];
 
     /**
      * What a bridge says about itself at `hello`, reduced to checked fields.
@@ -1003,10 +1003,59 @@ class MessageHandler
             return null;
         }
 
+        // The bridge closed this turn's input while the turn runs on. Record
+        // it before relaying, so a process that reads inputOpen() on seeing
+        // the relayed event already gets false.
+        if ($eventType === MessageTypes::INPUT_CLOSED) {
+            $this->markInputClosed($requestId, $message['data'] ?? null);
+        }
+
         $event = StreamEvent::fromArray($message);
         $handler->dispatchEvent($event);
 
         return null;
+    }
+
+    /**
+     * Record that a running turn's input closed, and announce it.
+     *
+     * Clears the `input_open` that markInputOpen() set, so
+     * AiBridgeManager::inputOpen() answers false and the application holds the
+     * next message for a new turn instead of sending a turn_input the bridge
+     * would answer `turn_ending`. `reason` is kept as given (`idle` today); a
+     * missing or non-string one is recorded as null, never refused.
+     *
+     * Only called for a request this connection owns. Failures are logged,
+     * never thrown: this runs inside the event loop.
+     */
+    private function markInputClosed(string $requestId, mixed $data): void
+    {
+        $reason = is_array($data) && is_string($data['reason'] ?? null) && $data['reason'] !== ''
+            ? mb_substr($data['reason'], 0, 64)
+            : null;
+
+        try {
+            $store = app(StreamStoreContract::class);
+
+            if ($store instanceof MergesStreamMetadata) {
+                $store->mergeMetadata($requestId, ['input_open' => false, 'input_closed_reason' => $reason]);
+            }
+        } catch (\Throwable $e) {
+            BridgeLog::warning('failed to record input_closed in the stream metadata', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        try {
+            $userId = $this->connectionManager->getPendingRequestUserId($requestId);
+            \Tetrix\AiBridge\Events\TurnInputClosed::dispatch($userId ?? '', $requestId, $reason);
+        } catch (\Throwable $e) {
+            BridgeLog::warning('a TurnInputClosed listener failed', [
+                'request_id' => $requestId,
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

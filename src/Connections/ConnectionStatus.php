@@ -59,8 +59,8 @@ class ConnectionStatus
      *
      * `attachment_limits` is the per-file / per-request caps the bridge enforces
      * (bytes; bridge 0.16+), or null. `capabilities` lists the optional frames
-     * it announced: `turn_input`, `file_uploads`, `file_downloads`,
-     * `app_backends`. Test a capability, not a version.
+     * it announced: `turn_input`, `input_closed`, `file_uploads`,
+     * `file_downloads`, `app_backends`. Test a capability, not a version.
      *
      * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>}
      */

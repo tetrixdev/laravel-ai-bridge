@@ -257,8 +257,10 @@ class AiBridgeManager
      * Whether a running turn has its input open, so sendTurnInput() can reach it.
      *
      * True only while the turn is streaming AND its bridge confirmed `input_open` on the
-     * ack. False for a turn that did not ask, a bridge too old to confirm, a turn that has
-     * ended, and a stream store that cannot record it — in each of which a message typed now
+     * ack AND has not since closed it (`input_closed`, bridge 0.25+: the turn keeps running
+     * but answers a turn_input `turn_ending`). False for a turn that did not ask, a bridge
+     * too old to confirm, a turn whose input closed, a turn that has ended, and a stream
+     * store that cannot record it — in each of which a message typed now
      * is best held until the turn ends, exactly as before turn input existed.
      */
     public function inputOpen(string $requestId): bool
@@ -613,7 +615,7 @@ class AiBridgeManager
      *
      * Callbacks: onBlockStart, onBlockDelta, onBlockStop, onToolCall,
      * onToolResult, onRateLimit, onAttachment, onTask, onUserInput,
-     * onMainState, onDone, onError, onCancelled.
+     * onMainState, onInputClosed, onDone, onError, onCancelled.
      * The $sink receives a normalized payload array with 'event' and 'data' keys.
      * The optional $onTerminal callback is called after done/error/cancelled events (e.g. for SSE [DONE] flush).
      */
@@ -715,6 +717,12 @@ class AiBridgeManager
 
         $stream->onMainState(function (array $data) use ($sink) {
             $sink(['event' => MessageTypes::MAIN_STATE, 'data' => $data]);
+        });
+
+        // The turn's input closed while it runs: a message typed from now on
+        // waits for the turn's end (inputOpen() says false).
+        $stream->onInputClosed(function (array $data) use ($sink) {
+            $sink(['event' => MessageTypes::INPUT_CLOSED, 'data' => $data]);
         });
 
         $stream->onDone(function (?array $usage, array $meta = []) use ($sink, $onTerminal) {

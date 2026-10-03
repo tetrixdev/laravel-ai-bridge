@@ -73,6 +73,9 @@ class StreamHandler
     /** @var array<int, Closure> */
     private array $mainStateCallbacks = [];
 
+    /** @var array<int, Closure> */
+    private array $inputClosedCallbacks = [];
+
     /**
      * Partially received tool results, keyed by tool_call_id.
      *
@@ -356,6 +359,22 @@ class StreamHandler
     }
 
     /**
+     * Register a callback for input_closed events — the bridge closed this
+     * turn's input while the turn keeps running (bridge 0.25+).
+     *
+     * The callback receives the event's data array as the bridge sent it
+     * (`reason`, `idle` today; any value is passed on). Passed through whole,
+     * like main_state. Non-terminal: the turn still ends with its own
+     * terminal event; a message sent from now on is answered `turn_ending`.
+     */
+    public function onInputClosed(Closure $callback): static
+    {
+        $this->inputClosedCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
      * What the provider reported about the last completed turn besides usage.
      *
      * @return array<string, mixed>
@@ -614,6 +633,22 @@ class StreamHandler
         }
 
         $this->dispatchCallbacks($this->mainStateCallbacks, [$data], 'main_state');
+    }
+
+    /**
+     * Dispatch an input_closed event: the turn takes no more input.
+     *
+     * @param  array<string, mixed>  $data
+     *
+     * @internal Called by StreamableProvider implementations.
+     */
+    public function dispatchInputClosed(array $data): void
+    {
+        if ($this->cancelled || $this->terminated) {
+            return;
+        }
+
+        $this->dispatchCallbacks($this->inputClosedCallbacks, [$data], 'input_closed');
     }
 
     /**
@@ -1033,6 +1068,7 @@ class StreamHandler
             MessageTypes::TASK => $this->dispatchTask($event->data),
             MessageTypes::USER_INPUT => $this->dispatchUserInput($event->data),
             MessageTypes::MAIN_STATE => $this->dispatchMainState($event->data),
+            MessageTypes::INPUT_CLOSED => $this->dispatchInputClosed($event->data),
             MessageTypes::ATTACHMENT => $this->dispatchAttachment($event->data),
             MessageTypes::DONE => $this->dispatchDone(
                 $event->data['usage'] ?? null,

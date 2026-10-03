@@ -331,7 +331,7 @@ class BridgeConnectionManager
 
     /**
      * Whether this user's connected bridge announced a capability at `hello`
-     * (`turn_input`, `file_uploads`, `file_downloads`, `app_backends`).
+     * (`turn_input`, `input_closed`, `file_uploads`, `file_downloads`, `app_backends`).
      */
     public function bridgeSupports(int|string $userId, string $capability): bool
     {

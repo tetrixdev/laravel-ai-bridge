@@ -138,6 +138,15 @@ final class MessageTypes
     public const MAIN_STATE = 'main_state';
 
     /**
+     * Stream event (bridge 0.25+, `hello.input_closed`): the bridge has closed
+     * this turn's input while the turn keeps running. From here on a
+     * `turn_input` for it is answered `turn_ending`. `data.reason` says why
+     * (`idle` today; read any other value the same way). Non-terminal: the
+     * turn still ends with its own done / error / cancelled.
+     */
+    public const INPUT_CLOSED = 'input_closed';
+
+    /**
      * A file the assistant produced and chose to hand back.
      *
      * Emitted by the bridge after it has uploaded the file to
@@ -299,6 +308,7 @@ final class MessageTypes
             self::TASK,
             self::USER_INPUT,
             self::MAIN_STATE,
+            self::INPUT_CLOSED,
             self::ATTACHMENT,
             self::POSTURE,
             self::USAGE_REQUEST,

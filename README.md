@@ -1147,6 +1147,15 @@ are buffered and replay by index (`onUserInput`, `onMainState` on a
 `StreamHandler`). A stopped turn lists the ids it never read in
 `pending_inputs` on `cancelled`. See `PROTOCOL.md`, "Turn Input".
 
+A bridge may close a turn's input before the turn ends (ai-bridge 0.25+,
+capability `input_closed`): the stream then carries `input_closed`
+(`data.reason`, `idle` today), after which `inputOpen()` is false and a
+`sendTurnInput()` would be answered `turn_ending`, so hold the message for the
+next turn. The same moment is in the turn's stream metadata (`input_open` =>
+false, `input_closed_reason`), on `onInputClosed` of a `StreamHandler`, and
+fired in the serve process as `Tetrix\AiBridge\Events\TurnInputClosed`
+(`userId`, `requestId`, `reason`).
+
 ### What the turn cost
 
 `onDone` receives a second argument with everything the provider reported

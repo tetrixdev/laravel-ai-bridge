@@ -3,6 +3,36 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased] — to be released as 0.17.0
+
+The ZeroPlexBV fork (0.16.0-RC1, 0.16.0, 0.16.1 below) merged back into
+tetrixdev/laravel-ai-bridge, together with upstream's own 0.16.0 (the desired bridge
+version: `ai-bridge.bridge.desired_version`, `welcome.desired_bridge_version`, hello
+`self_update`). The two 0.16.x lines are different releases that share version numbers, so
+the merged package continues at **0.17.0**.
+
+### Added
+
+- **`input_closed` (ai-bridge 0.25+).** A bridge that closes a running turn's input sends the
+  `input_closed` stream event (`data.reason`, `idle` today; any value accepted). The turn's
+  stream metadata then says `input_open: false` and `input_closed_reason`, so
+  `AiBridge::inputOpen()` turns false and the next message is held for a new turn instead of
+  being answered `turn_ending`. The event is relayed and buffered like `main_state`
+  (`StreamHandler::onInputClosed()`), and fired in the serve process as
+  `Tetrix\AiBridge\Events\TurnInputClosed`. Hello `input_closed: true` is recorded as the
+  `input_closed` capability (`ConnectionStatus::supports($connection, 'input_closed')`).
+- From upstream 0.16.0: the desired bridge version and `self_update`, now also on
+  `ConnectionStatus::for()` next to the fork's `bridge_version`, `attachment_limits` and
+  `capabilities`.
+
+### Changed
+
+- `bridge_version` is stored once, in the connection's `bridge` record (with `self_update`).
+  `bridge_version` is still reported from the last connection while a machine is off;
+  `self_update` is live only.
+
+No new migration beyond the fork's (`last_bridge`).
+
 ## [0.16.1] — 2026-10-02
 
 ### Fixed

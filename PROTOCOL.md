@@ -185,6 +185,7 @@ If a CLI is not installed, `available` is `false` and the server won't route req
 | `bridge_version` | always | The ai-bridge release the machine runs, e.g. `0.21.0`. Not the protocol `version` (`0.1`). Compare it with the release you pin to tell a person their machine is behind. |
 | `attachment_limits` | 0.16 | `{max_file_bytes, max_total_bytes, max_count}`, bytes. The caps the bridge enforces, so a server can refuse before the upload. |
 | `turn_input` | 0.19 | `true`: understands `options.accepts_input` and `turn_input` (each turn still confirms with `input_open`). |
+| `input_closed` | 0.25 | `true`: sends the [`input_closed`](#input_closed) stream event when it closes a running turn's input. Without it, a turn's input only ever closes with the turn. Recorded as the `input_closed` capability. |
 | `file_uploads` | 0.18 | `true`: accepts `upload_offer`. See [Streamed uploads](#streamed-uploads-and-downloads). |
 | `file_downloads` | 0.18 | `true`: answers `file_read`. |
 | `app_backends` | 0.21 | `true`: understands `app_call` (Engram app backends; not used by this package). |
@@ -1005,6 +1006,25 @@ Stream event, on turns that run with their input open: whether the **main** assi
 
 A message sent while it is `idle` is read straight away; one sent while it is `working` is read after its current step. Informational and non-terminal: `idle` does not mean the turn is over, `done` does.
 
+#### `input_closed`
+
+Stream event (bridge **0.25+**, which announces it with `hello.input_closed: true`): the bridge has just closed this turn's input, while the turn keeps running.
+
+```json
+{
+  "type": "stream",
+  "request_id": "req_abc123",
+  "event": "input_closed",
+  "data": { "reason": "idle" }
+}
+```
+
+Sent the moment the bridge closes the input. From then on a `turn_input` for this request is answered `rejected` / `turn_ending`, so a server holds a new message for the next turn instead of sending it. **`reason`** says why: `idle` today; other values may follow, and a server reads any of them the same way. Non-terminal: the turn still ends with its own `done`, `error` or `cancelled`.
+
+This package clears `input_open` in the turn's stream metadata (`input_open: false`, `input_closed_reason: <reason>`), so `AiBridgeManager::inputOpen()` answers false from that point; relays the event down the turn's stream like any other (buffered, `onInputClosed`); and fires `TurnInputClosed` in the serve process. An `input_closed` for a request that is not running here (unknown, already finished, or another user's) is ignored.
+
+A bridge that does not send it closes the input only with the turn, so absence changes nothing.
+
 ### The ending rule
 
 A turn with its input open ends — the bridge closes the CLI's input and sends `done` — only when **all three** hold:
@@ -1464,7 +1484,7 @@ The life of a **helper** the CLI runs for the main assistant: a sub-agent, or a 
 
 Carried by the Claude adapter; Codex and Gemini never send it. A consumer that does not know the event ignores it.
 
-On a turn with its input open, two more stream events can appear: [`user_input`](#user_input) and [`main_state`](#main_state), described under [Turn Input](#turn-input).
+On a turn with its input open, more stream events can appear: [`user_input`](#user_input), [`main_state`](#main_state) and (bridge 0.25+) [`input_closed`](#input_closed), described under [Turn Input](#turn-input).
 
 #### `attachment`
 
@@ -1862,6 +1882,9 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `stream` (block_stop) | Closing a content block |
 | `stream` (tool_result) | Acknowledging tool result received |
 | `stream` (task) | A helper started, progressed, is still alive, or ended |
+| `stream` (user_input) | The assistant took in a `turn_input` message |
+| `stream` (main_state) | The main assistant of an input-open turn is `working` or `idle` |
+| `stream` (input_closed) | A running turn's input closed; later `turn_input` is answered `turn_ending` (0.25+) |
 | `stream` (done) | Response complete |
 | `stream` (error) | Error during streaming |
 | `tool_call` | CLI invoked a server-side tool (via callback) |
