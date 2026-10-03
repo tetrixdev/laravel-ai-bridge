@@ -47,19 +47,38 @@ class ServeCommand extends Command
             $port,
         );
 
-        // Handle SIGINT/SIGTERM for graceful shutdown
+        // Handle SIGINT/SIGTERM for graceful shutdown. The turns this process relays end with
+        // it (nothing else can relay the rest of them), so they are ended first: their buffers
+        // say so and their conversations stop saying a turn is running. The stop waits a
+        // moment so the cancel frames reach the machines before the sockets close.
         if (function_exists('pcntl_signal')) {
-            pcntl_signal(SIGINT, function () use ($server) {
-                $this->newLine();
-                $this->info('Shutting down AI Bridge server...');
-                $server->stop();
-            });
+            $stopping = false;
+            $shutdown = function () use ($server, $connectionManager, &$stopping): void {
+                // A second signal (Ctrl+C twice, SIGTERM after SIGINT) inside the
+                // grace period must not cut short the wait for the cancel frames.
+                if ($stopping) {
+                    return;
+                }
+                $stopping = true;
 
-            pcntl_signal(SIGTERM, function () use ($server) {
                 $this->newLine();
                 $this->info('Shutting down AI Bridge server...');
-                $server->stop();
-            });
+
+                $ended = $connectionManager->failAllPendingRequests();
+                if ($ended > 0) {
+                    $this->info("Ended {$ended} running turn(s).");
+                }
+
+                $loop = $server->getLoop();
+                if ($ended > 0 && $loop !== null) {
+                    $loop->addTimer(0.5, fn () => $server->stop());
+                } else {
+                    $server->stop();
+                }
+            };
+
+            pcntl_signal(SIGINT, $shutdown);
+            pcntl_signal(SIGTERM, $shutdown);
         }
 
         $this->showBanner($host, $port);

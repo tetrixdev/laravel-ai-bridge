@@ -6,6 +6,7 @@ namespace Tetrix\AiBridge\Streaming\Drivers;
 
 use Illuminate\Contracts\Redis\Factory as RedisFactory;
 use Illuminate\Redis\Connections\Connection;
+use Tetrix\AiBridge\Contracts\MergesStreamMetadata;
 use Tetrix\AiBridge\Contracts\StreamStoreContract;
 
 /**
@@ -22,7 +23,7 @@ use Tetrix\AiBridge\Contracts\StreamStoreContract;
  *   On complete(), TTL is shortened to $completedTtl so a recent reload can
  *   still replay but the entry doesn't linger.
  */
-final class RedisStreamStore implements StreamStoreContract
+final class RedisStreamStore implements StreamStoreContract, MergesStreamMetadata
 {
     public function __construct(
         private readonly RedisFactory $redis,
@@ -51,6 +52,33 @@ final class RedisStreamStore implements StreamStoreContract
         );
     }
 
+    public function mergeMetadata(string $requestId, array $metadata): void
+    {
+        $conn = $this->conn();
+
+        // Only for a turn that exists: status is the key every reader checks
+        // first, so metadata without it would be written for nobody.
+        $status = $conn->get($this->key($requestId, 'status'));
+        if ($status === null) {
+            return;
+        }
+
+        // Read-modify-write. Every writer after start() is the one serve
+        // process, whose event loop runs one frame at a time, so there is no
+        // second writer to race; start() itself runs before the turn is sent.
+        $rawMeta = $conn->get($this->key($requestId, 'meta'));
+        $current = $rawMeta === null ? [] : json_decode((string) $rawMeta, true);
+
+        $conn->set(
+            $this->key($requestId, 'meta'),
+            json_encode(array_merge(is_array($current) ? $current : [], $metadata), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+            'EX',
+            // A late write to a finished turn (recordLatePendingInputs) must not
+            // outlive its status, which complete() shortened to $completedTtl.
+            $status === 'streaming' ? $this->streamingTtl : $this->completedTtl,
+        );
+    }
+
     public function appendEvent(string $requestId, string $eventName, array $data): int
     {
         $conn = $this->conn();
@@ -70,6 +98,17 @@ final class RedisStreamStore implements StreamStoreContract
         );
 
         $conn->expire($eventsKey, $this->streamingTtl);
+
+        // A live turn's status and metadata last as long as its log does. Only the log was
+        // renewed here, so the other two expired $streamingTtl after the turn STARTED,
+        // however busy it was: past that a long turn read as not_found while it still
+        // wrote events, and inputOpen() refused every message for it. Only while it
+        // streams, so an event after the end cannot stretch a finished turn's short life.
+        $statusKey = $this->key($requestId, 'status');
+        if ($conn->get($statusKey) === 'streaming') {
+            $conn->expire($statusKey, $this->streamingTtl);
+            $conn->expire($this->key($requestId, 'meta'), $this->streamingTtl);
+        }
 
         return $newLength - 1;
     }
