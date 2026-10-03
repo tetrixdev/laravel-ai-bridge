@@ -298,3 +298,54 @@ it('does not let another user\'s bridge write the unread list of a stopped turn'
     expect($store->status('req-1')['metadata']['pending_inputs'] ?? null)->toBeNull();
     Event::assertNotDispatched(TurnInputsReturned::class);
 });
+
+// --- One record for bridge_version and self_update -------------------------
+
+it('keeps bridge_version and self_update in the one bridge record', function () {
+    $rig = helloRig();
+    $rig->manager->addConnection('user-1', 'conn-1');
+
+    $rig->handler->handleMessage('conn-1', null, json_encode(HELLO_021 + ['self_update' => true]));
+
+    expect($rig->manager->getBridgeVersion('user-1'))->toBe($rig->manager->getBridgeInfo('user-1')['bridge_version'])
+        ->and($rig->manager->getSelfUpdate('user-1'))->toBeTrue()
+        ->and($rig->manager->getBridgeInfo('user-1')['self_update'])->toBeTrue();
+
+    $rig->manager->setBridgeVersion('user-1', '0.24.3');
+    expect($rig->manager->getBridgeInfo('user-1')['bridge_version'])->toBe('0.24.3');
+});
+
+it('reports a remembered bridge_version while the machine is off, but never a remembered self_update', function () {
+    Http::fake(['*/api/status' => Http::sequence()
+        ->push([
+            'connected' => true,
+            'providers' => [],
+            'bridge' => MessageHandler::bridgeInfoFromHello(HELLO_021 + ['self_update' => true]),
+        ])
+        ->push(['connected' => false])]);
+    $connection = Connection::create(['type' => Connection::TYPE_BRIDGE, 'name' => 'box', 'connection_key' => 'key-1']);
+    $status = app(ConnectionStatus::class);
+
+    expect($status->for($connection)['self_update'])->toBeTrue();
+
+    $offline = $status->for($connection->fresh());
+    expect($offline['bridge_version'])->toBe('0.21.0')
+        ->and($offline['self_update'])->toBeFalse();
+});
+
+it('reads a status from a serve process that reports only the flat bridge_version and self_update', function () {
+    Http::fake(['*/api/status' => Http::response([
+        'connected' => true,
+        'providers' => [],
+        'bridge_version' => '0.24.0',
+        'self_update' => true,
+    ])]);
+    $connection = Connection::create(['type' => Connection::TYPE_BRIDGE, 'name' => 'box', 'connection_key' => 'key-1']);
+
+    $status = app(ConnectionStatus::class)->for($connection);
+
+    expect($status['bridge_version'])->toBe('0.24.0')
+        ->and($status['self_update'])->toBeTrue()
+        ->and($status['capabilities'])->toBe([])
+        ->and($connection->fresh()->last_bridge['bridge_version'])->toBe('0.24.0');
+});
