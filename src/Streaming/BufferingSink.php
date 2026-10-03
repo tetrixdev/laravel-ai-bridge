@@ -215,9 +215,23 @@ final class BufferingSink
      */
     public static function publicCancelledMeta(array $meta): array
     {
-        $pending = $meta['pending_inputs'] ?? null;
+        $pending = self::cleanPendingInputs($meta['pending_inputs'] ?? null);
 
-        return is_array($pending) && $pending !== [] ? ['pending_inputs' => $pending] : [];
+        return $pending !== [] ? ['pending_inputs' => $pending] : [];
+    }
+
+    /**
+     * `pending_inputs` as a browser may see it: the non-empty string ids, in order.
+     *
+     * @return list<string>
+     */
+    private static function cleanPendingInputs(mixed $pending): array
+    {
+        if (! is_array($pending)) {
+            return [];
+        }
+
+        return array_values(array_filter($pending, static fn ($id): bool => is_string($id) && $id !== ''));
     }
 
     /**
@@ -231,6 +245,19 @@ final class BufferingSink
      */
     public static function publicDoneMeta(array $meta): array
     {
-        return array_intersect_key($meta, array_flip(self::PUBLIC_DONE_META));
+        $public = array_intersect_key($meta, array_flip(self::PUBLIC_DONE_META));
+
+        // A done frame's list comes straight from the bridge, unchecked: hold it
+        // to the same rule as a cancelled frame's.
+        if (array_key_exists('pending_inputs', $public)) {
+            $pending = self::cleanPendingInputs($public['pending_inputs']);
+            if ($pending === []) {
+                unset($public['pending_inputs']);
+            } else {
+                $public['pending_inputs'] = $pending;
+            }
+        }
+
+        return $public;
     }
 }

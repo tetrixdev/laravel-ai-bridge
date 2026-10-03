@@ -442,3 +442,10 @@ test('the direct SSE path carries turn input events exactly as the buffer does',
         ->and($sent[1])->toBe(['event' => 'user_input', 'data' => ['message_id' => 'msg-1']])
         ->and($sent[2]['data']['pending_inputs'])->toBe(['msg-2']);
 });
+
+test('pending_inputs reaches the browser as non-empty string ids only, on done and cancelled alike', function () {
+    expect(BufferingSink::publicDoneMeta(['pending_inputs' => ['m1', '', 5, ['x'], 'm2']]))->toBe(['pending_inputs' => ['m1', 'm2']])
+        ->and(BufferingSink::publicDoneMeta(['pending_inputs' => [7, '']]))->toBe([])
+        ->and(BufferingSink::publicDoneMeta(['pending_inputs' => 'm1']))->toBe([])
+        ->and(BufferingSink::publicCancelledMeta(['pending_inputs' => ['m3', null]]))->toBe(['pending_inputs' => ['m3']]);
+});

@@ -52,7 +52,15 @@ class ServeCommand extends Command
         // say so and their conversations stop saying a turn is running. The stop waits a
         // moment so the cancel frames reach the machines before the sockets close.
         if (function_exists('pcntl_signal')) {
-            $shutdown = function () use ($server, $connectionManager): void {
+            $stopping = false;
+            $shutdown = function () use ($server, $connectionManager, &$stopping): void {
+                // A second signal (Ctrl+C twice, SIGTERM after SIGINT) inside the
+                // grace period must not cut short the wait for the cancel frames.
+                if ($stopping) {
+                    return;
+                }
+                $stopping = true;
+
                 $this->newLine();
                 $this->info('Shutting down AI Bridge server...');
 

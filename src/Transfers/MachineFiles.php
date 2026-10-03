@@ -211,15 +211,20 @@ final class MachineFiles
         bool $head = false,
         string $disposition = 'attachment',
     ): Response {
+        // Built before the machine is asked for anything: makeDisposition()
+        // refuses a name with a path separator, and a name can come from a header.
+        $name = str_replace(['/', '\\'], '_', $name);
+        $contentDisposition = HeaderUtils::makeDisposition(
+            $disposition === 'inline' ? HeaderUtils::DISPOSITION_INLINE : HeaderUtils::DISPOSITION_ATTACHMENT,
+            $name,
+            self::asciiFallback($name),
+        );
+
         $file = $this->open($machine, $fileId, $range, $head);
 
         $headers = [
             'Content-Type' => $mimeType !== null && $mimeType !== '' ? $mimeType : 'application/octet-stream',
-            'Content-Disposition' => HeaderUtils::makeDisposition(
-                $disposition === 'inline' ? HeaderUtils::DISPOSITION_INLINE : HeaderUtils::DISPOSITION_ATTACHMENT,
-                $name,
-                self::asciiFallback($name),
-            ),
+            'Content-Disposition' => $contentDisposition,
             'X-Content-Type-Options' => 'nosniff',
             'Content-Security-Policy' => 'sandbox',
             'X-Accel-Buffering' => 'no',
@@ -353,7 +358,7 @@ final class MachineFiles
         $line = fgets($socket);
         if ($line === false) {
             $meta = stream_get_meta_data($socket);
-            throw new TransferRefused(504, $meta['timed_out'] ? 'timeout' : 'unreachable',
+            throw new TransferRefused($meta['timed_out'] ? 504 : 502, $meta['timed_out'] ? 'timeout' : 'unreachable',
                 $meta['timed_out'] ? 'The machine took too long to answer.' : 'The connection to the machine broke off.');
         }
         if (preg_match('#^HTTP/1\.[01] (\d{3})#', $line, $m)) {

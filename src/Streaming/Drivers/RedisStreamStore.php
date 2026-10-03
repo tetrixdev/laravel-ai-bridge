@@ -58,7 +58,8 @@ final class RedisStreamStore implements StreamStoreContract, MergesStreamMetadat
 
         // Only for a turn that exists: status is the key every reader checks
         // first, so metadata without it would be written for nobody.
-        if ($conn->get($this->key($requestId, 'status')) === null) {
+        $status = $conn->get($this->key($requestId, 'status'));
+        if ($status === null) {
             return;
         }
 
@@ -72,7 +73,9 @@ final class RedisStreamStore implements StreamStoreContract, MergesStreamMetadat
             $this->key($requestId, 'meta'),
             json_encode(array_merge(is_array($current) ? $current : [], $metadata), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
             'EX',
-            $this->streamingTtl,
+            // A late write to a finished turn (recordLatePendingInputs) must not
+            // outlive its status, which complete() shortened to $completedTtl.
+            $status === 'streaming' ? $this->streamingTtl : $this->completedTtl,
         );
     }
 

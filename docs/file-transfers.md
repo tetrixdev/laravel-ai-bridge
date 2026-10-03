@@ -18,17 +18,26 @@ public function upload(Request $request, MachineFiles $files)
     $connection = /* the chat's Connection (a bridge connection) */;
     $workingDir = /* the chat's working folder: one of the machine's workspaces */;
 
+    // Exact size, required: a missing header must not read as an empty file.
+    $length = $request->header('Content-Length');
+    if (! is_string($length) || ! ctype_digit($length)) {
+        return response()->json(['error' => 'length_required', 'message' => 'The upload has to say how large the file is.'], 411);
+    }
+
     try {
         $file = $files->upload(
             $connection,                                  // or its connection_key
             $request->getContent(true),                   // the raw body, as a stream
-            (int) $request->header('Content-Length'),     // exact size, required
+            (int) $length,
             rawurldecode((string) $request->header('X-File-Name')),
             $workingDir,
             $request->header('Content-Type'),
         );
     } catch (TransferRefused $e) {
-        return response()->json(['error' => $e->reason, 'message' => $e->getMessage()], $e->status);
+        // proxy-nginx swaps a 502 for its maintenance page (see below).
+        $status = $e->status === 502 ? 409 : $e->status;
+
+        return response()->json(['error' => $e->reason, 'message' => $e->getMessage()], $status);
     }
 
     // Keep these: fileId is the only way to ask for the file back.

@@ -410,6 +410,28 @@ it('pipes the machine\'s POST to the worker, chunked or not, and answers the mac
     'neither' => [[], ['hel', 'lo']],
 ]);
 
+it('fails a download whose framed body ends short of the announced range', function (array $headers, array $pieces) {
+    $rig = transferRig();
+    $worker = startDownload($rig);
+    $id = frame($rig, MessageTypes::FILE_READ)['id'];
+    machineSays($rig, ['type' => 'file_read_result', 'id' => $id, 'ok' => true, 'size' => 100, 'status' => 206, 'start' => 0, 'end' => 4]);
+
+    $machine = new FakeSocket();
+    $rig->hub->machineRequest($machine, 'POST', $id, $headers + ['authorization' => 'Bearer '.$rig->bridgeToken], array_shift($pieces));
+    foreach ($pieces as $p) {
+        $machine->emit('data', [$p]);
+    }
+
+    expect($worker->closed)->toBeTrue()
+        ->and($worker->ended)->toBeFalse()
+        ->and($machine->response()[0])->toBe(502)
+        ->and($rig->hub->inFlight())->toBe(0);
+})->with([
+    'content-length' => [['content-length' => '3'], ['he', 'l']],
+    'chunked' => [['transfer-encoding' => 'chunked'], ["2\r\nhe\r\n", "0\r\n\r\n"]],
+    'empty content-length' => [['content-length' => '0'], ['']],
+]);
+
 it('pauses the machine while the browser is behind', function () {
     $rig = transferRig();
     $worker = startDownload($rig);

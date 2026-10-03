@@ -195,3 +195,18 @@ test('an event after the end does not stretch a finished turn', function () {
 
     expect($store->status('req-done')['status'])->toBe('not_found');
 });
+
+test('a late metadata write to a finished turn does not outlive its status', function () {
+    $redis = new ClockedRedis;
+    $store = clocked_store($redis);
+
+    $store->start('req-late', []);
+    $store->complete('req-late', 'cancelled');
+    $store->mergeMetadata('req-late', ['pending_inputs' => ['m1']]);
+
+    expect($store->status('req-late')['metadata']['pending_inputs'] ?? null)->toBe(['m1']);
+
+    $redis->now = 1800;
+
+    expect($redis->get('ai-bridge:stream:req-late:meta'))->toBeNull();
+});

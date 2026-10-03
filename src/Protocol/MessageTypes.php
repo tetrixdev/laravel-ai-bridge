@@ -231,7 +231,6 @@ final class MessageTypes
      */
     public const TURN_INPUT_ACK = 'turn_input_ack';
 
-    /** Stream event: the entire AI response is complete. */
     /*
      * Streamed uploads and downloads (bridge 0.18+). The bytes never ride the
      * socket: the bridge GETs an upload from, and POSTs a download to, a
@@ -260,6 +259,7 @@ final class MessageTypes
     /** Bridge → server: whether it has the file, its size, and the range it will send. */
     public const FILE_READ_RESULT = 'file_read_result';
 
+    /** Stream event: the entire AI response is complete. */
     public const DONE = 'done';
 
     /** Sent by bridge: an error occurred during AI processing. */

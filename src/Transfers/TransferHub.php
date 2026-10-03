@@ -662,6 +662,14 @@ final class TransferHub
 
         $this->arm($id, 'download', self::STALL_SECONDS, 504, 'stalled', 'The machine stopped sending the file.');
 
+        // A framed body (Content-Length or chunked) that ends short of the range
+        // the machine announced is a truncated file, not a finished one.
+        if ($finished && $passed !== $d['expected']) {
+            $this->failDownload($id, 502, 'file_failed', 'The machine sent less than the range it announced.');
+
+            return;
+        }
+
         if ($finished || $passed === $d['expected'] && $d['decoder'] === null && $d['left'] === null) {
             $this->downloads[$id]['phase'] = 'done';
             $worker->end();
