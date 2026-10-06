@@ -235,7 +235,27 @@ $stream->start();
 
 ### CLI Bridge
 
-The user installs the bridge locally via `npx @tetrixdev/ai-bridge`. It connects to your app's dedicated WebSocket server and proxies AI requests through their local CLI tools (using their existing subscriptions).
+The user installs the bridge locally via `npx @tetrixdev/ai-bridge`.
+
+**Keeping it running.** The command above runs in a window and stops when the
+window closes, which is right for trying it out and wrong for anything
+ongoing — the bridge has to be running for your app to reach that machine. The
+bridge installs itself as a background service:
+
+```bash
+npx -y --ignore-scripts @tetrixdev/ai-bridge install \
+  --server wss://yourapp.com/ai-bridge/ws --token <JWT>
+```
+
+Each install is named after the server it belongs to, so a machine can hold a
+bridge for your production app and one for staging at the same time; installing
+a *different* server under an existing name is refused rather than silently
+overwriting its credentials. `ai-bridge list` shows what a machine has.
+
+This package deliberately hands out the foreground command rather than the
+install one: a setup command that puts a background service on somebody's
+computer without saying so is a surprise, and which of the two a user wants is
+your application's decision to present, not ours to assume. It connects to your app's dedicated WebSocket server and proxies AI requests through their local CLI tools (using their existing subscriptions).
 
 ```env
 AI_BRIDGE_MODE=bridge
