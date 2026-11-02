@@ -3,6 +3,17 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [0.21.1] — 2026-11-02
+
+### Fixed
+
+- **A message that is only `0` is no longer refused.** PHP's `empty()` treats the string `"0"`
+  as empty, so `POST /ai-bridge/stream` (and `/stream/sse`) answered `422 validation_error`, and
+  the serve process's `POST /api/request` answered `400 missing_fields` ("Field "message" is
+  required"), as if nothing had been sent; a chat showed the turn as stopped. Both now refuse
+  only a missing or empty message (the stream routes also a whitespace-only one, as before); a
+  JSON number `0` is accepted as the text `"0"`.
+
 ## [0.21.0] — 2026-10-16
 
 Hardens the upstream routes added in 0.19 (decision 0009).

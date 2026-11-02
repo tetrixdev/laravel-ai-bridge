@@ -1022,7 +1022,8 @@ class BridgeWebSocketServer
 
         // Only 'message' is required. 'provider' is optional routing metadata —
         // the bridge client can fall back to its configured default when omitted.
-        if (empty($message)) {
+        // Not empty(): PHP calls the string "0" empty, and "0" is a message.
+        if ($message === '') {
             $this->httpResponse($tcpConnection, 400, [
                 'error' => 'missing_fields',
                 'message' => 'Field "message" is required.',

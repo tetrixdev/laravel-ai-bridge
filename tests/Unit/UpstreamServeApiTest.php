@@ -304,3 +304,27 @@ describe('POST /api/upstream/*', function () {
             ->and($body['bridge']['mcp_upstream_auth'])->toBe(['revision' => 1]);
     });
 });
+
+// PHP's empty() calls the string "0" empty, so a person who typed only "0" was
+// refused with missing_fields as though they had sent nothing.
+describe('POST /api/request message', function () {
+    it('passes a message of "0" on to the bridge', function (string|int $message) {
+        $rig = serveRig();
+        $out = servePost($rig, '/api/request', ['message' => $message, 'conversation_id' => 'conv-1']);
+
+        expect($out->responses[0]['body']['error'] ?? null)->not->toBe('missing_fields');
+        expect(array_column($rig->sent, 'type'))->toContain(MessageTypes::AI_REQUEST);
+    })->with(['string "0"' => '0', 'number 0' => 0]);
+
+    it('still refuses a missing or empty message', function (?string $message) {
+        $rig = serveRig();
+        $body = ['conversation_id' => 'conv-1'];
+        if ($message !== null) {
+            $body['message'] = $message;
+        }
+        $out = servePost($rig, '/api/request', $body);
+
+        expect($out->responses[0]['status'])->toBe(400);
+        expect($out->responses[0]['body']['error'])->toBe('missing_fields');
+    })->with(['missing' => null, 'empty' => '']);
+});

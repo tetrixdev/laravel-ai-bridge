@@ -60,7 +60,12 @@ class StreamController extends Controller
     private function prepareRequestOptions(Request $request): array|JsonResponse
     {
         $message = $request->input('message', '');
-        if (empty(trim($message))) {
+        // Not empty(): PHP calls the string "0" empty, and "0" is a message.
+        // A JSON number (0) arrives as int; anything else that is not text is refused.
+        if (is_int($message) || is_float($message)) {
+            $message = (string) $message;
+        }
+        if (! is_string($message) || trim($message) === '') {
             return response()->json([
                 'error' => 'validation_error',
                 'message' => 'The message field is required and cannot be empty.',

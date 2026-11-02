@@ -722,6 +722,10 @@ When the server needs an AI response (triggered by a user message in the browser
 
 **`request_id`**: Unique identifier for this request. All streaming events reference it.
 
+**`message`**: The person's message, never empty. The server sends `ai_request` only for a
+non-empty message; any non-empty text is a message, `"0"` included (the serve process's
+`POST /api/request` answers `400 missing_fields` only for a missing or empty one).
+
 **`conversation_id`**: The server's conversation identifier.
 
 **`provider`**: Which CLI to use. Must match one of the available providers from the handshake. If the requested provider is unavailable, the bridge responds with an error.
