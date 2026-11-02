@@ -184,6 +184,16 @@ test('sse() returns 422 when message is missing', function () {
     expect($response->getStatusCode())->toBe(422);
 });
 
+// PHP's empty() calls the string "0" empty, so a message of only "0" was refused.
+test('sse() accepts a message that is only "0"', function (string|int $message) {
+    $controller = makeStreamController();
+
+    $request = Request::create('/ai-bridge/stream/sse', 'POST', server: ['CONTENT_TYPE' => 'application/json'], content: json_encode(['message' => $message]));
+    $response = $controller->sse($request);
+
+    expect($response)->not->toBeInstanceOf(\Illuminate\Http\JsonResponse::class);
+})->with(['string "0"' => '0', 'number 0' => 0]);
+
 test('options as JSON string is parsed correctly', function () {
     config(['ai-bridge.mode' => 'byok']);
 
