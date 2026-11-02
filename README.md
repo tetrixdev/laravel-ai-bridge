@@ -551,6 +551,10 @@ Content-Type: application/json
 }
 ```
 
+`message` is required: a missing, empty or whitespace-only one answers
+`422 {"error": "validation_error"}`. Any other text is a message, `"0"` included; a JSON
+number is taken as its text.
+
 The response is `text/event-stream` with normalized events. The first event is always
 `conversation_id`, carrying the server-generated conversation ID — capture it and send it
 back with follow-up messages to continue a multi-turn conversation:
