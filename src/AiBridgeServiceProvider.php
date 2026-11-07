@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Console\GenerateTokenCommand;
+use Tetrix\AiBridge\Console\PruneUnusedConnectionsCommand;
 use Tetrix\AiBridge\Console\ServeCommand;
 use Tetrix\AiBridge\Console\SweepTurnMarkersCommand;
 use Tetrix\AiBridge\Console\TestCommand;
@@ -164,6 +165,7 @@ class AiBridgeServiceProvider extends ServiceProvider
                 TestCommand::class,
                 ServeCommand::class,
                 SweepTurnMarkersCommand::class,
+                PruneUnusedConnectionsCommand::class,
             ]);
         }
 
