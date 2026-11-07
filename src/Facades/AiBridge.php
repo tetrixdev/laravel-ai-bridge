@@ -40,6 +40,7 @@ use Tetrix\AiBridge\WebSocket\BridgeConnectionManager;
  * @method static AiBridgeManager resolveConnectionsUsing(Closure $resolver)
  * @method static AiBridgeManager resolveAttachmentsUsing(Closure $resolver)
  * @method static AiBridgeManager storeAttachmentUsing(Closure $store)
+ * @method static AiBridgeManager protectConnectionsUsing(Closure $protector)
  *
  * @see AiBridgeManager
  */

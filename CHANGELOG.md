@@ -3,6 +3,29 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [0.22.0] — 2026-11-07
+
+### Added
+
+- **`php artisan ai-bridge:prune-unused`** deletes CLI bridge connections that no bridge ever
+  connected with, which revokes their tokens (the handshake rejects a token whose `cid` no
+  longer exists). A row is pruned when it is a bridge connection, `last_connected_at` is null,
+  it is older than `ai-bridge.connections.prune_unused_after_hours` (default 24,
+  `AI_BRIDGE_PRUNE_UNUSED_AFTER_HOURS`; `--hours` overrides), it has no conversation, the app
+  does not protect it, and the bridge server does not report it connected. `--dry-run` reports
+  only. Each deletion is logged and dispatches the new `ConnectionPruned` event. The package does
+  not schedule it; add `Schedule::command('ai-bridge:prune-unused')->daily()` to your app.
+- **`AiBridge::protectConnectionsUsing(fn (Connection $c): bool)`** keeps connections your app
+  refers to from its own tables out of the prune.
+
+### Changed
+
+- **The bridge server stamps `last_connected_at` on every handshake** (best effort; a failed
+  write never refuses the bridge). Before, only a live status poll set it, so a bridge nobody
+  looked at in the UI read as never connected.
+
+Also released on the 0.8 line as 0.8.1, for apps still on `^0.8`.
+
 ## [0.21.1] — 2026-11-02
 
 ### Fixed
