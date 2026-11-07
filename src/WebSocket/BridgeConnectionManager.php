@@ -104,7 +104,28 @@ class BridgeConnectionManager
         // Maintain reverse index for O(1) lookup by connection_id
         $this->connectionIdIndex[$connectionId] = $userId;
 
+        $this->stampConnected($userId);
+
         Event::dispatch(new BridgeConnected($userId, $connectionId, time()));
+    }
+
+    /**
+     * Record on the Connection row that a bridge completed a handshake with it
+     * (`last_connected_at`), so a row that was ever used is never pruned as unused
+     * (`ai-bridge:prune-unused`). The user id is the row's `connection_key`.
+     * Best-effort: a failed write must never refuse the bridge.
+     */
+    private function stampConnected(string $userId): void
+    {
+        try {
+            \Tetrix\AiBridge\Models\Connection::query()
+                ->where('connection_key', $userId)
+                ->update(['last_connected_at' => now()]);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('AI Bridge: could not record last_connected_at on handshake', [
+                'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**

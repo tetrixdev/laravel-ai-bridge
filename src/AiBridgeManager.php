@@ -552,6 +552,38 @@ class AiBridgeManager
     }
 
     /**
+     * Project-supplied check that a connection is still in use by the app
+     * (a pivot, a settings column...), so `ai-bridge:prune-unused` keeps it.
+     *
+     * @var Closure|null
+     */
+    private ?Closure $connectionProtector = null;
+
+    /**
+     * Register a check that keeps a connection from being pruned as unused.
+     *
+     * The closure receives a {@see \Tetrix\AiBridge\Models\Connection} and returns true
+     * when the app still refers to it. Conversations are checked by the package itself;
+     * register this for references the package cannot see, e.g. a project table storing
+     * the connection id. Without one, only conversations protect a connection.
+     */
+    public function protectConnectionsUsing(Closure $protector): static
+    {
+        $this->connectionProtector = $protector;
+
+        return $this;
+    }
+
+    /**
+     * Whether the consuming app says this connection is still in use.
+     */
+    public function connectionIsProtected(\Tetrix\AiBridge\Models\Connection $connection): bool
+    {
+        return $this->connectionProtector !== null
+            && (bool) ($this->connectionProtector)($connection);
+    }
+
+    /**
      * Get the scoped conversations query for a request.
      *
      * Secure-by-default: when the consuming app has not registered a resolver,
