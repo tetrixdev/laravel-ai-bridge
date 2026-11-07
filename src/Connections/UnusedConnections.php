@@ -54,7 +54,7 @@ class UnusedConnections
      * Prune (or, with $dryRun, only report) every unused connection.
      *
      * @return list<array{id: int, name: string|null, created_at: string|null, result: string}>
-     *         result is one of: deleted, would_delete, kept_in_use, kept_connected
+     *         result is one of: deleted, would_delete, kept_in_use, kept_connected, kept_error
      */
     public function prune(int $hours, bool $dryRun = false): array
     {
@@ -67,40 +67,52 @@ class UnusedConnections
                 'created_at' => $connection->created_at?->toIso8601String(),
             ];
 
-            if ($this->manager->connectionIsProtected($connection)) {
-                $report[] = $row + ['result' => 'kept_in_use'];
-
-                continue;
+            // One failing row (the app's protector, the status call, the delete) must not
+            // stop the run; when in doubt the row is kept, since this deletes.
+            try {
+                $report[] = $row + ['result' => $this->pruneOne($connection, $row, $hours, $dryRun)];
+            } catch (\Throwable $e) {
+                Log::warning('AI Bridge: could not prune a never-connected bridge connection; kept', [
+                    'connection_id' => $row['id'],
+                    'error' => $e->getMessage(),
+                ]);
+                $report[] = $row + ['result' => 'kept_error'];
             }
-
-            // Never trust the null stamp alone: a bridge attached before the server
-            // stamped handshakes would read as unused. A live poll also stamps it.
-            if ($this->status->isConnected($connection)) {
-                $report[] = $row + ['result' => 'kept_connected'];
-
-                continue;
-            }
-
-            if ($dryRun) {
-                $report[] = $row + ['result' => 'would_delete'];
-
-                continue;
-            }
-
-            $connection->delete();
-
-            Log::info('AI Bridge: pruned a bridge connection that was never connected', [
-                'connection_id' => $row['id'],
-                'name' => $row['name'],
-                'created_at' => $row['created_at'],
-                'unused_after_hours' => $hours,
-            ]);
-
-            Event::dispatch(new ConnectionPruned($connection));
-
-            $report[] = $row + ['result' => 'deleted'];
         }
 
         return $report;
+    }
+
+    /**
+     * @param  array{id: int, name: string|null, created_at: string|null}  $row
+     */
+    private function pruneOne(Connection $connection, array $row, int $hours, bool $dryRun): string
+    {
+        if ($this->manager->connectionIsProtected($connection)) {
+            return 'kept_in_use';
+        }
+
+        // Never trust the null stamp alone: a bridge attached before the server
+        // stamped handshakes would read as unused. A live poll also stamps it.
+        if ($this->status->isConnected($connection)) {
+            return 'kept_connected';
+        }
+
+        if ($dryRun) {
+            return 'would_delete';
+        }
+
+        $connection->delete();
+
+        Log::info('AI Bridge: pruned a bridge connection that was never connected', [
+            'connection_id' => $row['id'],
+            'name' => $row['name'],
+            'created_at' => $row['created_at'],
+            'unused_after_hours' => $hours,
+        ]);
+
+        Event::dispatch(new ConnectionPruned($connection));
+
+        return 'deleted';
     }
 }
