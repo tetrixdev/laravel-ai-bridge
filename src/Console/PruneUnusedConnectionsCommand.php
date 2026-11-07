@@ -51,7 +51,7 @@ class PruneUnusedConnectionsCommand extends Command
         $done = $dryRun
             ? ($counts['would_delete'] ?? 0).' would be deleted'
             : ($counts['deleted'] ?? 0).' deleted';
-        $kept = ($counts['kept_in_use'] ?? 0) + ($counts['kept_connected'] ?? 0);
+        $kept = ($counts['kept_in_use'] ?? 0) + ($counts['kept_connected'] ?? 0) + ($counts['kept_error'] ?? 0);
         $this->info(($dryRun ? '[dry run] ' : '')."{$done}, {$kept} kept (older than {$hours} h, never connected).");
 
         return self::SUCCESS;

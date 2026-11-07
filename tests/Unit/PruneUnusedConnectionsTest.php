@@ -90,6 +90,26 @@ it('keeps a connection the app protects', function () {
     expect(Connection::find($kept->id))->not->toBeNull();
 });
 
+it('keeps a row whose check fails and goes on with the others', function () {
+    $broken = bridgeRow('broken', 48);
+    $stale = bridgeRow('stale', 48);
+    AiBridge::protectConnectionsUsing(function (Connection $c) use ($broken) {
+        if ($c->id === $broken->id) {
+            throw new RuntimeException('app lookup failed');
+        }
+
+        return false;
+    });
+
+    $this->artisan('ai-bridge:prune-unused')
+        ->expectsOutputToContain('kept_error')
+        ->expectsOutputToContain('1 deleted, 1 kept')
+        ->assertSuccessful();
+
+    expect(Connection::find($broken->id))->not->toBeNull();
+    expect(Connection::find($stale->id))->toBeNull();
+});
+
 it('keeps a connection the bridge server reports connected right now', function () {
     $this->bridgeLive = true;
     $live = bridgeRow('live', 48);
