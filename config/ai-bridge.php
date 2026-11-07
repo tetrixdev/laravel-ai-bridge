@@ -322,4 +322,22 @@ return [
         // cancelled mid-response. The row is flagged incomplete=true.
         'persist_partial_on_error' => env('AI_BRIDGE_PERSIST_PARTIAL', true),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Connections
+    |--------------------------------------------------------------------------
+    |
+    | `php artisan ai-bridge:prune-unused` deletes CLI bridge connections that no
+    | bridge ever connected with, once they are older than this many hours; deleting
+    | the row revokes its token. The package does not schedule it: add it to your
+    | app's scheduler, e.g. Schedule::command('ai-bridge:prune-unused')->daily().
+    | Rows with a conversation, or protected by AiBridge::protectConnectionsUsing(),
+    | are kept.
+    |
+    */
+
+    'connections' => [
+        'prune_unused_after_hours' => (int) env('AI_BRIDGE_PRUNE_UNUSED_AFTER_HOURS', 24),
+    ],
 ];

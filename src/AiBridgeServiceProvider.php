@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tetrix\AiBridge\Auth\TokenManager;
 use Tetrix\AiBridge\Console\GenerateTokenCommand;
+use Tetrix\AiBridge\Console\PruneUnusedConnectionsCommand;
 use Tetrix\AiBridge\Console\ServeCommand;
 use Tetrix\AiBridge\Console\TestCommand;
 use Tetrix\AiBridge\Contracts\StreamStoreContract;
@@ -149,6 +150,7 @@ class AiBridgeServiceProvider extends ServiceProvider
                 GenerateTokenCommand::class,
                 TestCommand::class,
                 ServeCommand::class,
+                PruneUnusedConnectionsCommand::class,
             ]);
         }
     }

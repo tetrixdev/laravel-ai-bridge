@@ -625,8 +625,10 @@ app can keep its own state in step:
 |-------|------|-----------|
 | `ConnectionCreated` | a connection is registered via the HTTP API | link the new row to your owner/session model |
 | `ConnectionDeleted` | a connection is deleted via the HTTP API | run non-database cleanup tied to the connection |
+| `ConnectionPruned` | `ai-bridge:prune-unused` deleted a never-connected bridge | the same cleanup, for a removal with no request |
 
-Each event carries the `Connection` and the live `Request`.
+`ConnectionCreated` and `ConnectionDeleted` carry the `Connection` and the live `Request`;
+`ConnectionPruned` only the `Connection`.
 
 **Cascading the delete.** Give your owner pivot a cascading foreign key so its
 rows are removed automatically when a connection is deleted — no listener
@@ -919,6 +921,7 @@ directly from the web process, so a plain web server plus Redis is enough.
 | `ai-bridge:serve` | Start the dedicated WebSocket server for CLI bridge connections |
 | `ai-bridge:token` | Generate a JWT connection token for testing |
 | `ai-bridge:test` | Send a test request through the configured mode |
+| `ai-bridge:prune-unused` | Delete bridge connections no bridge ever connected with (revoking their tokens) |
 
 ### `ai-bridge:serve`
 
@@ -935,6 +938,42 @@ php artisan ai-bridge:token --user-id=42 --ttl=3600
 ```
 
 Generates a JWT token for testing bridge connections without needing a full auth flow.
+
+### `ai-bridge:prune-unused`
+
+```bash
+php artisan ai-bridge:prune-unused --dry-run    # report only
+php artisan ai-bridge:prune-unused --hours=48   # default: ai-bridge.connections.prune_unused_after_hours (24)
+```
+
+A bridge connection's token stays valid for as long as its row exists, so one that was
+registered and never used (a token copied and forgotten, or pasted somewhere it should not
+be) is a standing credential. This command deletes every **bridge** connection that
+
+- no bridge ever completed a handshake with (`last_connected_at` is null; the bridge server
+  stamps it on every handshake),
+- is older than the threshold,
+- has no conversation,
+- your app does not protect, and
+- the bridge server does not report connected right now.
+
+Deleting the row revokes its token: the handshake rejects a token whose `cid` no longer
+exists. Each deletion is logged and dispatches `ConnectionPruned`. BYOK rows are never
+pruned. The package does not schedule it; add it to your scheduler:
+
+```php
+// routes/console.php
+Schedule::command('ai-bridge:prune-unused')->daily();
+```
+
+If your app refers to connections from its own tables (a settings column, a pivot that
+means "in use" rather than "owned by"), tell the package so those are kept:
+
+```php
+AiBridge::protectConnectionsUsing(
+    fn (Connection $c) => Project::where('connection_id', $c->id)->exists()
+);
+```
 
 ### `ai-bridge:test`
 
