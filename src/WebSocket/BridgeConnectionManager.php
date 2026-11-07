@@ -122,7 +122,7 @@ class BridgeConnectionManager
                 ->where('connection_key', $userId)
                 ->update(['last_connected_at' => now()]);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::warning('AI Bridge: could not record last_connected_at on handshake', [
+            \Illuminate\Support\Facades\Log::info('AI Bridge: could not record last_connected_at on handshake', [
                 'error' => $e->getMessage(),
             ]);
         }
