@@ -71,11 +71,19 @@ final class ToolResult implements JsonSerializable
 
         $content = [];
         foreach ($parts as $i => $part) {
+            // The model's API refuses an empty text block; it would say nothing anyway.
+            if (($part['type'] ?? null) === 'text' && is_string($part['text'] ?? null) && trim($part['text']) === '') {
+                continue;
+            }
             $content[] = match ($part['type'] ?? null) {
                 'text' => self::textPart(is_string($part['text'] ?? null) ? $part['text'] : throw new InvalidArgumentException("Part {$i}: text must be a string.")),
                 'image' => self::imagePart((string) ($part['mimeType'] ?? ''), (string) ($part['data'] ?? '')),
                 default => throw new InvalidArgumentException("Part {$i}: use ToolResult::textPart() or ToolResult::imagePart()."),
             };
+        }
+
+        if ($content === []) {
+            throw new InvalidArgumentException('A ToolResult needs at least one part with something in it.');
         }
 
         $text = implode("\n", array_map(
@@ -107,8 +115,10 @@ final class ToolResult implements JsonSerializable
         if (! in_array($mimeType, self::IMAGE_MIME_TYPES, true)) {
             throw new InvalidArgumentException('An image part is one of '.implode(', ', self::IMAGE_MIME_TYPES).", not '{$mimeType}'.");
         }
-        if ($base64 === '' || strlen($base64) % 4 !== 0 || base64_decode($base64, true) === false) {
-            throw new InvalidArgumentException('An image part carries its bytes base64-encoded.');
+        // The bridge checks the same: standard alphabet, padded, no line breaks (chunk_split).
+        if ($base64 === '' || strlen($base64) % 4 !== 0 || preg_match('~^[A-Za-z0-9+/]*={0,2}$~', $base64) !== 1
+            || base64_decode($base64, true) === false) {
+            throw new InvalidArgumentException('An image part carries its bytes base64-encoded, on one line.');
         }
 
         return ['type' => 'image', 'data' => $base64, 'mimeType' => $mimeType];

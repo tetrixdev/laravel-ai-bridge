@@ -1212,8 +1212,8 @@ AiBridge::registerTool('render_map', 'Draw the current floor', [], function () u
   (it announces `tool_result_content`), with Claude Code. Current Codex and Gemini CLI read MCP
   images too, per their sources, untested here. An older bridge gets the text, each image
   described in its place (`[image: image/webp, 210 KB]`); so does the JSON encoding of the result.
-- **Types and size:** `image/png`, `image/jpeg`, `image/gif` or `image/webp`, base64-encoded; at
-  most 32 parts. A whole result over 8 MB is sent as text, ending `[images not sent: …]`. Claude
+- **Types and size:** `image/png`, `image/jpeg`, `image/gif` or `image/webp`, base64-encoded on one line; at
+  most 32 parts; empty text parts are left out. A result over 8 MB as sent is sent as text, ending `[images not sent: …]`. Claude
   scales a large image down (to about 1.15 megapixels), so send tiles rather than one huge image.
 - **What is kept:** image bytes go to the bridge only. The recorded turn, the stream store and a
   view's result carry the description. Claude Code itself keeps a copy of each image on the

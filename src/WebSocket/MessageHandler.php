@@ -1557,7 +1557,9 @@ class MessageHandler
         }
 
         $resolve['content'] = $result->content();
-        $bytes = strlen((string) json_encode($resolve, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        // Measured as BridgeWebSocketHandler sends it: plain json_encode, which escapes
+        // `/` and non-ASCII, so a text part in CJK or emoji costs up to six bytes a character.
+        $bytes = strlen((string) json_encode($resolve));
         if ($bytes > self::MAX_TOOL_CONTENT_FRAME_BYTES) {
             unset($resolve['content']);
             $resolve['result'] = $result->text."\n[images not sent: this result is ".round($bytes / 1048576, 1)

@@ -136,10 +136,36 @@ it('refuses parts that are not text or a readable image', function (Closure $mak
 })->with([
     'svg' => [fn () => ToolResult::imagePart('image/svg+xml', TINY_PNG), 'An image part is one of'],
     'not base64' => [fn () => ToolResult::imagePart('image/png', 'not base64!'), 'base64-encoded'],
+    'line breaks' => [fn () => ToolResult::imagePart('image/png', "AAAA\nAAA"), 'on one line'],
+    'only empty text' => [fn () => ToolResult::withContent([ToolResult::textPart(' ')]), 'something in it'],
     'no parts' => [fn () => ToolResult::withContent([]), 'at least one part'],
     'unknown part' => [fn () => ToolResult::withContent([['type' => 'audio']]), 'use ToolResult::textPart()'],
     'too many' => [fn () => ToolResult::withContent(array_fill(0, 33, ToolResult::textPart('x'))), 'at most 32'],
 ]);
+
+it('leaves out empty text parts', function () {
+    $result = ToolResult::withContent([ToolResult::textPart(''), ToolResult::imagePart('image/png', TINY_PNG)]);
+
+    expect($result->content())->toBe([['type' => 'image', 'data' => TINY_PNG, 'mimeType' => 'image/png']])
+        ->and($result->text)->toBe('[image: image/png, 0 KB]');
+});
+
+it('measures the frame as it is sent, escapes included', function () {
+    $registry = new ToolRegistry();
+    // 1.5 MB of base64 plus 700k CJK characters (twice: the part and result): 5.7 MB unescaped, 9.9 MB as json_encode sends it.
+    $registry->register('render_cjk', 'x', [], fn () => ToolResult::withContent([
+        ToolResult::textPart(str_repeat('地', 700_000)),
+        ToolResult::imagePart('image/png', base64_encode(str_repeat("\x01", 1_100_000))),
+    ]));
+    $rig = contentRig();
+    $rig->handler = new MessageHandler($rig->manager, app(TokenManager::class), $registry);
+    $rig->handler->registerRelayedRequest('req-c', 'user-1', (string) $rig->conversation->id);
+
+    $reply = ($rig->call)('render_cjk');
+
+    expect($reply)->not->toHaveKey('content')
+        ->and($reply['result'])->toContain('[images not sent:');
+});
 
 it('encodes as its text, never the image bytes', function () {
     $result = ToolResult::withContent([ToolResult::textPart('a'), ToolResult::imagePart('image/png', TINY_PNG)]);
