@@ -3,6 +3,18 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## Unreleased — to be released as 0.23.0
+
+### Added
+
+- **Tools can return images.** `ToolResult::withContent([ToolResult::textPart(…),
+  ToolResult::imagePart($mime, $base64)])` sends a bridge that announced the new hello field
+  `tool_result_content` (ai-bridge 0.38.0+) the parts as `tool_resolve.content`, which the
+  bridge hands to the CLI as MCP image blocks, so the model sees the picture. `result` stays the
+  text, each image described (`[image: image/webp, 210 KB]`): what an older bridge reads. Over
+  8 MB the parts are left out and the text says so. Image bytes are never kept: the recorded
+  turn, the stream store and a view's result carry the description.
+
 ## [0.22.0] — 2026-11-07
 
 ### Added
