@@ -123,18 +123,6 @@ class MessageHandler
     }
 
     /**
-     * Handle a 'hello' message — complete the protocol handshake.
-     *
-     * Authentication can happen in two ways:
-     * 1. Pre-authenticated: The dedicated BridgeWebSocketServer validates the JWT
-     *    at connection time (via ?token= URL param). The connection is already
-     *    registered in BridgeConnectionManager before the hello arrives.
-     * 2. Token in hello body: For custom WebSocket integrations where authentication
-     *    happens via the hello message instead. Falls back to this if not pre-authed.
-     *
-     * @return array<string, mixed>  Welcome or connection_error response.
-     */
-    /**
      * The capability flags a `hello` may carry that this line reads, each `true`
      * when present. Absent from a bridge that predates the feature.
      */
@@ -156,6 +144,18 @@ class MessageHandler
         return array_values(array_filter(self::HELLO_CAPABILITIES, fn (string $flag) => ($message[$flag] ?? null) === true));
     }
 
+    /**
+     * Handle a 'hello' message — complete the protocol handshake.
+     *
+     * Authentication can happen in two ways:
+     * 1. Pre-authenticated: The dedicated BridgeWebSocketServer validates the JWT
+     *    at connection time (via ?token= URL param). The connection is already
+     *    registered in BridgeConnectionManager before the hello arrives.
+     * 2. Token in hello body: For custom WebSocket integrations where authentication
+     *    happens via the hello message instead. Falls back to this if not pre-authed.
+     *
+     * @return array<string, mixed>  Welcome or connection_error response.
+     */
     private function handleHello(string $connectionId, mixed $connection, array $message): array
     {
         $protocolVersion = $message['version'] ?? $message['protocol_version'] ?? 'unknown';

@@ -32,7 +32,7 @@ class BridgeConnectionManager
     /**
      * Map of user_id => connection metadata.
      *
-     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>, token_expires_at: int|null, token_cid: int|null}>
+     * @var array<string, array{connection_id: string, connected_at: int, connection: mixed, providers: array<int, array<string, mixed>>, token_expires_at: int|null, token_cid: int|null, capabilities?: list<string>}>
      */
     private array $connections = [];
 
