@@ -620,6 +620,28 @@ After the server executes a tool, it sends the result back:
 }
 ```
 
+#### Text and images: `tool_resolve.content`
+
+A tool that returns `ToolResult::withContent([...])` answers with parts, so the model sees a picture beside the text (a rendered map). To a bridge that announced `hello.tool_result_content` (ai-bridge 0.38+), `tool_resolve` carries them as `content`, the MCP `CallToolResult` content list:
+
+```json
+{
+  "type": "tool_resolve",
+  "request_id": "req_abc123",
+  "tool_call_id": "tc_001",
+  "result": "Floor 1, 40x30 squares.\n[image: image/webp, 210 KB]",
+  "content": [
+    { "type": "text", "text": "Floor 1, 40x30 squares." },
+    { "type": "image", "mimeType": "image/webp", "data": "<base64>" }
+  ]
+}
+```
+
+- Parts: `text` (`text`) and `image` (`data`, standard base64; `mimeType`, one of `image/png`, `image/jpeg`, `image/gif`, `image/webp`), at most 32. The bridge hands them to the CLI in order; one it cannot pass on whole makes it fall back to `result`.
+- `result` is the text with each image described in its place. A bridge without the capability gets only that; `content` is never sent to it.
+- The bridge closes the connection on an incoming frame over 10 MB. A `tool_resolve` with `content` over 8 MB (`MessageHandler::MAX_TOOL_CONTENT_FRAME_BYTES`) is sent without it, and `result` ends with `[images not sent: …]`, so the model knows.
+- Image bytes go to the bridge only. The stream store and the recorded turn hold the description (`[image: image/webp, 210 KB]`); the bridge's echo of the call (`tool_result`) does too.
+
 ### Server → Bridge: `tool_error`
 
 If a tool execution fails:

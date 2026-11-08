@@ -230,6 +230,30 @@ class BridgeConnectionManager
     }
 
     /**
+     * Store the capability flags the bridge announced at `hello` (see
+     * MessageHandler::HELLO_CAPABILITIES).
+     *
+     * @param  list<string>  $capabilities
+     */
+    public function setCapabilities(int|string $userId, array $capabilities): void
+    {
+        $userId = (string) $userId;
+
+        if (isset($this->connections[$userId])) {
+            $this->connections[$userId]['capabilities'] = $capabilities;
+        }
+    }
+
+    /**
+     * Whether this user's connected bridge announced a capability at `hello`.
+     * Absent means the bridge predates it.
+     */
+    public function bridgeSupports(int|string $userId, string $capability): bool
+    {
+        return in_array($capability, $this->connections[(string) $userId]['capabilities'] ?? [], true);
+    }
+
+    /**
      * Get the provider capabilities for a user's bridge connection.
      *
      * @param  int|string  $userId  The user ID.

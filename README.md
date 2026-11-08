@@ -854,6 +854,34 @@ class LookupCharacterTool implements ToolHandler
 AiBridge::registerToolHandler(new LookupCharacterTool());
 ```
 
+### Tools that return images
+
+A tool can show the model a picture beside its text, for example a rendered map it should check.
+Return `ToolResult::withContent()` with text and image parts, in the order the model should read
+them:
+
+```php
+use Tetrix\AiBridge\Tools\ToolResult;
+
+AiBridge::registerTool('render_map', 'Draw the current floor', [], function () use ($renderer) {
+    return ToolResult::withContent([
+        ToolResult::textPart('Floor 1, 40x30 squares; grid labelled every 10.'),
+        ToolResult::imagePart('image/webp', base64_encode($renderer->webp())),
+    ]);
+});
+```
+
+- **Where the model sees it:** through a CLI bridge, `@tetrixdev/ai-bridge` 0.38.0 or newer
+  (it announces `tool_result_content`), with Claude Code. Current Codex and Gemini CLI read MCP
+  images too, per their sources, untested here. An older bridge gets the text, each image
+  described in its place (`[image: image/webp, 210 KB]`); so does the JSON encoding of the result.
+- **Types and size:** `image/png`, `image/jpeg`, `image/gif` or `image/webp`, base64-encoded on one line; at
+  most 32 parts; empty text parts are left out. A result over 8 MB as sent is sent as text, ending `[images not sent: …]`. Claude
+  scales a large image down (to about 1.15 megapixels), so send tiles rather than one huge image.
+- **What is kept:** image bytes go to the bridge only. The recorded turn and the stream store
+  carry the description. Claude Code itself keeps a copy of each image on the
+  machine (under `~/.claude/projects/`), like any other tool result.
+
 ### Listening for Tool Calls
 
 ```php
