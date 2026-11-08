@@ -190,6 +190,7 @@ If a CLI is not installed, `available` is `false` and the server won't route req
 | `file_uploads` | 0.18 | `true`: accepts `upload_offer`. See [Streamed uploads](#streamed-uploads-and-downloads). |
 | `file_downloads` | 0.18 | `true`: answers `file_read`. |
 | `app_backends` | 0.21 | `true`: understands `app_call` (Engram app backends; not used by this package). |
+| `tool_result_content` | 0.38 | `true`: takes [`tool_resolve.content`](#text-and-images-tool_resolvecontent), a tool's answer as text and image parts, handed to the CLI as MCP content blocks. Recorded as the `tool_result_content` capability. |
 | `effort_levels` | 0.32 | `string[]`, e.g. `["low","medium","high","xhigh","max"]`: the values [`options.effort`](#server--bridge-ai_request) takes, passed to Claude as `--effort <level>`. Claude conversations only: Codex and Gemini ignore `options.effort`, whatever this list says. Absent, empty or not a list: the bridge does not honour `options.effort`. Reported as `ConnectionStatus::for()['effort_levels']` (a list of strings, `[]` for none); non-string, empty and duplicate entries are dropped. |
 
 Absent means the bridge predates the field: test the capability, not the version.
@@ -1772,6 +1773,28 @@ After the server executes a tool, it sends the result back:
 }
 ```
 
+#### Text and images: `tool_resolve.content`
+
+A tool that returns `ToolResult::withContent([...])` answers with parts, so the model sees a picture beside the text (a rendered map). To a bridge that announced `hello.tool_result_content` (ai-bridge 0.38+), `tool_resolve` carries them as `content`, the MCP `CallToolResult` content list:
+
+```json
+{
+  "type": "tool_resolve",
+  "request_id": "req_abc123",
+  "tool_call_id": "tc_001",
+  "result": "Floor 1, 40x30 squares.\n[image: image/webp, 210 KB]",
+  "content": [
+    { "type": "text", "text": "Floor 1, 40x30 squares." },
+    { "type": "image", "mimeType": "image/webp", "data": "<base64>" }
+  ]
+}
+```
+
+- Parts: `text` (`text`) and `image` (`data`, standard base64; `mimeType`, one of `image/png`, `image/jpeg`, `image/gif`, `image/webp`), at most 32. The bridge hands them to the CLI in order; one it cannot pass on whole makes it fall back to `result`.
+- `result` is the text with each image described in its place. A bridge without the capability gets only that; `content` is never sent to it.
+- The bridge closes the connection on an incoming frame over 10 MB. A `tool_resolve` with `content` over 8 MB (`MessageHandler::MAX_TOOL_CONTENT_FRAME_BYTES`) is sent without it, and `result` ends with `[images not sent: …]`, so the model knows.
+- Image bytes go to the bridge only. A view's `ui.result`, the stream store and the recorded turn hold the description (`[image: image/webp, 210 KB]`); the bridge's echo of the call (`tool_result`) does too.
+
 ### Server → Bridge: `tool_error`
 
 If a tool execution fails:
@@ -2204,7 +2227,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `pong` | After receiving `ping` |
 | `ai_request` | New AI request for a conversation |
 | `cancel` | Stop a turn that is running |
-| `tool_resolve` | Returning tool execution result |
+| `tool_resolve` | Returning tool execution result (with `content`, text and image parts, to a bridge announcing `tool_result_content`) |
 | `tool_error` | Tool execution failed |
 | `local_call` | Asking the bridge to run one tool on this machine |
 | `turn_input` | A message for a turn that is still running |
@@ -2257,6 +2280,8 @@ The protocol version is exchanged during handshake (`hello.version`). The server
 - `1.x` — Stable, semantic versioning applies
 
 **Helper activity does not bump the version either.** `parent_tool_use_id` on `block_start` and `tool_result`, the `task` stream event and `done.subagent_stats` are additive: absent means what it always meant, and a consumer ignores an event it does not know.
+
+**Images in tool results do not bump the version.** `hello.tool_result_content` and `tool_resolve.content` are additive; `content` is only sent to a bridge that announced the field, and `result` keeps meaning what it always did.
 
 **Upstream MCP Apps and sign-in do not bump the version.** `hello.mcp_upstream_auth`, `welcome.upstream_oauth`, `tool_result.ui.server`, `mcp_request` / `mcp_result` and the `upstream_*` frames are additive; a server sends none of its frames to a bridge that did not announce the matching hello field, and an older bridge ignores `welcome.upstream_oauth`.
 

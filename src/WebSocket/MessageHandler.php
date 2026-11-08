@@ -577,7 +577,14 @@ class MessageHandler
      * Absent from a bridge that predates the feature, which is what makes them
      * safe to test: absence means "cannot", never "unknown but probably".
      */
-    public const HELLO_CAPABILITIES = ['turn_input', 'input_closed', 'file_uploads', 'file_downloads', 'app_backends'];
+    public const HELLO_CAPABILITIES = ['turn_input', 'input_closed', 'file_uploads', 'file_downloads', 'app_backends', 'tool_result_content'];
+
+    /**
+     * Largest `tool_resolve` carrying `content` (text and images) that is sent. The
+     * bridge takes incoming frames up to 10 MB and closes the connection on a bigger
+     * one; this leaves room for the rest of the frame and for encoding surprises.
+     */
+    public const MAX_TOOL_CONTENT_FRAME_BYTES = 8 * 1024 * 1024;
 
     /**
      * What a bridge says about itself at `hello`, reduced to checked fields.
@@ -1482,13 +1489,18 @@ class MessageHandler
                     ]);
                 }
 
-                return [
+                $resolve = [
                     'type' => MessageTypes::TOOL_RESOLVE,
                     'request_id' => $requestId,
                     'tool_call_id' => $callId,
-                    // The CLI reads text only; the rest of a ToolResult is for the view.
+                    // The CLI reads text, images described in their place; structured
+                    // content is for the view.
                     'result' => $result instanceof ToolResult ? $result->text : $result,
                 ];
+
+                return $result instanceof ToolResult && $result->content() !== null
+                    ? $this->withToolContent($resolve, $result, $requestId, $toolName)
+                    : $resolve;
             } catch (\Throwable $e) {
                 // Return a generic message to the client, log the full exception server-side.
                 Log::error('AI Bridge: tool execution failed', [
@@ -1516,6 +1528,50 @@ class MessageHandler
             'tool_call_id' => $callId,
             'error' => "Tool '{$toolName}' is not registered.",
         ];
+    }
+
+    /**
+     * Add a ToolResult's text and image parts to its `tool_resolve` as `content`.
+     *
+     * Only for a bridge that announced `hello.tool_result_content`: an older one
+     * reads `result`, the text with each image described, and the parts would only
+     * cost it bandwidth. Left out, too, when the frame would come near the bridge's
+     * 10 MB limit on incoming frames, which it answers by closing the connection and
+     * every turn on it; the model then reads that the images were not sent.
+     *
+     * @param  array<string, mixed>  $resolve
+     * @return array<string, mixed>
+     */
+    private function withToolContent(array $resolve, ToolResult $result, string $requestId, string $toolName): array
+    {
+        $userId = $this->connectionManager->getPendingRequestUserId($requestId);
+        if ($userId === null || ! $this->connectionManager->bridgeSupports($userId, 'tool_result_content')) {
+            if ($result->hasImages()) {
+                Log::info('AI Bridge: the bridge predates tool_result_content, the CLI gets the text without images', [
+                    'request_id' => $requestId,
+                    'tool' => $toolName,
+                ]);
+            }
+
+            return $resolve;
+        }
+
+        $resolve['content'] = $result->content();
+        // Measured as BridgeWebSocketHandler sends it: plain json_encode, which escapes
+        // `/` and non-ASCII, so a text part in CJK or emoji costs up to six bytes a character.
+        $bytes = strlen((string) json_encode($resolve));
+        if ($bytes > self::MAX_TOOL_CONTENT_FRAME_BYTES) {
+            unset($resolve['content']);
+            $resolve['result'] = $result->text."\n[images not sent: this result is ".round($bytes / 1048576, 1)
+                .' MB, over the '.(self::MAX_TOOL_CONTENT_FRAME_BYTES / 1048576).' MB a tool result may carry]';
+            Log::warning('AI Bridge: tool result with images too large for the bridge, sent as text', [
+                'request_id' => $requestId,
+                'tool' => $toolName,
+                'bytes' => $bytes,
+            ]);
+        }
+
+        return $resolve;
     }
 
     /**
