@@ -152,6 +152,10 @@ class BridgeStream implements StreamableProvider
                 // The thinking level (Claude's `--effort`), per turn. Absent
                 // sends nothing and the CLI runs at its own default.
                 'effort' => $this->options['effort'] ?? null,
+                // Whether thinking comes back readable (Claude's `--thinking-display`,
+                // e.g. 'summarized'), per turn. Absent sends nothing: on current Claude
+                // models every thinking block then arrives empty.
+                'thinking_display' => $this->options['thinking_display'] ?? null,
                 // Keep the turn's input open so a message can reach it while
                 // it runs (AiBridge::sendTurnInput). Opt-in per turn; the
                 // bridge confirms it with `input_open` on the ack.

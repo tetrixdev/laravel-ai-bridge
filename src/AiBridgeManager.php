@@ -70,6 +70,11 @@ class AiBridgeManager
      *   - 'effort': The thinking level for this turn (bridge mode; Claude's `--effort`, e.g.
      *     'low', 'medium', 'high', 'xhigh', 'max'). Sent as `options.effort`; absent sends
      *     nothing. Which levels a machine honours: ConnectionStatus::for()['effort_levels'].
+     *   - 'thinking_display': Whether this turn's thinking comes back readable (bridge mode;
+     *     Claude's `--thinking-display`: 'summarized' or 'omitted'). Sent as
+     *     `options.thinking_display`; absent sends nothing, and on current Claude models
+     *     (Opus 4.7+, Sonnet 5+) every thinking block is then stored empty, i.e. not at all.
+     *     Needs ai-bridge 0.39.0+ with Claude Code 2.1.310+; an older bridge ignores it.
      *   - 'api_key': Override API key for BYOK (server-side only, stripped from HTTP input by StreamController).
      *   - 'mode': ProviderMode enum instance (server-side only, stripped from HTTP input by StreamController).
      *   - 'user_id': User ID for bridge mode (server-side only, stripped from HTTP input by StreamController).
@@ -439,7 +444,7 @@ class AiBridgeManager
      *
      * @param  array<string, mixed>  $options  Extra options (rarely needed —
      *   provider/model/mode/system_prompt come from the conversation). Per-turn
-     *   ones pass through, e.g. 'effort' (see stream()). A 'model' given here is
+     *   ones pass through, e.g. 'effort' and 'thinking_display' (see stream()). A 'model' given here is
      *   for THIS turn and wins over the conversation's stored model, which it
      *   does not change; without one the stored model is used.
      */
