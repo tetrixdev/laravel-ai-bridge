@@ -745,6 +745,8 @@ non-empty message; any non-empty text is a message, `"0"` included (the serve pr
 
 **`options.effort`**: The thinking level for this turn, a string: one of the bridge's [`hello.effort_levels`](#bridge--server-hello), passed to Claude as `--effort <level>`. Claude only: Codex and Gemini ignore it (ai-bridge 0.32.0+). Per turn, optional; absent means the CLI's own default. A bridge ignores a value it does not list, and any bridge that predates the field ignores the key, so it is safe to send to every bridge. This package sends a non-empty string of at most 32 characters and drops anything else, and sends it again on a [`session_lost`](#lost-session-recovery-session_lost) re-issue.
 
+**`options.thinking_display`**: Whether this turn's thinking comes back readable, a string: `summarized` or `omitted` (the bridge's `hello.thinking_displays`), passed to Claude Code 2.1.310+ as `--thinking-display <value>` (ai-bridge 0.39.0+). Current Claude models default to `omitted`, which returns every thinking block with empty text. Claude only; per turn, optional; absent sends no flag. A bridge ignores a value it does not list, and an older bridge or CLI ignores the key. This package sends a non-empty string of at most 32 characters and drops anything else, and sends it again on a `session_lost` re-issue.
+
 **`options.accepts_input`**: `true` to keep the CLI's input open for the whole turn, so a message can reach the assistant while the turn runs. Opt-in, per turn; Claude only. See [Turn Input](#turn-input). Only `true` means yes; absent, `null` and `false` all mean the turn runs as every turn did before.
 
 #### Additive field: `working_dir`
@@ -1152,7 +1154,7 @@ If the server sends a `cli_session_id` the bridge's CLI cannot resume (the sessi
 `session_lost` is recoverable, not fatal. The server:
 
 1. Wipes the dead `cli_session_id` from the conversation.
-2. Silently re-issues the **same** `request_id` as a fresh request (`cli_session_id: null`, full `history` included). The per-turn fields the conversation does not hold are sent again as the turn first had them: `options.model`, `options.effort`, `options.accepts_input` and `bridge_prompt`.
+2. Silently re-issues the **same** `request_id` as a fresh request (`cli_session_id: null`, full `history` included). The per-turn fields the conversation does not hold are sent again as the turn first had them: `options.model`, `options.effort`, `options.thinking_display`, `options.accepts_input` and `bridge_prompt`.
 3. The browser keeps streaming on the same request — it never sees the lost session.
 
 The re-issued turn produces its own `done` carrying a new `cli_session_id`, which the server persists. Recovery is attempted once per turn; a second failure surfaces as a normal error.

@@ -1464,6 +1464,24 @@ A `model` passed the same way is also for that turn only, and wins over the
 conversation's stored `model` without changing it. The assistant row and the
 turn's stream metadata record the model the turn ran with.
 
+
+### Readable thinking (`thinking_display`)
+
+Current Claude models (Opus 4.7+, Sonnet 5+) return every thinking block empty unless
+a summary is asked for, so a recorded turn has no `thinking` block. Ask for one per
+turn with `thinking_display` (`'summarized'`, or `'omitted'`); it is not stored on the
+conversation:
+
+```php
+$requestId = AiBridge::startConversationStream($conversation, $message, ['thinking_display' => 'summarized']);
+```
+
+It reaches the bridge as `ai_request.options.thinking_display` and is sent again if the
+turn is re-issued after a lost CLI session. ai-bridge 0.39.0+ passes it to Claude Code
+2.1.310+ as `--thinking-display`; older bridges and CLIs ignore it, and so do Codex and
+Gemini. The display does not change what thinking costs; the raw chain of thought is
+never returned.
+
 ### What the turn cost
 
 `onDone` receives a second argument with everything the provider reported
