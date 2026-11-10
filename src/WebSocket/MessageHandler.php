@@ -1885,6 +1885,8 @@ class MessageHandler
                 'accepts_input' => ($carry['accepts_input'] ?? null) === true ? true : null,
                 // The turn's thinking level: a per-turn option, not on the conversation row.
                 'effort' => $carry['effort'] ?? null,
+                // Whether its thinking comes back readable: per turn too.
+                'thinking_display' => $carry['thinking_display'] ?? null,
             ],
             'bridge_prompt' => $carry['bridge_prompt'] ?? null,
             'cli_session_id' => null,

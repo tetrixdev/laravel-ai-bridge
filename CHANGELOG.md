@@ -3,6 +3,18 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased — to be released as 0.24.0]
+
+### Added
+
+- **Readable thinking per turn: the `thinking_display` option.** `stream()` and
+  `streamConversation()` take `'thinking_display' => 'summarized'` (or `'omitted'`), sent as
+  `ai_request.options.thinking_display` and kept on a `session_lost` re-issue. ai-bridge 0.39.0+
+  passes it to Claude Code 2.1.310+ as `--thinking-display`. Why: on current Claude models
+  (Opus 4.7+, Sonnet 5+) the API returns every thinking block empty unless a summary is asked
+  for, so the recorded turn had no thinking. The display does not change what thinking costs.
+  An empty, wrong-typed or oversized value is not sent; an older bridge ignores the option.
+
 ## [0.23.0] — 2026-11-08
 
 ### Added
