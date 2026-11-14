@@ -1495,8 +1495,8 @@ sent again on a re-issue after a lost CLI session; it is not stored on the conve
 isolated Claude turn ai-bridge 0.40.0+ adds exactly `WebSearch` to the allowed tools; `WebFetch`,
 the shell and the file tools stay denied. Search results are untrusted text inside the turn: tell
 the model in its prompt never to follow instructions found in them. Whether a machine honours it:
-`ConnectionStatus::supports($connection, 'web_search')`, false on an older bridge and on one whose
-operator passed `--no-web-search`. Codex and Gemini ignore it.
+`ConnectionStatus::supports($connection, 'web_search')`, true only on a bridge whose operator passed
+`--allow-web-search`; check it first, since such a bridge refuses an isolated turn that asks without it. Codex and Gemini ignore it.
 
 ### What the turn cost
 

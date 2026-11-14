@@ -12,8 +12,10 @@ tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
   anything else is dropped) and kept on a `session_lost` re-issue. ai-bridge 0.40.0+ then lets an
   isolated Claude turn use Claude Code's built-in WebSearch tool, and nothing else built in. The
   bridge's `hello.web_search: true` is recorded as the `web_search` capability
-  (`ConnectionStatus::supports($connection, 'web_search')`); it is absent on an older bridge and
-  when the operator passed `--no-web-search`.
+  (`ConnectionStatus::supports($connection, 'web_search')`); it is present only on a bridge started
+  with `--allow-web-search`. Check it before sending the option: such a bridge refuses an isolated
+  turn that asks without it (`web_search_not_allowed`), and on Codex or Gemini (`web_search_unsupported`).
+- The `cli_isolation` comment in `config/ai-bridge.php` no longer says Claude runs with `--bare`.
 
 ## [0.24.0] — 2026-11-10
 

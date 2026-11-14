@@ -77,8 +77,8 @@ class AiBridgeManager
      *     Needs ai-bridge 0.39.0+ with Claude Code 2.1.310+; an older bridge ignores it.
      *   - 'web_search': `true` lets this turn use Claude Code's built-in WebSearch tool (bridge mode,
      *     isolated Claude turns; nothing else built in). Sent as `options.web_search` only when exactly
-     *     `true`. Needs ai-bridge 0.40.0+ whose operator did not pass `--no-web-search`: check
-     *     ConnectionStatus::supports($connection, 'web_search'); an older bridge ignores it.
+     *     `true`. Needs ai-bridge 0.40.0+ started with `--allow-web-search`: check
+     *     ConnectionStatus::supports($connection, 'web_search') first (without it the turn is refused).
      *   - 'api_key': Override API key for BYOK (server-side only, stripped from HTTP input by StreamController).
      *   - 'mode': ProviderMode enum instance (server-side only, stripped from HTTP input by StreamController).
      *   - 'user_id': User ID for bridge mode (server-side only, stripped from HTTP input by StreamController).
