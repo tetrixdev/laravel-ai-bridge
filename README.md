@@ -1482,6 +1482,22 @@ turn is re-issued after a lost CLI session. ai-bridge 0.39.0+ passes it to Claud
 Gemini. The display does not change what thinking costs; the raw chain of thought is
 never returned.
 
+### Web search (`web_search`)
+
+A turn may search the web with Claude Code's built-in `WebSearch` tool:
+
+```php
+$requestId = AiBridge::startConversationStream($conversation, $message, ['web_search' => true]);
+```
+
+It reaches the bridge as `ai_request.options.web_search: true` (only `true` is sent) and is
+sent again on a re-issue after a lost CLI session; it is not stored on the conversation. On an
+isolated Claude turn ai-bridge 0.40.0+ adds exactly `WebSearch` to the allowed tools; `WebFetch`,
+the shell and the file tools stay denied. Search results are untrusted text inside the turn: tell
+the model in its prompt never to follow instructions found in them. Whether a machine honours it:
+`ConnectionStatus::supports($connection, 'web_search')`, true only on a bridge whose operator passed
+`--allow-web-search`; check it first, since such a bridge refuses an isolated turn that asks without it. Codex and Gemini ignore it.
+
 ### What the turn cost
 
 `onDone` receives a second argument with everything the provider reported

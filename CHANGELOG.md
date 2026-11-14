@@ -3,6 +3,20 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## Unreleased — to be released as 0.25.0
+
+### Added
+
+- **Web search per turn: the `web_search` option.** `stream()` and `streamConversation()` take
+  `'web_search' => true`, sent as `ai_request.options.web_search: true` (only the JSON `true`;
+  anything else is dropped) and kept on a `session_lost` re-issue. ai-bridge 0.40.0+ then lets an
+  isolated Claude turn use Claude Code's built-in WebSearch tool, and nothing else built in. The
+  bridge's `hello.web_search: true` is recorded as the `web_search` capability
+  (`ConnectionStatus::supports($connection, 'web_search')`); it is present only on a bridge started
+  with `--allow-web-search`. Check it before sending the option: such a bridge refuses an isolated
+  turn that asks without it (`web_search_not_allowed`), and on Codex or Gemini (`web_search_unsupported`).
+- The `cli_isolation` comment in `config/ai-bridge.php` no longer says Claude runs with `--bare`.
+
 ## [0.24.0] — 2026-11-10
 
 ### Added

@@ -156,6 +156,9 @@ class BridgeStream implements StreamableProvider
                 // e.g. 'summarized'), per turn. Absent sends nothing: on current Claude
                 // models every thinking block then arrives empty.
                 'thinking_display' => $this->options['thinking_display'] ?? null,
+                // Claude's built-in WebSearch on this turn (ai-bridge 0.40.0+, `hello.web_search`).
+                // Opt-in, only ever `true` on the wire; absent is today's behaviour.
+                'web_search' => ($this->options['web_search'] ?? null) === true ? true : null,
                 // Keep the turn's input open so a message can reach it while
                 // it runs (AiBridge::sendTurnInput). Opt-in per turn; the
                 // bridge confirms it with `input_open` on the ack.

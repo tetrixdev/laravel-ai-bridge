@@ -382,11 +382,13 @@ return [
         |
         |   isolated  (default, safe)
         |     - Server-declared tools are reached through the bridge's local
-        |       MCP server only. The CLI's built-in shell / edit / web tools
-        |       require approval and have no interactive approver in headless
-        |       mode, so the model effectively cannot use them.
-        |     - Claude runs with `--bare`: no hooks, no auto-memory, no
-        |       keychain reads, no CLAUDE.md auto-discovery, no plugin sync.
+        |       MCP server only. Claude's built-in shell / edit / web tools are
+        |       denied (`--permission-mode manual` in headless mode), except
+        |       WebSearch on a turn that asks with the `web_search` option, on a
+        |       bridge started with `--allow-web-search` (ai-bridge 0.40.0+).
+        |     - Other configuration on the operator's machine (user-level
+        |       instruction files, hooks) still loads: ai-bridge cannot use
+        |       `--bare`, which breaks subscription sign-in.
         |     - Other MCP servers configured on the operator's machine are
         |       ignored (`--strict-mcp-config` for Claude; equivalents where
         |       supported).

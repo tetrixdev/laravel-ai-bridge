@@ -191,6 +191,7 @@ If a CLI is not installed, `available` is `false` and the server won't route req
 | `file_downloads` | 0.18 | `true`: answers `file_read`. |
 | `app_backends` | 0.21 | `true`: understands `app_call` (Engram app backends; not used by this package). |
 | `tool_result_content` | 0.38 | `true`: takes [`tool_resolve.content`](#text-and-images-tool_resolvecontent), a tool's answer as text and image parts, handed to the CLI as MCP content blocks. Recorded as the `tool_result_content` capability. |
+| `web_search` | 0.40 | `true`: honours [`options.web_search`](#server--bridge-ai_request) on Claude turns (the built-in WebSearch tool on an isolated turn). Present only when the bridge's operator passed `--allow-web-search`; absent from older bridges. A server must not send the option without it: an isolated turn asking is refused (`web_search_not_allowed`). Recorded as the `web_search` capability (`ConnectionStatus::supports($connection, 'web_search')`). |
 | `effort_levels` | 0.32 | `string[]`, e.g. `["low","medium","high","xhigh","max"]`: the values [`options.effort`](#server--bridge-ai_request) takes, passed to Claude as `--effort <level>`. Claude conversations only: Codex and Gemini ignore `options.effort`, whatever this list says. Absent, empty or not a list: the bridge does not honour `options.effort`. Reported as `ConnectionStatus::for()['effort_levels']` (a list of strings, `[]` for none); non-string, empty and duplicate entries are dropped. |
 
 Absent means the bridge predates the field: test the capability, not the version.
@@ -747,6 +748,8 @@ non-empty message; any non-empty text is a message, `"0"` included (the serve pr
 
 **`options.thinking_display`**: Whether this turn's thinking comes back readable, a string: `summarized` or `omitted` (the bridge's `hello.thinking_displays`), passed to Claude Code 2.1.310+ as `--thinking-display <value>` (ai-bridge 0.39.0+). Current Claude models default to `omitted`, which returns every thinking block with empty text. Claude only; per turn, optional; absent sends no flag. A bridge ignores a value it does not list, and an older bridge or CLI ignores the key. This package sends a non-empty string of at most 32 characters and drops anything else, and sends it again on a `session_lost` re-issue.
 
+**`options.web_search`**: `true` lets this turn search the web with Claude Code's built-in `WebSearch` tool (ai-bridge 0.40.0+, `hello.web_search`). On an `isolated` Claude turn the bridge adds exactly `WebSearch` to the allowed tools; `WebFetch`, the shell and the file tools stay denied; `workspace` and `native` already allow every built-in, so it changes nothing there. Claude only; per turn, optional. This package sends only the JSON `true` and drops anything else (`false`, `"1"`, `1`), and sends it again on a `session_lost` re-issue. A bridge without `hello.web_search` (its operator did not pass `--allow-web-search`) refuses an isolated turn that asks; an older bridge ignores the option.
+
 **`options.accepts_input`**: `true` to keep the CLI's input open for the whole turn, so a message can reach the assistant while the turn runs. Opt-in, per turn; Claude only. See [Turn Input](#turn-input). Only `true` means yes; absent, `null` and `false` all mean the turn runs as every turn did before.
 
 #### Additive field: `working_dir`
@@ -1154,7 +1157,7 @@ If the server sends a `cli_session_id` the bridge's CLI cannot resume (the sessi
 `session_lost` is recoverable, not fatal. The server:
 
 1. Wipes the dead `cli_session_id` from the conversation.
-2. Silently re-issues the **same** `request_id` as a fresh request (`cli_session_id: null`, full `history` included). The per-turn fields the conversation does not hold are sent again as the turn first had them: `options.model`, `options.effort`, `options.thinking_display`, `options.accepts_input` and `bridge_prompt`.
+2. Silently re-issues the **same** `request_id` as a fresh request (`cli_session_id: null`, full `history` included). The per-turn fields the conversation does not hold are sent again as the turn first had them: `options.model`, `options.effort`, `options.thinking_display`, `options.web_search`, `options.accepts_input` and `bridge_prompt`.
 3. The browser keeps streaming on the same request — it never sees the lost session.
 
 The re-issued turn produces its own `done` carrying a new `cli_session_id`, which the server persists. Recovery is attempted once per turn; a second failure surfaces as a normal error.
