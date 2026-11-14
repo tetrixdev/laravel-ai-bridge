@@ -577,7 +577,7 @@ class MessageHandler
      * Absent from a bridge that predates the feature, which is what makes them
      * safe to test: absence means "cannot", never "unknown but probably".
      */
-    public const HELLO_CAPABILITIES = ['turn_input', 'input_closed', 'file_uploads', 'file_downloads', 'app_backends', 'tool_result_content'];
+    public const HELLO_CAPABILITIES = ['turn_input', 'input_closed', 'file_uploads', 'file_downloads', 'app_backends', 'tool_result_content', 'web_search'];
 
     /**
      * Largest `tool_resolve` carrying `content` (text and images) that is sent. The
@@ -1887,6 +1887,8 @@ class MessageHandler
                 'effort' => $carry['effort'] ?? null,
                 // Whether its thinking comes back readable: per turn too.
                 'thinking_display' => $carry['thinking_display'] ?? null,
+                // Whether it may search the web: per turn, and a re-issue must not quietly drop it.
+                'web_search' => ($carry['web_search'] ?? null) === true ? true : null,
             ],
             'bridge_prompt' => $carry['bridge_prompt'] ?? null,
             'cli_session_id' => null,

@@ -97,6 +97,11 @@ final class AiRequestPayload
         if (array_key_exists('thinking_display', $options) && self::normaliseEffort($options['thinking_display']) === null) {
             unset($options['thinking_display']);
         }
+        // Claude's built-in WebSearch on this turn. Like accepts_input: it widens what the turn
+        // may do, so only the JSON `true` is sent, never a stray truthy "1" from a relay body.
+        if (array_key_exists('web_search', $options) && $options['web_search'] !== true) {
+            unset($options['web_search']);
+        }
         if (! empty($options)) {
             $payload['options'] = $options;
         }
@@ -234,7 +239,7 @@ final class AiRequestPayload
      * `model` is carried because a turn may name its own (a per-turn switch that is not
      * stored on the conversation); the re-issue sends the model the turn was sent with.
      *
-     * @return array{bridge_prompt?: array<string, string>, accepts_input?: true, effort?: string, thinking_display?: string, model?: string}
+     * @return array{bridge_prompt?: array<string, string>, accepts_input?: true, effort?: string, thinking_display?: string, web_search?: true, model?: string}
      */
     public static function reissueCarry(array $payload): array
     {
@@ -246,6 +251,7 @@ final class AiRequestPayload
             'accepts_input' => ($payload['options']['accepts_input'] ?? null) === true ? true : null,
             'effort' => self::normaliseEffort($payload['options']['effort'] ?? null),
             'thinking_display' => self::normaliseEffort($payload['options']['thinking_display'] ?? null),
+            'web_search' => ($payload['options']['web_search'] ?? null) === true ? true : null,
         ], static fn ($v) => $v !== null);
     }
 
