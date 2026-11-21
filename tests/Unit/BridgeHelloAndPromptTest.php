@@ -68,6 +68,7 @@ it('records bridge_version, attachment_limits and capabilities from a pre-authen
             'effort_levels' => [],
             'mcp_apps' => null,
             'mcp_upstream_auth' => null,
+            'machine_secrets' => null,
         ])
         ->and($rig->manager->bridgeSupports('user-1', 'file_uploads'))->toBeTrue();
 });
@@ -103,6 +104,7 @@ it('reads an old bridge hello as no capabilities, and drops fields of the wrong 
         'effort_levels' => [],
         'mcp_apps' => null,
         'mcp_upstream_auth' => null,
+        'machine_secrets' => null,
     ]);
 });
 
@@ -168,9 +170,17 @@ it('refuses a bridge_prompt the bridge would refuse', function (mixed $spec) {
     'text with default' => [['text' => 'x']],
     'append without text' => [['mode' => 'append']],
     'replace with empty text' => [['mode' => 'replace', 'text' => '']],
-    'too long' => [['mode' => 'append', 'text' => str_repeat('a', 8193)]],
+    'too long' => [['mode' => 'append', 'text' => str_repeat('a', 16385)]],
     'not an object' => [42],
 ])->throws(InvalidArgumentException::class);
+
+it('accepts bridge_prompt text up to 16 KB (D10065)', function () {
+    $payload = AiRequestPayload::build(['request_id' => 'r', 'message' => 'm', 'bridge_prompt' => ['mode' => 'append', 'text' => str_repeat('a', 16384)]]);
+
+    expect(strlen($payload['bridge_prompt']['text']))->toBe(16384)
+        ->and(AiRequestPayload::MAX_BRIDGE_PROMPT_BYTES)->toBe(16384)
+        ->and(AiRequestPayload::LEGACY_BRIDGE_PROMPT_BYTES)->toBe(8192);
+});
 
 it('carries bridge_prompt across the relay', function () {
     $payload = AiRequestPayload::fromRelayBody([
