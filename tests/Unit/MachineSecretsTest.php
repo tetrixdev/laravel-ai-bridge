@@ -60,7 +60,7 @@ function secretRig(float $timeout = 5.0): object
 
     $rig->manager->addConnection('key-1', 'conn-1', 'socket-1');
     $rig->handler->handleMessage('conn-1', null, json_encode(['type' => 'hello', 'version' => '0.1', 'providers' => [],
-        'machine_secrets' => ['revision' => 1]]));
+        'machine_secrets' => ['revision' => 2]]));
     $rig->manager->addConnection('key-2', 'conn-2', 'socket-2');
     $rig->handler->handleMessage('conn-2', null, json_encode(['type' => 'hello', 'version' => '0.1', 'providers' => [],
         'machine_secrets' => ['revision' => 1]]));
@@ -158,6 +158,38 @@ describe('POST /api/secrets', function () {
         expect($rig->sent)->toBe([]);
     });
 
+    it('sends replace: true and passes replaced back', function () {
+        $rig = secretRig();
+        $rig->answer = fn (array $frame) => ($rig->from)('conn-1', ['type' => MessageTypes::SECRET_RESULT, 'id' => $frame['id'], 'ok' => true, 'replaced' => true]);
+
+        $out = secretPost($rig, ['op' => 'put', 'name' => 'mailtrap', 'value' => SECRET_VALUE, 'replace' => true]);
+
+        expect($rig->sent[0]['replace'])->toBeTrue()
+            ->and($out->responses)->toBe([['status' => 200, 'body' => ['ok' => true, 'replaced' => true]]]);
+    });
+
+    it('never asks a revision-1 bridge to replace, and refuses a non-boolean replace', function () {
+        $rig = secretRig();
+
+        $old = secretPost($rig, ['op' => 'put', 'name' => 'mailtrap', 'value' => SECRET_VALUE, 'replace' => true], 'key-2');
+        $loose = secretPost($rig, ['op' => 'put', 'name' => 'mailtrap', 'value' => SECRET_VALUE, 'replace' => 'yes']);
+
+        expect($old->responses[0]['status'])->toBe(409)
+            ->and($old->responses[0]['body']['code'])->toBe('replace_unsupported')
+            ->and($loose->responses[0]['status'])->toBe(400)
+            ->and($rig->sent)->toBe([]);
+    });
+
+    it('says a write that times out has an unknown result', function () {
+        $rig = secretRig(0.01);
+
+        $out = secretPost($rig, ['op' => 'remove', 'name' => 'mailtrap']);
+        $rig->loop->run();
+
+        expect($out->responses[0]['status'])->toBe(504)
+            ->and($out->responses[0]['body']['error'])->toContain('result is unknown');
+    });
+
     it('refuses a bridge that did not announce machine_secrets, and one not connected', function () {
         $rig = secretRig();
 
@@ -202,16 +234,37 @@ describe('AiBridge::secrets()', function () {
     }
 
     it('posts to the serve process and never logs the value', function () {
-        Http::fake(['*/api/secrets' => Http::response(['ok' => true])]);
+        Http::fake(['*/api/secrets' => fn ($request) => Http::response($request['op'] === 'list' ? ['ok' => true, 'secrets' => []] : ['ok' => true, 'replaced' => false])]);
         Log::spy();
         $connection = bridgeConnection();
 
         $answer = app(MachineSecrets::class)->put($connection, 'mailtrap', SECRET_VALUE, 'SMTP');
 
-        expect($answer)->toBe(['ok' => true]);
+        expect($answer)->toBe(['ok' => true, 'replaced' => false]);
         Http::assertSent(fn ($request) => str_ends_with($request->url(), '/api/secrets')
-            && $request['op'] === 'put' && $request['name'] === 'mailtrap' && $request['value'] === SECRET_VALUE);
+            && $request['op'] === 'put' && $request['name'] === 'mailtrap' && $request['value'] === SECRET_VALUE
+            && ! isset($request['replace']));
         Log::shouldNotHaveReceived('info');
+    });
+
+    it('refuses an existing name without replace, before sending the value', function () {
+        Http::fake(['*/api/secrets' => Http::response(['ok' => true, 'secrets' => [['name' => 'mailtrap']]])]);
+
+        $answer = app(MachineSecrets::class)->put(bridgeConnection(), 'mailtrap', SECRET_VALUE);
+
+        expect($answer['code'])->toBe('exists');
+        Http::assertSentCount(1);
+        Http::assertNotSent(fn ($request) => $request['op'] === 'put');
+    });
+
+    it('replaces only when asked, without the list check', function () {
+        Http::fake(['*/api/secrets' => Http::response(['ok' => true, 'replaced' => true])]);
+
+        $answer = app(MachineSecrets::class)->put(bridgeConnection(), 'mailtrap', SECRET_VALUE, replace: true);
+
+        expect($answer)->toBe(['ok' => true, 'replaced' => true]);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request) => $request['op'] === 'put' && $request['replace'] === true);
     });
 
     it('refuses a bad name before anything is sent', function () {
@@ -226,9 +279,10 @@ describe('AiBridge::secrets()', function () {
         Http::fake(fn () => throw new RuntimeException('connection refused while posting '.SECRET_VALUE));
         Log::spy();
 
-        $answer = app(MachineSecrets::class)->put(bridgeConnection(), 'mailtrap', SECRET_VALUE);
+        $answer = app(MachineSecrets::class)->put(bridgeConnection(), 'mailtrap', SECRET_VALUE, replace: true);
 
-        expect($answer['code'])->toBe('unreachable');
+        expect($answer['code'])->toBe('unreachable')
+            ->and($answer['error'])->toContain('result is unknown');
         Log::shouldHaveReceived('info')->withArgs(fn ($message, $context) => ! str_contains(json_encode($context), SECRET_VALUE));
     });
 

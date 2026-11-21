@@ -2061,15 +2061,23 @@ carries the request.
 
 ### Handshake
 
-A bridge that can do this sends `"machine_secrets": {"revision": 1}` in its `hello`. The server
+A bridge that can do this sends `"machine_secrets": {"revision": 2}` in its `hello`. The server
 sends none of the frames below to a bridge without it: the serve process answers the app 409
 `machine_secrets_unsupported`, so the app can say the bridge needs updating.
+
+**Revision 2: a replace is always deliberate.** `secret_put` refuses a name the machine already has
+with `exists` unless it carries `replace: true`, and a successful put answers `replaced`. A
+revision-1 bridge replaced silently: the serve process never sends it `replace: true` (409
+`replace_unsupported`; remove, then add), and `AiBridge::secrets()->put()` without `replace`
+checks the list first and refuses an existing name with `exists` itself, so the rule holds on
+either revision.
 
 ### Server → Bridge: `secret_list`, `secret_put`, `secret_describe`, `secret_remove`
 
 ```json
 {"type": "secret_list", "id": "sec-4f1c…"}
 {"type": "secret_put", "id": "sec-…", "name": "mailtrap", "description": "SMTP password", "value": "…"}
+{"type": "secret_put", "id": "sec-…", "name": "mailtrap", "value": "…", "replace": true}
 {"type": "secret_describe", "id": "sec-…", "name": "mailtrap", "description": "SMTP password, Iris dev"}
 {"type": "secret_remove", "id": "sec-…", "name": "mailtrap"}
 ```
@@ -2077,6 +2085,8 @@ sends none of the frames below to a bridge without it: the serve process answers
 - `name` is 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`; the
   bridge checks it again before it touches a file.
 - `description` is text of at most 1000 characters (optional on `secret_put`).
+- `replace` (only on `secret_put`, revision 2) is `true` to overwrite an existing secret; absent
+  or `false`, an existing name is refused with `exists`.
 - `value` (only on `secret_put`) is at most 64 KiB. The bridge writes it to a new file only its
   owner can read and moves it into the store; it never logs it, never echoes it in an error, and
   never keeps it after the request.
@@ -2087,22 +2097,32 @@ Exactly one per request, with the request's `id`:
 
 ```json
 {"type": "secret_result", "id": "sec-4f1c…", "ok": true, "secrets": [{"name": "mailtrap", "description": "SMTP password", "updated_at": "2026-11-21T10:12:00Z"}]}
+{"type": "secret_result", "id": "sec-…", "ok": true, "replaced": false}
 {"type": "secret_result", "id": "sec-…", "ok": false, "code": "no_secret_tool", "error": "The secret command is not installed on this machine."}
 ```
 
-`secrets` only answers `secret_list`. Codes: `no_secret_tool`, `not_found`, `invalid_name`,
+`secrets` only answers `secret_list`; `replaced` only a successful `secret_put` (revision 2). Codes: `no_secret_tool`, `not_found`, `invalid_name`,
 `invalid_request`, `exists`, `failed` (anything else is read as `failed`). A row in `secrets` is
 reduced to `name`, `description` and `updated_at`; anything else in it is dropped. A result is only
 matched to a request of the same machine.
 
 ### The serve process's internal API
 
-`POST /api/secrets` with body `{op: list|put|describe|remove, name?, description?, value?}`, an
-internal relay token for the connection, holds the response open until `secret_result`, 404
-`not_connected`, or 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds (default 15).
-From PHP: `AiBridge::secrets()->list($connection)`, `->put($connection, $name, $value, $description)`,
-`->describe(...)`, `->remove(...)`; each answers `{ok, secrets?, code?, error?}` and never throws for
-a machine that is off. There is deliberately no way to read a value back.
+`POST /api/secrets` with body `{op: list|put|describe|remove, name?, description?, value?, replace?}`,
+an internal relay token for the connection, holds the response open until `secret_result`, 404
+`not_connected`, 409 `replace_unsupported` (a replace to a revision-1 bridge), or 504 `timeout`
+after `ai-bridge.machine_secrets.timeout` seconds (default 15).
+
+**A timeout on a write means "result unknown", not "failed".** A `secret_put`, `secret_describe`
+or `secret_remove` that times out may already have been done by the machine: the frame was sent
+and cannot be taken back. The answer says so ("the result is unknown: list the secrets again
+before retrying"); a caller lists the secrets before it retries or tells the person it failed.
+The same holds for `unreachable` on a write.
+
+From PHP: `AiBridge::secrets()->list($connection)`,
+`->put($connection, $name, $value, $description, replace: false)`, `->describe(...)`,
+`->remove(...)`; each answers `{ok, secrets?, replaced?, code?, error?}` and never throws for a
+machine that is off. There is deliberately no way to read a value back.
 
 ---
 

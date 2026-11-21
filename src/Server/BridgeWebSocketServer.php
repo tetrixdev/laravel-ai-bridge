@@ -1318,10 +1318,12 @@ class BridgeWebSocketServer
     /**
      * POST /api/secrets — Manage the secret store on the user's machine.
      *
-     * Body `{op: list|put|describe|remove, name?, description?, value?}`. Sends the matching
-     * `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
-     * (`{ok, secrets?, code?, error?}`), 409 `machine_secrets_unsupported` for a bridge that
-     * did not announce it, or 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds.
+     * Body `{op: list|put|describe|remove, name?, description?, value?, replace?}`. Sends the
+     * matching `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
+     * (`{ok, secrets?, replaced?, code?, error?}`), 409 `machine_secrets_unsupported` for a bridge
+     * that did not announce it, 409 `replace_unsupported` for a replace to a bridge older than
+     * revision 2, or 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds (for a write:
+     * result unknown, list again before retrying).
      *
      * The value of a `put` is checked for size and type only. It is never logged, never part
      * of an answer, and lives only in this request and the frame written to the bridge.
@@ -1342,13 +1344,30 @@ class BridgeWebSocketServer
             return;
         }
 
+        // Revision 2 refuses an existing name unless `replace` is true; an older bridge would
+        // overwrite silently, so it is never asked to replace (remove, then add, instead).
+        $revision = $this->connectionManager->reachableBridgeInfo($userId)['machine_secrets']['revision'] ?? 1;
+        if (($frame['replace'] ?? false) === true && (! is_int($revision) || $revision < 2)) {
+            $this->httpResponse($tcpConnection, 409, [
+                'ok' => false,
+                'code' => 'replace_unsupported',
+                'error' => 'Replacing a secret needs a newer bridge on this machine; remove it first, then add it again.',
+            ]);
+
+            return;
+        }
+
         $id = 'sec-'.bin2hex(random_bytes(8));
         $frame['id'] = $id;
 
+        // A put, describe or remove that times out may still have been done by the machine:
+        // the frame is already on its way and cannot be taken back.
         $this->awaitBridge($tcpConnection, $userId, \Tetrix\AiBridge\Secrets\SecretFrames::exchangeKey($userId, $id), $frame, (float) config('ai-bridge.machine_secrets.timeout', 15), [
             'ok' => false,
             'code' => 'timeout',
-            'error' => 'The machine did not answer in time.',
+            'error' => $frame['type'] === 'secret_list'
+                ? 'The machine did not answer in time.'
+                : 'The machine did not answer in time, so the result is unknown: list the secrets again before retrying.',
         ], 'machine_secrets');
     }
 

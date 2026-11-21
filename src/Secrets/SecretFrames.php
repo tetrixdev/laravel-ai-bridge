@@ -75,6 +75,9 @@ class SecretFrames
         if (array_key_exists('secrets', $message)) {
             $answer['secrets'] = self::secretsOf($message['secrets']);
         }
+        if (is_bool($message['replaced'] ?? null)) {
+            $answer['replaced'] = $message['replaced'];
+        }
 
         return $answer;
     }

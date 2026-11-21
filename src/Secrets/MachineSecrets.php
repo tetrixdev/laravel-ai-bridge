@@ -16,6 +16,12 @@ use Tetrix\AiBridge\Models\Connection;
  *
  *     AiBridge::secrets()->list($connection);           // names, descriptions, dates
  *     AiBridge::secrets()->put($connection, 'mailtrap', $value, 'Mailtrap SMTP password');
+ *     AiBridge::secrets()->put($connection, 'mailtrap', $value, replace: true);   // deliberate overwrite
+ *
+ * A put never overwrites by accident: without `replace: true` a name the machine already has is
+ * refused with `exists` (checked here against the list first, so an older bridge that would
+ * replace silently is held to the same rule), and with it a bridge older than
+ * machine_secrets revision 2 is refused with `replace_unsupported` (remove, then add).
  *
  * Every method answers `{ok: true, ...}` or `{ok: false, code, error}`, never throws for a
  * machine that is off, too old (`machine_secrets_unsupported`) or slow (`timeout`). A secret's
@@ -41,10 +47,36 @@ class MachineSecrets
         return $answer;
     }
 
-    /** @return array{ok: bool, code?: string, error?: string} */
-    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null): array
+    /** @return array{ok: bool, replaced?: bool, code?: string, error?: string} */
+    public function put(Connection $connection, string $name, #[\SensitiveParameter] string $value, ?string $description = null, bool $replace = false): array
     {
-        return $this->relay($connection, ['op' => 'put', 'name' => $name, 'value' => $value] + ($description === null ? [] : ['description' => $description]));
+        $body = ['op' => 'put', 'name' => $name, 'value' => $value]
+            + ($description === null ? [] : ['description' => $description])
+            + ($replace ? ['replace' => true] : []);
+
+        $refused = self::frameOf($body);
+        if (is_string($refused)) {
+            return ['ok' => false, 'code' => 'invalid_request', 'error' => $refused];
+        }
+
+        if (! $replace) {
+            $listed = $this->list($connection);
+            if (($listed['ok'] ?? false) !== true) {
+                return $listed;
+            }
+            foreach ($listed['secrets'] ?? [] as $row) {
+                if ($row['name'] === $name) {
+                    return ['ok' => false, 'code' => 'exists', 'error' => "A secret named {$name} already exists on this machine."];
+                }
+            }
+        }
+
+        $answer = $this->relay($connection, $body);
+        if (($answer['ok'] ?? false) === true) {
+            $answer['replaced'] = $answer['replaced'] ?? $replace;
+        }
+
+        return $answer;
     }
 
     /** @return array{ok: bool, code?: string, error?: string} */
@@ -100,6 +132,14 @@ class MachineSecrets
                 return 'A put carries a non-empty "value" of at most '.SecretName::MAX_VALUE_BYTES.' bytes.';
             }
             $frame['value'] = $value;
+
+            $replace = $body['replace'] ?? false;
+            if (! is_bool($replace)) {
+                return '"replace" is true or false.';
+            }
+            if ($replace) {
+                $frame['replace'] = true;
+            }
         }
 
         return $frame;
@@ -135,14 +175,18 @@ class MachineSecrets
                 'error' => $e::class,
             ]);
 
-            return ['ok' => false, 'code' => 'unreachable', 'error' => 'The bridge server could not be reached.'];
+            return ['ok' => false, 'code' => 'unreachable', 'error' => $body['op'] === 'list'
+                ? 'The bridge server could not be reached.'
+                : 'The bridge server could not be reached, so the result is unknown: list the secrets again before retrying.'];
         }
 
         $json = $response->json();
         $json = is_array($json) ? $json : [];
 
         if ($response->successful() && ($json['ok'] ?? null) === true) {
-            return ['ok' => true] + (isset($json['secrets']) ? ['secrets' => $json['secrets']] : []);
+            return ['ok' => true]
+                + (isset($json['secrets']) ? ['secrets' => $json['secrets']] : [])
+                + (is_bool($json['replaced'] ?? null) ? ['replaced' => $json['replaced']] : []);
         }
 
         return [
