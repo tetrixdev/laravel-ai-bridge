@@ -450,6 +450,19 @@ class MessageHandler
                 }
             }
 
+            // Allowances counted in calls (the GitHub API's hourly budget) also say how many are
+            // left and of how many, and whose account it is. Whole, non-negative numbers only;
+            // the login only when it is plain text. Absent rather than null otherwise.
+            foreach (['remaining', 'limit'] as $field) {
+                if (is_int($limit[$field] ?? null) && $limit[$field] >= 0) {
+                    $row[$field] = $limit[$field];
+                }
+            }
+
+            if (is_string($limit['account'] ?? null) && preg_match('/^[A-Za-z0-9_-]{1,100}\z/', $limit['account']) === 1) {
+                $row['account'] = $limit['account'];
+            }
+
             $limits[] = $row;
         }
 

@@ -3,6 +3,19 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased] — to be released as 0.27.2
+
+### Added
+
+- **Usage answers for allowances counted in calls.** A `usage_result` row now keeps
+  `remaining` and `limit` (whole numbers, 0 or more) and `account` (1 to 100 letters, digits,
+  `_` or `-`); anything else is dropped from the row, as before. This carries the hourly GitHub
+  API allowances that ai-bridge reports for `AiBridge::usage($connection, 'github')`
+  (`kind` `github_core` and `github_graphql`). Older bridges send none of these fields, so their
+  answers are unchanged.
+
+No protocol version bump: the fields are optional and additive.
+
 ## [0.27.1] — 2026-11-22
 
 ### Added

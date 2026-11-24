@@ -334,6 +334,9 @@ class ConnectionStatus
      * `last_posture`. That absence is deliberate.
      *
      * @return array{ok: bool, limits?: array<int, array<string, mixed>>, reason?: string, retry_after?: int}
+     *                                 Limits carry `label` and `percent`, plus `resets_at`,
+     *                                 `kind`, `group`, and `remaining`/`limit`/`account` for
+     *                                 an allowance counted in calls (provider `github`).
      *                                 `reason` is `not_connected`, `unsupported`,
      *                                 `no_credential`, `rate_limited` (with `retry_after`
      *                                 seconds when the machine was told) or `failed`.

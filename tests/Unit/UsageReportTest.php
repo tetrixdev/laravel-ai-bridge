@@ -114,6 +114,36 @@ it('passes a window kind it has never met straight through', function () {
     expect($answer['limits'][0]['kind'])->toBe('lunar_cycle');
 });
 
+it('passes calls left, the window size and the account through for an allowance counted in calls', function () {
+    $manager = usageManager();
+
+    $answer = deliverUsage($manager, [
+        'ok' => true,
+        'limits' => [['label' => 'GitHub API', 'percent' => 85, 'kind' => 'github_core', 'remaining' => 750, 'limit' => 5000, 'resets_at' => '2026-11-24T10:31:25.000Z', 'account' => 'some-login']],
+    ]);
+
+    expect($answer['limits'][0])->toBe([
+        'label' => 'GitHub API',
+        'percent' => 85,
+        'resets_at' => '2026-11-24T10:31:25.000Z',
+        'kind' => 'github_core',
+        'remaining' => 750,
+        'limit' => 5000,
+        'account' => 'some-login',
+    ]);
+});
+
+it('drops a malformed count or account rather than passing it on', function () {
+    $manager = usageManager();
+
+    $answer = deliverUsage($manager, [
+        'ok' => true,
+        'limits' => [['label' => 'GitHub API', 'percent' => 85, 'remaining' => '750', 'limit' => -1, 'account' => "some-login\n"]],
+    ]);
+
+    expect($answer['limits'][0])->toBe(['label' => 'GitHub API', 'percent' => 85]);
+});
+
 it('clamps a percentage and drops a row with no label or no figure', function () {
     $manager = usageManager();
 

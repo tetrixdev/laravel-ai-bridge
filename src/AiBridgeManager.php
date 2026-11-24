@@ -225,7 +225,8 @@ class AiBridgeManager
      * @return array{ok: bool, limits?: array<int, array<string, mixed>>, reason?: string, retry_after?: int}
      *                                 Each limit carries `label` and `percent`, plus
      *                                 `resets_at`, `kind` and `group` when the CLI reports
-     *                                 them. On failure, `reason` is `not_connected`,
+     *                                 them, and `remaining`, `limit` and `account` for an
+     *                                 allowance counted in calls (provider `github`). On failure, `reason` is `not_connected`,
      *                                 `unsupported`, `no_credential`, `rate_limited` (with
      *                                 `retry_after` seconds when known) or `failed`.
      */

@@ -684,7 +684,9 @@ One request, one reply, correlated by `id`, exactly like `local_call` / `local_r
 ```
 
 - **`id`** — echoed back on the reply.
-- **`provider`** — optional, the CLI to report on, by the name it is detected under. **Send it
+- **`provider`** — optional, the CLI to report on, by the name it is detected under, or
+  `github` for the hourly GitHub API allowances of the account `gh` on the machine is signed in
+  as (ai-bridge with GitHub usage; an older bridge answers `unsupported`). **Send it
   whenever you know.** A machine can have several CLIs installed and only the server knows
   which one is answering a given conversation. Without it the bridge answers only when the
   choice is unambiguous (exactly one CLI installed) and otherwise replies `unsupported`,
@@ -729,6 +731,18 @@ know the frame, and the server would have to wait out a timeout to find out whic
 - **`resets_at`** — ISO 8601 instant the allowance refills. Absent when the CLI does not say.
 - **`kind`** / **`group`** — the CLI's own identifiers, passed through untranslated, for a
   consumer that wants to group or filter. Neither is required to render a row.
+- **`remaining`** / **`limit`** — only on an allowance counted in calls (provider `github`):
+  calls left in the window and the window's size (`kind` `github_core` for the REST API,
+  `github_graphql` for GraphQL, where they are points). Passed on only as whole numbers of 0 or
+  more; anything else is dropped from the row.
+- **`account`** — only with provider `github`: the GitHub login the allowance belongs to. Passed
+  on only when it is 1 to 100 letters, digits, `_` or `-`; anything else is dropped from the row.
+  Absent when the bridge cannot name the account (a token in its environment, another host).
+
+```json
+{ "label": "GitHub API", "kind": "github_core", "percent": 85, "remaining": 750, "limit": 5000,
+  "resets_at": "2026-11-24T10:31:25.000Z", "account": "some-login" }
+```
 
 **`reason`** is present when not `ok`:
 
