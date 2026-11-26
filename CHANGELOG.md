@@ -3,6 +3,47 @@
 Release notes for earlier versions are on the GitHub releases page of
 tetrixdev/laravel-ai-bridge. This file starts with 0.16.0-RC1.
 
+## [Unreleased] — to be released as 0.28.0
+
+### Added
+
+- **Secrets with an end (`machine_secrets` revision 3).** A secret on the machine may carry an
+  end: `ends_at` (ISO 8601 UTC, second precision, `Z`) and `end_kind` (`expire`: the value is
+  removed and the entry stays listed with `expired_at`; `delete`: value and entry removed). New
+  frame `secret_set_end` (`ends_at: null` removes the end); `secret_put` takes `ends_at` (a time
+  with `end_kind`, or `null` for no end), optional on a first put and **required on a replace**
+  (without the key: `end_required`), so a rotated key never silently loses its end (decision
+  0012); a list answer's rows carry `ends_at`, `end_kind` and `expired_at`, and the answer carries
+  `ended` (`{name, kind, ended_at}`); an end moment in a list answer that is not a real wire-form
+  UTC time becomes null. New machine codes `invalid_end`, `end_required` and `ended`.
+  `SecretFrames::ENDS_REVISION = 3` (`MIN_REVISION` stays 2).
+- `AiBridge::secrets()->put()` takes `?DateTimeInterface $endsAt`, `?string $endKind`
+  (`expire` by default when an end is given) and `bool $noEnd`; with `replace: true` it needs
+  `endsAt` or `noEnd: true` (neither: `end_required`, both: `invalid_end`, checked before anything
+  is sent). An end is sent in UTC, sub-seconds rounded up to the next whole second; new `setEnd()`
+  and `supportsEnds()`; `list()` also answers `ended`. An end must be in the future and at most
+  10 years ahead (`invalid_end`, checked before anything is sent).
+- `POST /api/secrets` accepts op `set_end`, and `ends_at`/`end_kind` on a put. A kind without an
+  end is refused `invalid_end` on both (`set_end` with `ends_at: null` takes no `end_kind`); a
+  put with `replace: true` and no `ends_at` key is refused 400 `end_required`.
+- `MachineSecretChanged` gains `endsAt` and `endKind` (optional constructor arguments, null by
+  default): the end asked for on a put or set_end, null when it leaves the secret without one.
+
+### Changed
+
+- **An end never reaches a bridge that would ignore it.** A put with an end or any `set_end` to a
+  bridge below revision 3 is answered `ends_unsupported` with nothing sent: 409 from the serve
+  process (also for a frame held through a short drop when an older bridge comes back), and from
+  `AiBridge::secrets()` directly when the connection's live status already shows revision 2. A
+  set_end follows the unknown-outcome rules of the other writes (`result_unknown: true`), fires
+  `MachineSecretChanged` (operation `set_end`) and logs one line with `ends_at` and `end_kind`,
+  never a value. Every put and set_end now logs `ends_at` and `end_kind`, null when it sets no
+  end, so a replace with no end is visible in the log.
+- **A replace states its end.** `put(..., replace: true)` without `endsAt` or `noEnd: true` is
+  refused `end_required` (it used to be sent and overwrite the value); a revision 2 bridge is sent
+  `ends_at: null` for `noEnd`, which it ignores. An app that replaces secrets must pass one of
+  the two. Additive wire fields; protocol stays 0.1.
+
 ## [0.27.1] — 2026-11-22
 
 ### Added

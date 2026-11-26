@@ -308,10 +308,10 @@ final class MessageTypes
      * person; a value only ever travels in, on `secret_put`. See Secrets\MachineSecrets.
      */
 
-    /** Server → bridge: list the machine's secrets (names, descriptions, when updated). */
+    /** Server → bridge: list the machine's secrets (names, descriptions, when updated, ends; revision 3 adds what ended). */
     public const SECRET_LIST = 'secret_list';
 
-    /** Server → bridge: add a secret, or replace one with `replace: true` (revision 2). */
+    /** Server → bridge: add a secret, or replace one with `replace: true` (revision 2), optionally with an end (revision 3). */
     public const SECRET_PUT = 'secret_put';
 
     /** Server → bridge: change a secret's description. */
@@ -319,6 +319,9 @@ final class MessageTypes
 
     /** Server → bridge: remove a secret. */
     public const SECRET_REMOVE = 'secret_remove';
+
+    /** Server → bridge: set or remove a secret's end (`ends_at`, `end_kind`; revision 3). */
+    public const SECRET_SET_END = 'secret_set_end';
 
     /** Bridge → server: exactly one per `secret_*` frame, same `id`. Never carries a value. */
     public const SECRET_RESULT = 'secret_result';
@@ -401,6 +404,7 @@ final class MessageTypes
             self::SECRET_PUT,
             self::SECRET_DESCRIBE,
             self::SECRET_REMOVE,
+            self::SECRET_SET_END,
             self::SECRET_RESULT,
             self::DONE,
             self::ERROR,
@@ -498,6 +502,7 @@ final class MessageTypes
             self::SECRET_PUT,
             self::SECRET_DESCRIBE,
             self::SECRET_REMOVE,
+            self::SECRET_SET_END,
             self::CANCEL,
         ];
     }

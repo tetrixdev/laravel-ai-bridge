@@ -1331,14 +1331,16 @@ class BridgeWebSocketServer
     /**
      * POST /api/secrets — Manage the secret store on the user's machine.
      *
-     * Body `{op: list|put|describe|remove, name?, description?, value?, replace?}`, checked by
-     * Secrets\SecretRequest (400 `invalid_name` / `invalid_request`). Sends the matching
+     * Body `{op: list|put|describe|remove|set_end, name?, description?, value?, replace?, ends_at?,
+     * end_kind?}`, checked by Secrets\SecretRequest (400 `invalid_name` / `invalid_request` /
+     * `invalid_end`, and `end_required` for a replace without the `ends_at` key). Sends the matching
      * `secret_*` frame with a fresh id and answers with the bridge's `secret_result`
-     * (`{ok, secrets?, replaced?, code?, error?}`). Refused without sending anything: 409
+     * (`{ok, secrets?, ended?, replaced?, code?, error?}`). Refused without sending anything: 409
      * `machine_secrets_unsupported` for a bridge whose hello had no `machine_secrets` (its
      * operator did not opt in), 409 `machine_secrets_outdated` for any operation on a bridge below
-     * revision 2 (an unreleased draft that could overwrite without saying so). 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds; a put,
-     * describe or remove that was sent and not answered (timeout, or the bridge dropped) also
+     * revision 2 (an unreleased draft that could overwrite without saying so), 409
+     * `ends_unsupported` for a put with an end or a set_end on a bridge below revision 3. 504 `timeout` after `ai-bridge.machine_secrets.timeout` seconds; a put,
+     * describe, remove or set_end that was sent and not answered (timeout, or the bridge dropped) also
      * carries `result_unknown: true`: list the secrets again before retrying.
      *
      * A put's value is never logged and never part of an answer; it lives only in this request
@@ -1363,9 +1365,12 @@ class BridgeWebSocketServer
         // Revision 2 refuses an existing name unless `replace` is true. Revision 1 was an
         // unreleased draft that overwrote without saying so, and a bridge without a revision says
         // nothing about either: neither is sent any secret_* frame, so no put can overwrite
-        // silently. The same check runs again for a frame held through a short drop, against
+        // silently. Below revision 3 a put with an end or a set_end is refused too (it would lose
+        // the end). The same checks run again for a frame held through a short drop, against
         // the bridge that comes back (awaitBridge()).
-        $refusal = \Tetrix\AiBridge\Secrets\SecretFrames::refusalFor($this->connectionManager->reachableBridgeInfo($userId));
+        $refusalFor = static fn (array $bridgeInfo): ?array => \Tetrix\AiBridge\Secrets\SecretFrames::refusalFor($bridgeInfo)
+            ?? \Tetrix\AiBridge\Secrets\SecretFrames::endsRefusalFor($bridgeInfo, $frame);
+        $refusal = $refusalFor($this->connectionManager->reachableBridgeInfo($userId));
         if ($refusal !== null) {
             $status = $refusal['_status'];
             unset($refusal['_status']);
@@ -1391,7 +1396,7 @@ class BridgeWebSocketServer
             'error' => 'The bridge disconnected before it answered, so the result is unknown: list the secrets again before retrying.',
             'result_unknown' => true,
             '_status' => 404,
-        ] : null, \Tetrix\AiBridge\Secrets\SecretFrames::refusalFor(...));
+        ] : null, $refusalFor);
     }
 
     /**

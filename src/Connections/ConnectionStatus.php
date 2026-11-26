@@ -87,7 +87,8 @@ class ConnectionStatus
      * `machine_secrets` is whether the last hello carried `machine_secrets` (its operator started
      * the bridge with `--machine-secrets`), and `machine_secrets_revision` its revision, or null.
      * Both kept while the machine is off, like `capabilities`. Whether secrets can be managed
-     * now is AiBridge::secrets()->supported(): connected, and revision 2 or newer.
+     * now is AiBridge::secrets()->supported(): connected, and revision 2 or newer; whether they
+     * can be given an end, supportsEnds(): revision 3 or newer.
      *
      * @return array{connected: bool, providers: array<int, mixed>, workspaces: array<int, mixed>, posture: array<string, mixed>, bridge_version: string|null, self_update: bool, attachment_limits: array<string, int>|null, capabilities: list<string>, mcp_apps: bool, mcp_upstream_auth: bool, machine_secrets: bool, machine_secrets_revision: int|null, bridge_prompt_max_bytes: int, upstream_status: list<array<string, mixed>>, effort_levels: list<string>}
      */

@@ -846,7 +846,8 @@ test('MessageTypes::all() contains all expected message type constants (EFF-006)
     expect($all)->toContain(MessageTypes::MCP_REQUEST);
     expect($all)->toContain(MessageTypes::UPSTREAM_AUTH_RESULT);
     expect($all)->toContain(MessageTypes::STREAM_ACK);
-    expect($all)->toHaveCount(54);
+    expect($all)->toContain(MessageTypes::SECRET_SET_END);
+    expect($all)->toHaveCount(55);
 });
 
 test('turn_input is the server\'s to send and turn_input_ack the bridge\'s', function () {

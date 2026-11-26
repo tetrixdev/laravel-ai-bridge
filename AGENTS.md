@@ -69,5 +69,6 @@ docker run --rm -u $(id -u):$(id -g) -v $PWD:/app -w /app --entrypoint php compo
 - 0009 CSRF enforced by the package on state-changing upstream routes; `tool_call_id` required on the route.
 - 0010 The repository names no downstream project (CI: `scripts/check-names.py`); history is kept, `.mailmap` maps it.
 - 0011 Machine secrets only for a bridge whose operator opted in (`hello.machine_secrets`); a value only travels in; the prompt cap is negotiated by `bridge_prompt_max_bytes`.
+- 0012 A secret may carry an end (revision 3); a replace must state its end (`ends_at` a time or null, else `end_required`), checked here before sending.
 
 Full records: [docs/decisions/](docs/decisions/README.md).

@@ -18,3 +18,4 @@ Accepted records are binding; see [AGENTS.md](../../AGENTS.md) for the one-line 
 | [0009](0009-csrf-on-upstream-routes.md) | CSRF enforced by the package on state-changing upstream routes; tool_call_id required on the browser route (supersedes 0008 in part) | accepted | 2026-10-16 |
 | [0010](0010-the-repository-names-no-downstream-project.md) | The repository names no downstream project; history is kept and mapped | accepted | 2026-11-21 |
 | [0011](0011-machine-secrets-only-with-operator-opt-in.md) | Machine secrets only for a bridge whose operator opted in; the prompt cap negotiated by its own field | accepted | 2026-11-21 |
+| [0012](0012-secret-ends-and-explicit-end-on-replace.md) | Secrets may carry an end; a replace must state it (`end_required`) | accepted | 2026-11-25 |

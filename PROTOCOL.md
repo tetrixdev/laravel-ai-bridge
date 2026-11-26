@@ -136,7 +136,7 @@ A bridge that sends `capabilities.reliable_delivery: true` in `hello` keeps its 
   - a `usage_request` or `turn_input` asked during the drop is held; one already out when the connection dropped is sent again after the reconnect while its caller still waits (the bridge takes a `message_id` once, so a message is never written twice);
   - an `mcp_request`, `upstream_auth_start` or `upstream_auth_code` asked during the drop is held; one already out when the connection dropped fails at once with `not_connected`, because it may have run and is not safe to run twice;
   - a file hand-over carries on: its bytes travel on their own HTTP connection, so an upload or download in progress is not ended by the drop, and an `upload_offer`, `file_read` or `upload_sent` due during the drop is held. A transfer that fails while its frame is held (the browser went away, a clock ran out) drops that frame: the machine is never sent it, nor an `upload_abort` / `file_read_cancel` for it;
-  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step, `machine_secrets` at revision 2 or newer for a `secret_*` frame (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported` (a `secret_*` frame to a bridge below revision 2: 409 `machine_secrets_outdated`, from 0.27.1);
+  - a held frame goes only to a bridge that can handle it. It is sent after the reconnect only when the `hello` of the bridge that came back announced what it needs: `file_uploads` for `upload_offer` / `upload_sent`, `file_downloads` for `file_read`, `turn_input` for `turn_input`, `mcp_apps` for `mcp_request`, `mcp_upstream_auth` for a sign-in step, `machine_secrets` at revision 2 or newer for a `secret_*` frame, and at revision 3 or newer for a `secret_put` with an end or a `secret_set_end` (a `usage_request` needs nothing). When an older bridge takes the machine's place without it, the frame is dropped unsent and its caller answered at once: a transfer with 409 `unsupported`, a `turn_input` with `send_failed` (`no_answer` when it went out before the drop), an exchange with 409 `<needs>_unsupported` (a `secret_*` frame to a bridge below revision 2: 409 `machine_secrets_outdated`, from 0.27.1; a `secret_put` with an end or a `secret_set_end` to a bridge below revision 3: 409 `ends_unsupported`);
   - when the grace period ends without the machine, all of it fails as it would have at the drop: usage with `not_connected`, an exchange with its `not_connected` answer, a transfer with `machine_gone`, and a `turn_input` with the new reason `connection_lost` (its turn has ended too; the caller must not count the message as delivered). A bridge without `reliable_delivery` still fails all of it at once, a `turn_input` with `no_answer`.
 
 ---
@@ -299,11 +299,12 @@ on the connection status.
 #### Additive field: `machine_secrets`
 
 ```json
-{ "type": "hello", "machine_secrets": { "revision": 2 } }
+{ "type": "hello", "machine_secrets": { "revision": 3 } }
 ```
 
 The bridge manages the machine's secret store for the app: the `secret_*` frames of
-[Secrets on the machine](#secrets-on-the-machine); `revision` versions them. A bridge sends it only
+[Secrets on the machine](#secrets-on-the-machine); `revision` versions them (2: `replace`; 3:
+a secret's end, `secret_set_end`, `ended`, and a replace that must state its end). A bridge sends it only
 when its operator started it with `--machine-secrets`, so it is absent both from a bridge that
 predates it and from one whose operator did not opt in. The server sends no `secret_*` frame to a
 bridge without it and answers the app `machine_secrets_unsupported`. Reported as
@@ -2088,7 +2089,7 @@ button means stay with the host.
 Off unless the machine's operator opts in. A bridge started with `--machine-secrets` (env
 `AI_BRIDGE_MACHINE_SECRETS=1`, ai-bridge 0.46.0+) announces `hello.machine_secrets`, and the app
 may then manage the bridge's secret store on the machine for the person: list it, add or replace
-a secret, change a description, remove one. The store is built into the bridge
+a secret, change a description, remove one, and give one an end (revision 3). The store is built into the bridge
 (`~/.ai-bridge/secrets`: one file per secret, mode 0600 from creation, descriptions and dates in
 `index.json`); the person on the machine uses the same store with `aib secret`. A store operation
 that has not finished after 15 s is answered `timeout`. A value only ever travels in: on
@@ -2099,9 +2100,10 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
 | Frame | Fields |
 |---|---|
 | `secret_list` | `{id}` |
-| `secret_put` | `{id, name, description?, value, replace?}` |
+| `secret_put` | `{id, name, description?, value, replace?, ends_at?, end_kind?}` (revision 3: `ends_at` required, a time or `null`, when `replace` is `true`) |
 | `secret_describe` | `{id, name, description}` |
 | `secret_remove` | `{id, name}` |
+| `secret_set_end` | `{id, name, ends_at, end_kind?}` (revision 3; `end_kind` required when `ends_at` is a time, omitted with `ends_at: null`: a server never sends it there, and this package refuses one `invalid_end`) |
 
 - `name`: 1 to 64 characters `[A-Za-z0-9._-]`, starting with a letter or digit, never `..`, no
   trailing newline, never `index.json` in any case (the package matches
@@ -2115,12 +2117,59 @@ that has not finished after 15 s is answered `timeout`. A value only ever travel
   existing name is refused with `exists`. Revision 1 was an unreleased draft that overwrote
   without saying so: the server sends no `secret_*` frame to a bridge below revision 2
   (`machine_secrets_outdated`).
+- `ends_at`, `end_kind` (revision 3): the secret's end. `ends_at` is an ISO 8601 UTC time with
+  second precision and a `Z` suffix (`2026-12-01T15:00:00Z`), after now and at most 10 years
+  ahead; `end_kind` is `expire` or `delete`. A time in `ends_at` always comes with `end_kind`;
+  `ends_at: null` means no end and takes no `end_kind`.
+  - **A first put** (no `replace`): `ends_at` is optional; without it, or with `null`, the secret
+    has no end.
+  - **A replace** (`replace: true`) must carry the `ends_at` key: a time (with `end_kind`), or
+    `null` for deliberately no end. A replace without the key is refused `end_required`, so a
+    caller that forgot the end can never silently make a short-lived secret permanent. The end
+    sent is the end the secret has afterwards (the old one is not kept), and a replace of an
+    expired secret renews it.
+
+  On `secret_put` to a bridge below revision 3 a time in `ends_at` is never sent
+  (`ends_unsupported`, below); a replace's `ends_at: null` is, and such a bridge ignores it. On
+  `secret_set_end`, `ends_at: null` removes the end (`end_kind` is then omitted); it never touches
+  the value or the description, and is refused `not_found` for an absent secret and `ended` for
+  one that already expired. The server sends no `secret_put` with an end and no
+  `secret_set_end` to a bridge below revision 3 (`ends_unsupported`): it would keep the secret
+  forever.
+
+```json
+{"type": "secret_put", "id": "sec-…", "name": "deploy-token", "value": "…", "ends_at": "2026-11-24T17:00:00Z", "end_kind": "delete"}
+{"type": "secret_put", "id": "sec-…", "name": "deploy-token", "value": "…", "replace": true, "ends_at": "2026-12-24T17:00:00Z", "end_kind": "delete"}
+{"type": "secret_put", "id": "sec-…", "name": "ci-token", "value": "…", "replace": true, "ends_at": null}
+{"type": "secret_set_end", "id": "sec-…", "name": "api-key", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire"}
+{"type": "secret_set_end", "id": "sec-…", "name": "api-key", "ends_at": null}
+```
+
+At `ends_at` the bridge ends the secret, checking before every read of its store, at start and
+every 60 s: `expire` removes the value and keeps the entry with `expired_at` (equal to
+`ends_at`), so it is still listed and can never be used again until a put with `replace`
+renews it; `delete` removes the value and the entry. Every end handled is recorded as
+`{name, kind, ended_at}` (`ended_at` equal to `ends_at`), for 30 days and at most 100 records.
 
 ### Bridge → Server: `secret_result`
 
-Exactly one per request, with its `id`: `{id, ok, secrets?, replaced?, code?, error?}`.
-`secrets` (on `secret_list`) is `[{name, description|null, updated_at|null}]`; `replaced` (on a
-successful `secret_put`, revision 2) says whether an existing secret was overwritten. Codes:
+Exactly one per request, with its `id`: `{id, ok, secrets?, ended?, replaced?, code?, error?}`.
+`secrets` (on `secret_list`) is `[{name, description|null, updated_at|null, ends_at|null,
+end_kind|null, expired_at|null}]` (the end fields from revision 3); `ended` (on `secret_list`,
+revision 3) is `[{name, kind, ended_at}]`; `replaced` (on a successful `secret_put`, revision 2)
+says whether an existing secret was overwritten. The server keeps only these fields, drops a row
+with a bad name (and an `ended` record with an unknown `kind`), nulls an end that is not a
+whole pair, and nulls an `ends_at`, `expired_at` or `ended_at` that is not a real moment in the
+wire form above (`updated_at` is the bridge's own timestamp and only kept when short).
+
+```json
+{"type": "secret_result", "id": "sec-…", "ok": true, "secrets": [
+  {"name": "ci-token", "description": "…", "updated_at": "…", "ends_at": null, "end_kind": null, "expired_at": null},
+  {"name": "api-key", "description": "…", "updated_at": "…", "ends_at": "2026-12-01T15:00:00Z", "end_kind": "expire", "expired_at": "2026-12-01T15:00:00Z"}
+], "ended": [{"name": "deploy-token", "kind": "delete", "ended_at": "2026-11-24T17:00:00Z"}]}
+```
+
+Codes:
 
 | Code | Meaning |
 |---|---|
@@ -2128,17 +2177,24 @@ successful `secret_put`, revision 2) says whether an existing secret was overwri
 | `not_found` | No secret of that name |
 | `exists` | `secret_put` without `replace` for a name that exists |
 | `invalid_name` / `invalid_request` | The bridge refused the name or the request |
+| `invalid_end` | The end is malformed, not in the future, or more than 10 years ahead (revision 3) |
+| `end_required` | `secret_put` with `replace: true` but without the `ends_at` key (revision 3) |
+| `ended` | `secret_set_end` on a secret that already expired (revision 3) |
 | `timeout` | The store did not finish within the bridge's 15 s: the result is unknown, list the secrets again before retrying |
 | `failed` | Anything else (the server maps an unknown code to this) |
 
 ### The serve process and the PHP API
 
-`POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove, name?,
-description?, value?, replace?}`, checks it with the rules above (400 `invalid_name` /
-`invalid_request`), sends the frame and answers with the `secret_result`. Without
-`hello.machine_secrets`: 409 `machine_secrets_unsupported`; a bridge below revision 2 (or without
-one): 409 `machine_secrets_outdated`; nothing is sent in either case. No answer within
-`ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe or remove that was sent
+`POST /api/secrets` (internal API, relay token) takes `{op: list|put|describe|remove|set_end,
+name?, description?, value?, replace?, ends_at?, end_kind?}`, checks it with the rules above (400
+`invalid_name` / `invalid_request` / `invalid_end`; `end_required` for a put with `replace: true`
+and no `ends_at` key), sends the frame and answers with the
+`secret_result`. Without `hello.machine_secrets`: 409 `machine_secrets_unsupported`; a bridge
+below revision 2 (or without one): 409 `machine_secrets_outdated`; a put with an end or a
+`set_end` to a bridge below revision 3: 409 `ends_unsupported`; nothing is sent in any of these
+cases, and a frame held through a short drop is checked the same way against the bridge that
+comes back. No answer within
+`ai-bridge.machine_secrets.timeout` (20 s): 504 `timeout`. A put, describe, remove or set_end that was sent
 and not answered (504, or the bridge dropped: 404 `not_connected`) carries `result_unknown: true`;
 the bridge's own `timeout` is passed on as a 200 `secret_result`, which `AiBridge::secrets()` marks
 `result_unknown: true` for a write.
@@ -2146,7 +2202,14 @@ the bridge's own `timeout` is passed on as a 200 `secret_result`, which `AiBridg
 `AiBridge::secrets()` (`Secrets\MachineSecrets`), for a `Connection` the caller already resolved
 through its own scope: `supported($connection)`, `list($connection)`,
 `put($connection, $name, $value, $description = null, $replace = false)`,
-`describe($connection, $name, $description)`, `remove($connection, $name)`. Each answers
+`describe($connection, $name, $description)`, `remove($connection, $name)`, and from revision 3
+`supportsEnds($connection)`, `put(..., ?\DateTimeInterface $endsAt = null, ?string $endKind = null,
+bool $noEnd = false)` and `setEnd($connection, $name, ?\DateTimeInterface $endsAt, ?string $endKind
+= null)` (the end sent in UTC, sub-seconds rounded up to the next whole second, `$endKind`
+`expire` by default). A put with `replace: true` must pass `$endsAt` or `$noEnd: true` (sent as
+`ends_at: null`); with neither it is refused `end_required`, with both `invalid_end`, before
+anything is sent. A put with an end or a `setEnd()` for a connected
+bridge below revision 3 is answered `ends_unsupported` without anything being sent. Each answers
 `{ok, ...}` and never throws for a refusal; a write whose outcome cannot be known (`timeout`,
 `unreachable`, a drop after sending) carries `result_unknown: true`.
 
@@ -2386,7 +2449,7 @@ Treating the first `result` as terminal is what this replaces, and it was not a 
 | `file_read` / `file_read_cancel` | Asking for a file the machine recorded |
 | `mcp_request` | A view's `resources/read` or `tools/call` for an upstream (needs `hello.mcp_apps`) |
 | `upstream_auth_start` / `upstream_auth_code` / `upstream_auth_forget` | Upstream OAuth sign-in (needs `hello.mcp_upstream_auth`) |
-| `secret_list` / `secret_put` / `secret_describe` / `secret_remove` | Manage the machine's secret store (needs `hello.machine_secrets`) |
+| `secret_list` / `secret_put` / `secret_describe` / `secret_remove` / `secret_set_end` | Manage the machine's secret store (needs `hello.machine_secrets`; `secret_set_end` and a `secret_put` with an end need revision 3) |
 
 ---
 
@@ -2437,7 +2500,7 @@ The protocol version is exchanged during handshake (`hello.version`). The server
 
 **Upstream MCP Apps and sign-in do not bump the version.** `hello.mcp_upstream_auth`, `welcome.upstream_oauth`, `tool_result.ui.server`, `mcp_request` / `mcp_result` and the `upstream_*` frames are additive; a server sends none of its frames to a bridge that did not announce the matching hello field, and an older bridge ignores `welcome.upstream_oauth`.
 
-**Machine secrets do not bump the version.** `hello.machine_secrets`, the four `secret_*` frames and `secret_result` are additive; their shape is versioned by `hello.machine_secrets.revision`, and a server sends none of them to a bridge without the field.
+**Machine secrets do not bump the version.** `hello.machine_secrets`, the five `secret_*` frames and `secret_result` are additive; their shape is versioned by `hello.machine_secrets.revision`, and a server sends none of them to a bridge without the field.
 
 **The larger prompt cap does not bump the version.** `hello.bridge_prompt_max_bytes` is additive; a server keeps `bridge_prompt.text` within 8 KB for a bridge without it.
 
